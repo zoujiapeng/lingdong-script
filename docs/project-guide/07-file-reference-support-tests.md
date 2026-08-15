@@ -214,7 +214,7 @@ flowchart LR
 | `package.json` | npm 权威入口、依赖、Electron Builder 配置。主入口 `dist/main/main.js`，CLI bin `dist/cli/cli/index.js`；开发端口 5200；打包 appId `com.lingdong.script`，产物目录 `release/`。 |
 | `package-lock.json` | npm lockfile v3，锁定 `package.json` 的完整依赖树；由 npm 生成，`npm ci`/CI 消费，不手工维护。 |
 | `pytest.ini` | 根测试默认只收集 `tests/`；声明 `real` 与 `slow` 标记。WinPilot 测试必须显式给路径。 |
-| `requirements.txt` | Python 单一依赖清单：CV/OCR、Windows UIA/Win32、输入、调度、FastAPI/Uvicorn、OpenAI、MCP、Pydantic/jsonschema。当前 vNext 物理执行线不依赖 `pyautogui`；旧 `ActionHandler` 只把它作为截图 fallback，但 `perception/app_adapter.py`、`rpa_keywords/desktop_actions.py`、`features/system_control_features.py` 等兼容模块仍用它注入真实输入。 |
+| `requirements.txt` | Python 单一依赖清单：CV/OCR、Windows UIA/Win32、输入、调度、FastAPI/Uvicorn、OpenAI、MCP、Pydantic。当前 vNext 物理执行线不依赖 `pyautogui`；旧 `ActionHandler` 只把它作为截图 fallback，但 `perception/app_adapter.py`、`rpa_keywords/desktop_actions.py`、`features/system_control_features.py` 等兼容模块仍用它注入真实输入。 |
 | `tsconfig.json` | Renderer 严格 no-emit 检查，ES2021/DOM/bundler/React JSX，含 `src/renderer`。 |
 | `tsconfig.main.json` | Electron main/shared 编译到 `dist/`，CommonJS/ES2020，并生成 source map。 |
 | `tsconfig.cli.json` | CLI 与共享 renderer types/utils 编译到 `dist/cli`，CommonJS。 |
@@ -553,15 +553,13 @@ flowchart LR
 | `python/winpilot_home/tests/test_vnext_desktop_workspace.py` | 13 | unrelated foreground 不采用、成功后 stable successor、discarded full-desktop successor、modal owner。 |
 | `python/winpilot_home/tests/test_vnext_evidence_registry.py` | 7 | 同 id 同内容幂等、冲突/错 scope/value type 无写入、append_many 原子。 |
 | `python/winpilot_home/tests/test_vnext_execution_profile.py` | 25 | profile strict versioned canonical wire、plain complete object、拒绝 legacy alias/错误 literal。 |
-| `python/winpilot_home/tests/test_vnext_kernel_boundaries.py` | 14 | kernel 仅 stdlib/自身 pure package、vnext root 无 eager/lazy import、evidence plane 默认不可达。 |
+| `python/winpilot_home/tests/test_vnext_kernel_boundaries.py` | 14 | kernel 仅 stdlib/自身 pure package、vnext root 无 eager/lazy import、主组合根与旧执行链保持隔离。 |
 | `python/winpilot_home/tests/test_vnext_live_canary_e2e_harness.py` | 44 | 可见 canary runner 的 handoff、精确客户端 selector、固定两 seed/family、artifact/trace/input 安全。 |
 | `python/winpilot_home/tests/test_vnext_live_model_roles.py` | 26 | Actor 零 retry client、首轮零 system prompt、observe 后同一 actor、原生 history/tool exchange。 |
 | `python/winpilot_home/tests/test_vnext_mission.py` | 52 | mission definition/obligation/event strict wire、canonical hash、state transition/claim/block。 |
 | `python/winpilot_home/tests/test_vnext_mission_completion_verifier.py` | 14 | verifier request strict replayable scope、只接受完整可信 evidence，拒绝 actor/telemetry 自证。 |
 | `python/winpilot_home/tests/test_vnext_mission_runtime.py` | 36 | approved action exactly once、跨帧 held drag lease、keep_holding/release/stop/claim 顺序。 |
 | `python/winpilot_home/tests/test_vnext_runtime_evidence_persistence.py` | 15 | canonical UTF-8 JSONL、重复 event/key 拒绝、artifact immutable/hash/path 安全。 |
-| `python/winpilot_home/tests/test_vnext_runtime_evidence_plane.py` | 48 | actor decision hash 无 reasoning、private field 拒绝、envelope hash/stale、runtime attempt/evidence journal。 |
-| `python/winpilot_home/tests/test_vnext_tool_argument_validation.py` | 13 | 合法参数 detached copy、jsonschema 不 coercion、组合关键词/format/ref 与错误路径。 |
 | `python/winpilot_home/tests/test_vnext_verification_contracts.py` | 17 | assessment identity-free strict JSON、plain exact fields、字符串不静默归一化、trust/evidence。 |
 | `python/winpilot_home/tests/test_vnext_wire_contracts.py` | 29 | 所有 mission wire parser 精确 roundtrip、plain dict/完整字段、拒绝 legacy aliases/duplicate key。 |
 | `python/winpilot_home/tests/test_web_search.py` | 2 | DuckDuckGo compact result；配置 Serper 失败后回 Bing。网络调用被 mock。 |

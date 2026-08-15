@@ -34,7 +34,10 @@ from winpilot.action.raw_device import (
     RawDeviceBackends,
     RawDeviceExecutor,
 )
-from winpilot.action.desktop_queue import DesktopActionCanceled
+from winpilot.action.desktop_queue import (
+    DESKTOP_ACTION_QUEUE,
+    DesktopActionCanceled,
+)
 from winpilot.action.replay_policy import MutationOutcome
 from winpilot.visual_runtime.frame_authority import FrameAuthority
 from winpilot.utils.screenshot import Region
@@ -47,7 +50,6 @@ from winpilot.vnext.actor import (
     ACTOR_ENVELOPE_FORMAT,
     ACTOR_PROPOSAL_FORMAT,
     ActorDecisionEnvelope,
-    InvalidActorEnvelope,
 )
 from winpilot.vnext.actor.envelope import _decision_id
 from winpilot.vnext.desktop_adapter import (
@@ -167,6 +169,12 @@ class _RawHarness:
     result: bool | None = True
     before_guard: Callable[[], None] | None = None
     between_double_guards: Callable[[], None] | None = None
+    sequence_error_kind: str | None = None
+    sequence_completed_events: int | None = None
+    sequence_reports_progress: bool = True
+    drag_cleanup_results: list[bool | None] | None = None
+    on_drag_cleanup: Callable[[], None] | None = None
+    on_input_sequence_result: Callable[[], None] | None = None
 
     def __post_init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
@@ -287,13 +295,20 @@ class _RawHarness:
     ) -> RawBackendResult:
         if cleanup_only:
             self.calls.append(("drag_cleanup", (hold_token, hwnd)))
+            if self.on_drag_cleanup is not None:
+                self.on_drag_cleanup()
+            cleanup_result = (
+                self.drag_cleanup_results.pop(0)
+                if self.drag_cleanup_results
+                else True
+            )
             return RawBackendResult(
-                True,
+                cleanup_result,
                 {
                     "via": "physical_sendinput",
                     "segment_phase": "cleanup",
                     "held_before": True,
-                    "held_after": False,
+                    "held_after": cleanup_result is not True,
                 },
             )
         if pointer_already_held or keep_holding:
@@ -410,18 +425,25 @@ class _RawHarness:
             decision = final_keyboard_guard()
             if decision is not FinalKeyboardGuardDecision.ADMITTED:
                 return RawBackendResult(False, {"guard_decision": decision.value})
-        return RawBackendResult(
-            self.result,
-            {
-                "via": "physical_sendinput",
-                "event_count": len(events),
-                "completed_events": len(events),
-                "moves_completed": sum(
-                    event.kind is InputEventKind.MOVE for event in events
-                ),
-                "cursor_restored": False,
-            },
-        )
+        facts = {
+            "via": "physical_sendinput",
+            "event_count": len(events),
+            "moves_completed": sum(
+                event.kind is InputEventKind.MOVE for event in events
+            ),
+            "cursor_restored": False,
+        }
+        if self.sequence_reports_progress:
+            facts["completed_events"] = (
+                len(events)
+                if self.sequence_completed_events is None
+                else self.sequence_completed_events
+            )
+        if self.sequence_error_kind is not None:
+            facts["error_kind"] = self.sequence_error_kind
+        if self.on_input_sequence_result is not None:
+            self.on_input_sequence_result()
+        return RawBackendResult(self.result, facts)
 
     def executor(self) -> RawDeviceExecutor:
         return RawDeviceExecutor(
@@ -836,6 +858,40 @@ def test_exact_atomic_surface_completes_once_with_model_visible_post_frame(
             ),
             PhysicalInputEvent(InputEventKind.KEY_UP, key="shift"),
         )
+
+
+def test_prepare_rejection_preserves_the_mechanical_reason_for_the_actor() -> None:
+    harness = _harness(
+        "input_sequence",
+        action_args={"sequence": "bogus"},
+    )
+
+    transition = harness.adapter.execute(harness.envelope)
+
+    assert transition.outcome is ControllerOutcome.REJECTED
+    assert transition.input_completed is False
+    assert transition.error_kind == (
+        "invalid_atomic_action: invalid input command 1 'bogus': "
+        "unknown input command"
+    )
+    assert harness.raw.calls == []
+
+
+def test_drag_ignores_a_surplus_click_duration_hint() -> None:
+    harness = _harness(
+        "drag",
+        action_args={
+            "image_path": [[50.0, 40.0], [80.0, 60.0]],
+            "press_duration_ms": "200",
+        },
+    )
+
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert harness.raw.calls[0][0] == "drag"
 
 
 def test_screen_first_click_is_admitted_on_any_visible_window(
@@ -1708,6 +1764,173 @@ def test_unknown_raw_result_is_never_replayed() -> None:
     )
 
 
+def test_unknown_sequence_propagates_persistent_release_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from winpilot.action import executor
+
+    monkeypatch.setattr(executor, "release_held_input_state", lambda: False)
+    harness = _harness(
+        "input_sequence",
+        raw_result=None,
+        action_args={"sequence": "mouse_down left"},
+    )
+    harness.raw.sequence_error_kind = "release_cleanup_incomplete"
+
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.UNKNOWN
+    assert attempt.transition.input_completed is None
+    assert attempt.transition.error_kind == "release_cleanup_incomplete"
+    assert len(harness.raw.calls) == 1
+
+
+def test_transient_release_cleanup_recovers_to_fresh_screen_redecision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from winpilot.action import executor
+
+    monkeypatch.setattr(executor, "release_held_input_state", lambda: True)
+    harness = _harness(
+        "input_sequence",
+        raw_result=None,
+        action_args={"sequence": "mouse_down left"},
+    )
+    harness.raw.sequence_error_kind = "release_cleanup_incomplete"
+
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.UNKNOWN
+    assert attempt.transition.input_completed is None
+    assert attempt.transition.error_kind == (
+        "input_outcome_unknown_after_release_cleanup"
+    )
+    assert len(harness.raw.calls) == 1
+
+
+def test_release_cleanup_stays_in_the_original_physical_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from winpilot.action import executor
+
+    original_release_held_input_state = executor.release_held_input_state
+    harness = _harness(
+        "drag",
+        action_args={
+            "image_path": [[50.0, 40.0], [80.0, 60.0]],
+            "keep_holding": True,
+        },
+    )
+    compete = threading.Event()
+    competitor_done = threading.Event()
+    order: list[str] = []
+    competitor_errors: list[BaseException] = []
+
+    def competitor() -> None:
+        compete.wait()
+        try:
+            DESKTOP_ACTION_QUEUE.run(
+                "competing_mouse_down",
+                lambda: order.append("competitor"),
+                target_hwnd=HWND,
+                scope="physical",
+            )
+        except BaseException as exc:  # pragma: no cover - assertion aid
+            competitor_errors.append(exc)
+        finally:
+            competitor_done.set()
+
+    thread = threading.Thread(target=competitor)
+    thread.start()
+    try:
+        first = harness.run()
+        assert first.controller_error is None
+        assert first.transition is not None
+        assert first.transition.outcome is ControllerOutcome.COMPLETED
+        held = harness.adapter.pointer_state()
+        assert held.lease_id is not None
+
+        current = harness.authority.current
+        assert current is not None
+        sequence_envelope = _replace_action_args(
+            _envelope(current, harness.binding, "input_sequence"),
+            {"sequence": "key_down ctrl"},
+        )
+        sequence_envelope = _replace_envelope(
+            sequence_envelope,
+            turn_index=1,
+            pointer_disposition="held",
+            pointer_lease_id=held.lease_id,
+        )
+        harness.raw.result = None
+        harness.raw.sequence_error_kind = "release_cleanup_incomplete"
+        harness.raw.drag_cleanup_results = [False, True]
+        cleanup_count = 0
+
+        def release_generic_input() -> bool:
+            nonlocal cleanup_count
+            cleanup_count += 1
+            order.append(f"generic-cleanup-{cleanup_count}")
+            assert not competitor_done.is_set()
+            return True
+
+        def record_drag_cleanup() -> None:
+            count = sum(item.startswith("pointer-cleanup") for item in order) + 1
+            order.append(f"pointer-cleanup-{count}")
+            assert not competitor_done.is_set()
+
+        def queue_competitor_before_raw_returns() -> None:
+            order.append("raw-action")
+            compete.set()
+            for _attempt in range(200):
+                if DESKTOP_ACTION_QUEUE.status()["resource_waiters"]:
+                    break
+                threading.Event().wait(0.005)
+            assert DESKTOP_ACTION_QUEUE.status()["resource_waiters"] >= 1
+
+        monkeypatch.setattr(
+            executor,
+            "release_held_input_state",
+            release_generic_input,
+        )
+        harness.raw.on_drag_cleanup = record_drag_cleanup
+        harness.raw.on_input_sequence_result = (
+            queue_competitor_before_raw_returns
+        )
+
+        transition = harness.adapter.execute(sequence_envelope)
+        thread.join(timeout=2.0)
+
+        assert transition.outcome is ControllerOutcome.UNKNOWN
+        assert transition.error_kind == (
+            "input_outcome_unknown_after_release_cleanup"
+        )
+        assert not thread.is_alive()
+        assert competitor_errors == []
+        assert order == [
+            "raw-action",
+            "pointer-cleanup-1",
+            "generic-cleanup-1",
+            "pointer-cleanup-2",
+            "generic-cleanup-2",
+            "competitor",
+        ]
+        assert harness.adapter.pointer_state().disposition.value == "released"
+    finally:
+        compete.set()
+        thread.join(timeout=2.0)
+        monkeypatch.setattr(
+            executor,
+            "release_held_input_state",
+            original_release_held_input_state,
+        )
+        harness.adapter.close()
+
+
 def test_guard_rejection_backend_fact_error_kind_reaches_transition() -> None:
     from winpilot.vnext.desktop_adapter import atomic
 
@@ -1863,6 +2086,27 @@ def test_submitted_point_mapping_is_sent_without_local_target_snapping() -> None
     assert attempt.transition is not None
     assert attempt.transition.outcome is ControllerOutcome.COMPLETED
     assert harness.raw.calls == [("scroll", (*mapped_point, -713, None))]
+    assert harness.probe.hit_test_calls == 0
+
+
+def test_out_of_frame_pointer_is_not_a_runtime_gate() -> None:
+    arguments = {
+        "image_x": 50.0,
+        "image_y": 975.0,
+        "amount": -120,
+    }
+    harness = _harness(
+        "scroll",
+        action_args=arguments,
+        expected_hit_point=POINT,
+    )
+
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert harness.raw.calls == [("scroll", (60, 995, -120, None))]
     assert harness.probe.hit_test_calls == 0
 
 
@@ -2109,6 +2353,182 @@ def test_held_drag_releases_at_current_point_without_an_extra_move() -> None:
         harness.adapter.close()
 
 
+def test_confirmed_not_applied_held_drag_begin_leaves_no_pointer_lease() -> None:
+    harness = _harness(
+        "drag",
+        action_args={
+            "image_path": [[50.0, 40.0], [80.0, 60.0]],
+            "keep_holding": True,
+        },
+    )
+    harness.raw.result = False
+
+    try:
+        attempt = harness.run()
+
+        assert attempt.controller_error is None
+        assert attempt.transition is not None
+        assert attempt.transition.outcome is ControllerOutcome.REJECTED
+        assert attempt.transition.input_completed is False
+        state = harness.adapter.pointer_state()
+        assert state.disposition.value == "released"
+        assert state.lease_id is None
+        assert not any(call[0] == "drag_cleanup" for call in harness.raw.calls)
+    finally:
+        harness.adapter.close()
+
+
+def test_rejected_ordinary_action_preserves_a_healthy_held_pointer() -> None:
+    harness = _harness(
+        "drag",
+        action_args={
+            "image_path": [[50.0, 40.0], [80.0, 60.0]],
+            "keep_holding": True,
+        },
+    )
+
+    try:
+        first = harness.run()
+        assert first.controller_error is None
+        assert first.transition is not None
+        assert first.transition.outcome is ControllerOutcome.COMPLETED
+        held = harness.adapter.pointer_state()
+        assert held.disposition.value == "held"
+        assert held.lease_id is not None
+
+        current = harness.authority.current
+        assert current is not None
+        click_envelope = _replace_envelope(
+            _envelope(current, harness.binding, "click"),
+            turn_index=1,
+            pointer_disposition="held",
+            pointer_lease_id=held.lease_id,
+        )
+        harness.raw.result = False
+
+        rejected = harness.adapter.execute(click_envelope)
+
+        assert rejected.outcome is ControllerOutcome.REJECTED
+        assert rejected.input_completed is False
+        still_held = harness.adapter.pointer_state()
+        assert still_held.disposition.value == "held"
+        assert still_held.lease_id == held.lease_id
+        assert not any(call[0] == "drag_cleanup" for call in harness.raw.calls)
+
+        release_envelope = _replace_action_args(
+            _envelope(current, harness.binding, "input_sequence"),
+            {"sequence": "mouse_up left"},
+        )
+        release_envelope = _replace_envelope(
+            release_envelope,
+            turn_index=2,
+            pointer_disposition="held",
+            pointer_lease_id=held.lease_id,
+        )
+        harness.raw.result = True
+
+        released = harness.adapter.execute(release_envelope)
+
+        assert released.outcome is ControllerOutcome.COMPLETED
+        assert released.input_completed is True
+        state = harness.adapter.pointer_state()
+        assert state.disposition.value == "released"
+        assert state.lease_id is None
+        assert not any(call[0] == "drag_cleanup" for call in harness.raw.calls)
+    finally:
+        harness.adapter.close()
+
+
+def test_confirmed_sequence_mouse_up_releases_pointer_after_later_unknown(
+) -> None:
+    harness = _harness(
+        "drag",
+        action_args={
+            "image_path": [[50.0, 40.0], [80.0, 60.0]],
+            "keep_holding": True,
+        },
+    )
+
+    try:
+        first = harness.run()
+        assert first.controller_error is None
+        assert first.transition is not None
+        assert first.transition.outcome is ControllerOutcome.COMPLETED
+        held = harness.adapter.pointer_state()
+        assert held.disposition.value == "held"
+        assert held.lease_id is not None
+
+        current = harness.authority.current
+        assert current is not None
+        release_envelope = _replace_action_args(
+            _envelope(current, harness.binding, "input_sequence"),
+            {"sequence": "mouse_up left; wait 10"},
+        )
+        release_envelope = _replace_envelope(
+            release_envelope,
+            turn_index=1,
+            pointer_disposition="held",
+            pointer_lease_id=held.lease_id,
+        )
+        harness.raw.result = None
+        harness.raw.sequence_error_kind = "stop_requested"
+        harness.raw.sequence_completed_events = 1
+
+        partial = harness.adapter.execute(release_envelope)
+
+        assert partial.outcome is ControllerOutcome.UNKNOWN
+        assert partial.input_completed is None
+        assert partial.error_kind == "stop_requested"
+        released = harness.adapter.pointer_state()
+        assert released.disposition.value == "released"
+        assert released.lease_id is None
+        assert not any(call[0] == "drag_cleanup" for call in harness.raw.calls)
+    finally:
+        harness.adapter.close()
+
+
+def test_successful_sequence_without_progress_facts_releases_pointer() -> None:
+    harness = _harness(
+        "drag",
+        action_args={
+            "image_path": [[50.0, 40.0], [80.0, 60.0]],
+            "keep_holding": True,
+        },
+    )
+
+    try:
+        first = harness.run()
+        assert first.transition is not None
+        assert first.transition.outcome is ControllerOutcome.COMPLETED
+        held = harness.adapter.pointer_state()
+        assert held.lease_id is not None
+
+        current = harness.authority.current
+        assert current is not None
+        release_envelope = _replace_action_args(
+            _envelope(current, harness.binding, "input_sequence"),
+            {"sequence": "mouse_up left"},
+        )
+        release_envelope = _replace_envelope(
+            release_envelope,
+            turn_index=1,
+            pointer_disposition="held",
+            pointer_lease_id=held.lease_id,
+        )
+        harness.raw.sequence_reports_progress = False
+
+        released = harness.adapter.execute(release_envelope)
+
+        assert released.outcome is ControllerOutcome.COMPLETED
+        assert released.input_completed is True
+        state = harness.adapter.pointer_state()
+        assert state.disposition.value == "released"
+        assert state.lease_id is None
+        assert not any(call[0] == "drag_cleanup" for call in harness.raw.calls)
+    finally:
+        harness.adapter.close()
+
+
 def test_adapter_close_retries_then_releases_an_unfinished_held_drag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2155,6 +2575,26 @@ def test_adapter_close_retries_then_releases_an_unfinished_held_drag(
         )
     finally:
         harness.adapter.close()
+
+
+def test_adapter_close_retries_global_input_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from winpilot.action import executor
+
+    attempts = 0
+
+    def release() -> bool:
+        nonlocal attempts
+        attempts += 1
+        return attempts >= 2
+
+    monkeypatch.setattr(executor, "release_held_input_state", release)
+    harness = _harness("click")
+
+    harness.adapter.close()
+
+    assert attempts == 2
 
 
 def test_closed_adapter_rejects_new_input() -> None:
@@ -2253,21 +2693,6 @@ def test_adapter_package_is_one_narrow_single_composition_owner() -> None:
     assert product_importers == [
         "winpilot/orchestrator/live_agent.py"
     ]
-
-
-def test_execute_revalidates_a_forged_envelope_instance() -> None:
-    harness = _harness("click")
-    forged = ActorDecisionEnvelope.from_dict(harness.envelope.to_dict())
-    forged.__dict__["frame_id"] = forged.frame_id + 1
-
-    with pytest.raises(
-        InvalidActorEnvelope,
-        match="not canonical",
-    ):
-        harness.adapter.execute(forged)
-
-    assert harness.raw.calls == []
-    assert harness.trace.records == []
 
 
 @pytest.mark.parametrize(

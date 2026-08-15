@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -29,7 +29,6 @@ from ...action.raw_device import (
     ClickMechanism,
     HotkeyChord,
     InputEventKind,
-    MAX_INPUT_SEQUENCE_EVENTS,
     MAX_POINTER_DURATION_MS,
     MAX_TYPE_TEXT_CODEPOINTS,
     MouseButton,
@@ -38,6 +37,7 @@ from ...action.raw_device import (
     RawActionReceipt,
     RawBackendResult,
     RawDeviceExecutor,
+    confirmed_input_event_prefix,
 )
 from ...action.replay_policy import MutationOutcome
 from ...utils.log import BUS
@@ -340,7 +340,7 @@ class AtomicDesktopAdapter:
                 and not self._pointer_uncertain
                 and self._clock() >= lease.expires_at
             ):
-                self._release_held_pointer_locked()
+                self._release_held_pointer()
                 lease = self._held_pointer
             if lease is None:
                 return PointerLeaseState(PointerDisposition.RELEASED)
@@ -360,11 +360,11 @@ class AtomicDesktopAdapter:
         with self._pointer_lock:
             if self._closed:
                 return
-            released = self._release_held_pointer_locked()
-            if not released:
-                # One bounded retry handles a transient backend uncertainty
-                # without turning close into an unbounded input loop.
-                released = self._release_held_pointer_locked()
+            released = DESKTOP_ACTION_QUEUE.run(
+                "atomic_input_cleanup",
+                self._release_all_input_locked,
+                scope="physical",
+            )
             if released:
                 self._closed = True
         if not released:
@@ -400,6 +400,8 @@ class AtomicDesktopAdapter:
         except Exception:
             self._release_held_pointer()
             raise
+        if transition.error_kind == "release_cleanup_incomplete":
+            return transition
         preserves_hold = bool(
             transition.outcome is ControllerOutcome.COMPLETED
             and transition.input_completed
@@ -412,44 +414,42 @@ class AtomicDesktopAdapter:
                 )
                 or (
                     held_before
-                    and not self._proposal_releases_held_pointer(envelope)
+                    and self._held_pointer is not None
                 )
             )
         )
-        if not preserves_hold and not self._release_held_pointer():
+        rejected_without_input_preserves_hold = bool(
+            held_before
+            and self._held_pointer is not None
+            and not self._pointer_uncertain
+            and transition.outcome is ControllerOutcome.REJECTED
+            and transition.input_completed is False
+            and not (stop_event is not None and stop_event.is_set())
+        )
+        if (
+            not preserves_hold
+            and not rejected_without_input_preserves_hold
+            and not self._release_held_pointer()
+        ):
             return self._unknown_transition(
                 envelope,
                 transition.action,
                 input_completed=transition.input_completed,
+                error_kind="release_cleanup_incomplete",
             )
         return transition
 
-    def _proposal_releases_held_pointer(
-        self,
-        envelope: ActorDecisionEnvelope,
-    ) -> bool:
-        """Recognize only an explicit model-requested release.
+    def _release_all_input_locked(self) -> bool:
+        from ...action.executor import release_held_input_state
 
-        Healthy held input persists across ordinary mouse, wheel, keyboard and
-        mixed-sequence actions.  State is otherwise used only for cleanup.
-        """
-
-        proposal = envelope.proposal
-        if type(proposal) is not DesktopActionProposal:
-            return False
-        if proposal.action == "drag":
-            return proposal.args.get("keep_holding") is not True
-        if proposal.action != "input_sequence" or self._held_pointer is None:
-            return False
-        try:
-            steps = parse_input_sequence(proposal.args.get("sequence"))
-        except Exception:
-            return False
-        button = self._held_pointer.button.value
-        return any(
-            step.kind == InputEventKind.MOUSE_UP.value and step.button == button
-            for step in steps
-        )
+        released = False
+        for _attempt in range(2):
+            pointer_released = self._release_held_pointer_locked()
+            sequence_released = release_held_input_state()
+            released = pointer_released and sequence_released
+            if released:
+                break
+        return released
 
     def _execute_once(
         self,
@@ -463,7 +463,6 @@ class AtomicDesktopAdapter:
             raise TypeError(
                 "AtomicDesktopAdapter requires ActorDecisionEnvelope"
             )
-        envelope = ActorDecisionEnvelope.from_dict(envelope.to_dict())
         proposal = envelope.proposal
         if type(proposal) is not DesktopActionProposal:
             raise ValueError(
@@ -475,8 +474,10 @@ class AtomicDesktopAdapter:
 
         try:
             prepared = self._prepare_action(envelope, proposal)
-        except Exception:
-            receipt = self._not_started(action, "invalid_atomic_action")
+        except Exception as exc:
+            detail = str(exc).strip() or type(exc).__name__
+            error_kind = f"invalid_atomic_action: {detail}"[:500]
+            receipt = self._not_started(action, error_kind)
             self._record_receipt(
                 receipt,
                 envelope,
@@ -487,7 +488,6 @@ class AtomicDesktopAdapter:
                 action,
                 error_kind=receipt.error_kind,
             )
-
         try:
             matched, pinned = self._authority.run_if_current(
                 envelope,
@@ -508,6 +508,7 @@ class AtomicDesktopAdapter:
                 envelope,
                 action,
                 input_completed=None,
+                error_kind=receipt.error_kind,
             )
 
         if not matched or pinned is None:
@@ -532,6 +533,7 @@ class AtomicDesktopAdapter:
                 envelope,
                 action,
                 input_completed=receipt.input_completed,
+                error_kind=self._receipt_error_kind(receipt),
             )
         if receipt.input_completed is False:
             return self._rejected(
@@ -564,6 +566,7 @@ class AtomicDesktopAdapter:
                 envelope,
                 action,
                 input_completed=receipt.input_completed,
+                error_kind=self._receipt_error_kind(receipt),
             )
 
         post_frame: RuntimeFrame | None = None
@@ -589,6 +592,7 @@ class AtomicDesktopAdapter:
                 envelope,
                 action,
                 input_completed=receipt.input_completed,
+                error_kind=self._receipt_error_kind(receipt),
             )
 
         if receipt.input_completed is None:
@@ -598,6 +602,7 @@ class AtomicDesktopAdapter:
                 input_completed=None,
                 post_frame=post_frame,
                 post_evidence=post_evidence,
+                error_kind=self._receipt_error_kind(receipt),
             )
 
         return ControllerTransition(
@@ -662,12 +667,24 @@ class AtomicDesktopAdapter:
                 before_frame,
             )
             raw_started = True
-            return self._run_raw(
+            receipt = self._run_raw(
                 envelope,
                 prepared,
                 before_frame,
                 initial,
                 stop_event=stop_event,
+            )
+            if self._receipt_error_kind(receipt) != "release_cleanup_incomplete":
+                return receipt
+            try:
+                released = self._release_all_input_locked()
+            except Exception:
+                released = False
+            if not released:
+                return receipt
+            return replace(
+                receipt,
+                error_kind="input_outcome_unknown_after_release_cleanup",
             )
 
         try:
@@ -697,6 +714,7 @@ class AtomicDesktopAdapter:
                         else envelope.target_binding_id
                     ),
                 },
+                coalesce_nested=True,
                 cancel_event=stop_event,
             )
         except DesktopActionCanceled:
@@ -746,12 +764,27 @@ class AtomicDesktopAdapter:
 
         if prepared.action == "input_sequence":
             assert prepared.events is not None
-            return self._raw.input_sequence(
+            receipt = self._raw.input_sequence(
                 context,
                 prepared.events,
                 enforce_foreground=False,
                 stop_event=stop_event,
             )
+            confirmed_events = confirmed_input_event_prefix(
+                prepared.events,
+                receipt,
+            )
+            if confirmed_events:
+                with self._pointer_lock:
+                    held = self._held_pointer
+                    if held is not None and any(
+                        event.kind is InputEventKind.MOUSE_UP
+                        and event.button is held.button
+                        for event in confirmed_events
+                    ):
+                        self._held_pointer = None
+                        self._pointer_uncertain = False
+            return receipt
 
         if prepared.point is not None:
             expected_point = prepared.point
@@ -1024,6 +1057,9 @@ class AtomicDesktopAdapter:
                     self._pointer_uncertain = False
             return receipt
 
+        if receipt.input_completed is False:
+            return receipt
+
         if prepared.started_held or prepared.keep_holding:
             with self._pointer_lock:
                 if self._held_pointer is None and prepared.pointer_lease_id:
@@ -1045,7 +1081,14 @@ class AtomicDesktopAdapter:
 
     def _release_held_pointer(self) -> bool:
         with self._pointer_lock:
-            return self._release_held_pointer_locked()
+            if self._held_pointer is None:
+                self._pointer_uncertain = False
+                return True
+            return DESKTOP_ACTION_QUEUE.run(
+                "held_pointer_cleanup",
+                self._release_held_pointer_locked,
+                scope="physical",
+            )
 
     def _release_held_pointer_locked(self) -> bool:
         lease = self._held_pointer
@@ -1169,7 +1212,6 @@ class AtomicDesktopAdapter:
         args = dict(proposal.args)
         if action in {"click", "double_click"}:
             self._require_keys(args, {"image_x", "image_y"})
-            self._require_image_point(args)
             point = self._map_point(envelope, args)
             try:
                 button = MouseButton(str(args.get("button", "left")).casefold())
@@ -1189,7 +1231,6 @@ class AtomicDesktopAdapter:
             )
         if action == "move_mouse":
             self._require_keys(args, {"image_x", "image_y"})
-            self._require_image_point(args)
             duration_ms = args.get("duration_ms", 0)
             if (
                 type(duration_ms) is not int
@@ -1203,7 +1244,6 @@ class AtomicDesktopAdapter:
             )
         if action == "scroll":
             self._require_keys(args, {"image_x", "image_y", "amount"})
-            self._require_image_point(args)
             amount = args["amount"]
             if (
                 type(amount) is not int
@@ -1268,7 +1308,6 @@ class AtomicDesktopAdapter:
                     "image_x": raw_point[0],
                     "image_y": raw_point[1],
                 }
-                self._require_image_point(point_args)
                 mapped_path.append(self._map_point(envelope, point_args))
             pointer_lease_id: str | None = None
             if started_held:
@@ -1311,8 +1350,6 @@ class AtomicDesktopAdapter:
         if action == "input_sequence":
             self._require_keys(args, {"sequence"})
             steps = parse_input_sequence(args["sequence"])
-            if len(steps) > MAX_INPUT_SEQUENCE_EVENTS:
-                raise ValueError("input sequence is too long")
             physical_events: list[PhysicalInputEvent] = []
             mapped_points: list[PhysicalPoint] = []
             for step in steps:
@@ -1322,7 +1359,6 @@ class AtomicDesktopAdapter:
                         "image_x": step.image_x,
                         "image_y": step.image_y,
                     }
-                    self._require_image_point(point_args)
                     x, y = self._map_point(envelope, point_args)
                     mapped_points.append((x, y))
                     physical_events.append(PhysicalInputEvent(
@@ -1646,20 +1682,6 @@ class AtomicDesktopAdapter:
             raise ValueError("atomic action arguments are missing required fields")
 
     @staticmethod
-    def _require_image_point(
-        args: Mapping[str, Any],
-        *,
-        keys: tuple[str, str] = ("image_x", "image_y"),
-    ) -> None:
-        if any(
-            type(args[name]) not in {int, float}
-            for name in keys
-        ):
-            raise ValueError(
-                "image coordinates must be exact JSON numbers"
-            )
-
-    @staticmethod
     def _map_point(
         envelope: ActorDecisionEnvelope,
         args: Mapping[str, Any],
@@ -1674,19 +1696,8 @@ class AtomicDesktopAdapter:
         if type(raw_x) not in {int, float} or type(raw_y) not in {int, float}:
             raise ValueError("image coordinates must be exact JSON numbers")
         image_x, image_y = float(raw_x), float(raw_y)
-        if not (
-            math.isfinite(image_x)
-            and math.isfinite(image_y)
-            and 0.0 <= image_x <= image_width
-            and 0.0 <= image_y <= image_height
-        ):
-            raise ValueError(
-                "image coordinates must stay inside the submitted image"
-            )
-        # Width/height itself is a common model convention for the final edge;
-        # clamp only that harmless one-pixel convention before the sole scale.
-        image_x = min(image_x, float(max(0, image_width - 1)))
-        image_y = min(image_y, float(max(0, image_height - 1)))
+        if not (math.isfinite(image_x) and math.isfinite(image_y)):
+            raise ValueError("image coordinates must be finite")
         return (
             round(
                 left
@@ -1917,6 +1928,7 @@ class AtomicDesktopAdapter:
         input_completed: bool | None,
         post_frame: RuntimeFrame | None = None,
         post_evidence: EvidenceRef | None = None,
+        error_kind: str | None = None,
     ) -> ControllerTransition:
         if (post_frame is None) != (post_evidence is None):
             post_frame = None
@@ -1932,6 +1944,7 @@ class AtomicDesktopAdapter:
             post_frame_id=(
                 None if post_frame is None else post_frame.frame_id
             ),
+            error_kind=error_kind,
         )
 
     def _receipt_metadata(

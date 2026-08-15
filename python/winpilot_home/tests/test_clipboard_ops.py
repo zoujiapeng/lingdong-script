@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from winpilot.action import clipboard_ops
+from winpilot.vnext import desktop_ops
 
 
 class _FakeUser32:
@@ -57,6 +58,46 @@ class _FakeUser32:
     def GetWindowThreadProcessId(handle: int, pid_pointer) -> int:
         pid_pointer._obj.value = handle + 1000
         return 1
+
+
+class _MixedVisibilityUser32(_FakeUser32):
+    @staticmethod
+    def IsWindowVisible(handle: int) -> bool:
+        return handle == 100
+
+    @staticmethod
+    def IsIconic(handle: int) -> bool:
+        return handle == 200
+
+    @staticmethod
+    def GetWindowTextLengthW(handle: int) -> int:
+        return len({100: "Editor", 200: "QQ", 201: "QQ"}[handle])
+
+    @staticmethod
+    def GetWindowTextW(handle: int, buffer, _length: int) -> int:
+        buffer.value = {100: "Editor", 200: "QQ", 201: "QQ"}[handle]
+        return len(buffer.value)
+
+
+def test_capture_screen_delegates_relative_path_to_backend() -> None:
+    calls: list[dict[str, object]] = []
+
+    def backend(**arguments):
+        calls.append(arguments)
+        return {"ok": True, "path": arguments["path"]}
+
+    result = desktop_ops.capture_screen(
+        backend,
+        path="current_screen.png",
+        window=False,
+    )
+
+    assert calls == [{"path": "current_screen.png", "window": False}]
+    assert result == {
+        "ok": True,
+        "path": "current_screen.png",
+        "format": "capture-screen/1",
+    }
 
 
 def test_list_windows_keeps_frontmost_24_with_truthful_facts(monkeypatch) -> None:
@@ -128,6 +169,35 @@ def test_list_windows_does_not_depend_on_ctypes_wintypes_side_effect(
     assert result["count"] == 1
     assert result["windows"][0]["hwnd"] == 100
     assert result["windows"][0]["foreground"] is True
+
+
+def test_list_windows_reports_deduped_background_applications(monkeypatch) -> None:
+    user32 = _MixedVisibilityUser32([100, 200, 201], foreground=100)
+    monkeypatch.setattr(
+        clipboard_ops.ctypes,
+        "windll",
+        SimpleNamespace(user32=user32),
+    )
+    monkeypatch.setattr(
+        clipboard_ops.ctypes,
+        "WINFUNCTYPE",
+        lambda *_args: lambda callback: callback,
+    )
+    monkeypatch.setattr(
+        clipboard_ops,
+        "_process_name",
+        lambda pid: "editor.exe" if pid == 1100 else "QQ.exe",
+    )
+
+    result = clipboard_ops.list_windows_backend()
+
+    assert [item["title"] for item in result["windows"]] == ["Editor"]
+    assert result["background_count"] == 1
+    assert result["background_applications"] == [{
+        "process_name": "QQ.exe",
+        "title": "QQ",
+        "state": "minimized",
+    }]
 
 
 class _FakeKernel32:

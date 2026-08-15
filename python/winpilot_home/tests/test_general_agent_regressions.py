@@ -1068,14 +1068,89 @@ def test_existing_window_outcome_prefers_visible_over_hidden_helper(
     existing = apps._existing_window_outcome([3501], [3502])
 
     assert existing["activated_hwnd"] == 3501
-    assert existing["candidate_count"] == 1
-    assert existing["candidates"] == [{
-        "hwnd": 3501,
-        "title": "QQ main",
-        "visible": True,
-        "minimized": False,
-    }]
+    assert existing["candidate_count"] == 2
+    assert [item["hwnd"] for item in existing["candidates"]] == [3501, 3502]
     assert activated == [3501]
+    assert restored == []
+
+
+def test_existing_window_outcome_restores_main_before_visible_tool_window(
+    monkeypatch,
+) -> None:
+    """A detached palette must not shadow its minimized application window."""
+    from winpilot.perception import apps
+
+    titles = {3551: "palette", 3552: "main"}
+    restored: list[int] = []
+    activated: list[int] = []
+    fake_win32gui = SimpleNamespace(
+        GetWindowText=lambda hwnd: titles[hwnd],
+        IsWindowVisible=lambda hwnd: hwnd == 3551,
+        IsIconic=lambda hwnd: hwnd == 3552,
+        GetWindowLong=lambda hwnd, _index: 0x80 if hwnd == 3551 else 0,
+        GetWindow=lambda hwnd, _command: 3552 if hwnd == 3551 else 0,
+        ShowWindow=lambda hwnd, _command: restored.append(hwnd) or True,
+    )
+    fake_win32con = SimpleNamespace(
+        GWL_EXSTYLE=-20,
+        GW_OWNER=4,
+        WS_EX_TOOLWINDOW=0x80,
+        WS_EX_TOPMOST=0x8,
+        SW_RESTORE=9,
+    )
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setitem(_sys.modules, "win32con", fake_win32con)
+    monkeypatch.setattr(apps, "_foreground_root_hwnd", lambda: 3551)
+    monkeypatch.setattr(
+        apps,
+        "_activate_window",
+        lambda hwnd: activated.append(hwnd) or hwnd,
+    )
+
+    existing = apps._existing_window_outcome([3551], [3552])
+
+    assert existing["activated_hwnd"] == 3552
+    assert [item["hwnd"] for item in existing["candidates"]] == [3552, 3551]
+    assert restored == [3552]
+    assert activated == [3552]
+
+
+def test_existing_window_outcome_keeps_visible_owned_modal(
+    monkeypatch,
+) -> None:
+    """A normal visible dialog is part of the app, not a detached palette."""
+    from winpilot.perception import apps
+
+    titles = {3571: "Open", 3572: "main"}
+    restored: list[int] = []
+    fake_win32gui = SimpleNamespace(
+        GetWindowText=lambda hwnd: titles[hwnd],
+        IsWindowVisible=lambda hwnd: hwnd == 3571,
+        IsIconic=lambda hwnd: hwnd == 3572,
+        GetWindowLong=lambda _hwnd, _index: 0,
+        GetWindow=lambda hwnd, _command: 3572 if hwnd == 3571 else 0,
+        ShowWindow=lambda hwnd, _command: restored.append(hwnd) or True,
+    )
+    fake_win32con = SimpleNamespace(
+        GWL_EXSTYLE=-20,
+        GW_OWNER=4,
+        WS_EX_TOOLWINDOW=0x80,
+        WS_EX_TOPMOST=0x8,
+        SW_RESTORE=9,
+    )
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setitem(_sys.modules, "win32con", fake_win32con)
+    monkeypatch.setattr(apps, "_foreground_root_hwnd", lambda: 9000)
+    monkeypatch.setattr(apps, "_activate_window", lambda hwnd: hwnd)
+
+    existing = apps._existing_window_outcome([3571], [3572])
+
+    assert existing["activated_hwnd"] == 3571
+    assert [item["hwnd"] for item in existing["candidates"]] == [3571, 3572]
     assert restored == []
 
 
@@ -1110,6 +1185,39 @@ def test_existing_window_outcome_does_not_restore_every_hidden_helper(
     assert existing["candidate_count"] == 3
     assert restored == [3601]
     assert activated == [3601]
+
+
+def test_existing_window_outcome_leaves_hidden_topmost_surface_as_fallback(
+    monkeypatch,
+) -> None:
+    """A hidden topmost compositor must not cover an ordinary app window."""
+    from winpilot.perception import apps
+
+    restored: list[int] = []
+    fake_win32gui = SimpleNamespace(
+        GetWindowText=lambda hwnd: {3701: "overlay", 3702: "app"}[hwnd],
+        IsWindowVisible=lambda _hwnd: False,
+        IsIconic=lambda _hwnd: False,
+        GetWindowLong=lambda hwnd, _index: 8 if hwnd == 3701 else 0,
+        ShowWindow=lambda hwnd, _command: restored.append(hwnd) or True,
+    )
+    fake_win32con = SimpleNamespace(
+        GWL_EXSTYLE=-20,
+        WS_EX_TOPMOST=8,
+        SW_RESTORE=9,
+    )
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setitem(_sys.modules, "win32con", fake_win32con)
+    monkeypatch.setattr(apps, "_foreground_root_hwnd", lambda: 9000)
+    monkeypatch.setattr(apps, "_activate_window", lambda hwnd: hwnd)
+
+    existing = apps._existing_window_outcome([], [3701, 3702])
+
+    assert existing["activated_hwnd"] == 3702
+    assert [item["hwnd"] for item in existing["candidates"]] == [3702, 3701]
+    assert restored == [3702]
 
 
 def test_activate_existing_restores_tray_hidden_window_fallback(

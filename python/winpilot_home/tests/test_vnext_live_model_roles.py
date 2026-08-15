@@ -17,7 +17,11 @@ from winpilot.modeling import (
     RetryKind,
     create_openai_client,
 )
-from winpilot.vnext.actor import InvalidActorProposal, actor_proposal_to_json
+from winpilot.vnext.actor import (
+    InvalidActorProposal,
+    actor_proposal_to_json,
+    parse_actor_proposal,
+)
 from winpilot.vnext.model_roles import (
     FlowFragmentProposer,
     INITIAL_ACTOR_SYSTEM_CONTRACT,
@@ -582,7 +586,7 @@ def test_visual_actor_can_request_a_fresh_desktop_without_input() -> None:
     assert "call-1-0" not in next_messages
 
 
-def test_visual_actor_reports_a_canonical_error_for_missing_refresh_question() -> None:
+def test_visual_actor_defers_refresh_shape_to_the_single_runtime_parse() -> None:
     _, clients = _build_clients(
         _tool_response(name="refresh_desktop", arguments={})
     )
@@ -605,13 +609,15 @@ def test_visual_actor_reports_a_canonical_error_for_missing_refresh_question() -
         requires_local_intent=False,
     )
 
+    decision = actor.propose(
+        replace(turn, tools=(*turn.tools, observe)),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
     with pytest.raises(InvalidActorProposal, match="question"):
-        actor.propose(
-            replace(turn, tools=(*turn.tools, observe)),
-            image_b64=_JPEG_B64,
-            image_media_type="image/jpeg",
-            submitted_size=(640, 480),
-        )
+        parse_actor_proposal(decision.proposal)
 
 
 def test_initial_actor_turn_replies_with_native_history_and_short_system_contract() -> None:
@@ -722,6 +728,34 @@ def test_initial_observe_can_seed_remaining_work_for_first_visual_action() -> No
         "parameters"
     ]
     assert "task_state_update" in observe_schema["properties"]
+
+
+def test_malformed_initial_observe_state_does_not_delay_visual_action() -> None:
+    observe = _tool_response(
+        name="observe_desktop",
+        arguments={"task_state_update": {"scratchpad": 12345}},
+        call_id="observe-with-bad-state",
+    )
+    first_action = _tool_response(call_id="first-action")
+    _, clients = _build_clients([observe, first_action])
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    admission = actor.begin_turn("Open the requested app")
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert admission.kind == "desktop"
+    assert decision.proposal["kind"] == "desktop_action"
+    assert decision.proposal["action"] == "type_text"
+    assert len(clients[0].requests) == 2
 
 
 def test_pending_plan_is_consumed_after_one_visual_decision() -> None:
@@ -1552,18 +1586,6 @@ def test_rejection_feedback_discards_the_unexecuted_native_action() -> None:
             "duplicate field",
         ),
         (
-            _tool_response(
-                name="click",
-                arguments={
-                    "image_x": 1,
-                    "image_y": 2,
-                    "local_intent": "click once",
-                    "frame_id": 7,
-                },
-            ),
-            "Runtime-owned identity",
-        ),
-        (
             _actor_shape_response(include_role=False),
             "message is not assistant",
         ),
@@ -1770,7 +1792,7 @@ def test_actor_projects_unheld_drag_path_text_as_ordered_points() -> None:
     assert "duration_ms" not in actor_schema["properties"]
 
 
-def test_actor_rejects_malformed_task_state_without_echoing_private_text() -> None:
+def test_actor_ignores_malformed_auxiliary_task_state_without_losing_action() -> None:
     sentinel = "PRIVATE-STATE-MUST-NOT-ECHO"
     _, clients = _build_clients(
         _tool_response(
@@ -1787,18 +1809,16 @@ def test_actor_rejects_malformed_task_state_without_echoing_private_text() -> No
         runtime=ModelCallRuntime(),
     )
 
-    with pytest.raises(
-        InvalidActorProposal,
-        match="allows only scratchpad",
-    ) as caught:
-        actor.propose(
-            _actor_turn(),
-            image_b64=_JPEG_B64,
-            image_media_type="image/jpeg",
-            submitted_size=(640, 480),
-        )
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
 
-    assert sentinel not in str(caught.value)
+    assert decision.proposal["args"]["text"] == "hello"
+    assert decision.task_state_update == ActorTaskStateUpdate()
+    assert sentinel not in repr(decision)
 
 
 def test_actor_rejects_unknown_strict_schema_keywords_before_transport() -> None:
@@ -2381,14 +2401,10 @@ def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> N
     _, clients = _build_clients(
         [
             _tool_response(
-                "type_text",
-                # Malformed task_state_update; strict schema now allows an
-                # omitted local_intent, so the repair must be provoked by
-                # the state contract instead.
+                "drag",
                 {
-                    "text": "hello",
-                    "local_intent": "enter the requested greeting once",
-                    "task_state_update": {"scratchpad": 12345},
+                    "points": "not coordinate pairs",
+                    "local_intent": "drag once",
                 },
                 call_id="broken-call",
             ),
@@ -2415,7 +2431,7 @@ def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> N
     assert repair_messages[-2]["tool_calls"][0]["id"] == "broken-call-0"
     tool_result = json.loads(repair_messages[-1]["content"])
     assert "tool_format_error" in tool_result
-    assert "scratchpad" in tool_result["tool_format_error"]
+    assert "drag points" in tool_result["tool_format_error"]
 
 def test_initial_observe_with_arguments_is_repaired_once_then_terminates() -> None:
     bad_observe = {
@@ -3724,6 +3740,14 @@ class _RecordingWindowsReader:
                 {"hwnd": 200, "title": "网易云音乐", "class_name": "OrpheusBrowserHost", "pid": 2},
             ],
             "count": 2,
+            "background_applications": [
+                {
+                    "process_name": "QQ.exe",
+                    "title": "QQ",
+                    "state": "background",
+                }
+            ],
+            "background_count": 1,
         }
 
 
@@ -3932,8 +3956,48 @@ def test_visual_turn_can_list_windows_before_gui_action() -> None:
     assert tool_result["count"] == 2
     assert tool_result["windows"][0]["title"] == "QQ"
     assert tool_result["windows"][0]["process_name"] == "QQ.exe"
+
+    first_context = json.loads(
+        clients[0].requests[0]["messages"][-1]["content"][1]["text"]
+    )
+    assert first_context["background_applications"] == [{
+        "process_name": "QQ.exe",
+        "title": "QQ",
+        "state": "background",
+    }]
     assert tool_result["windows"][0]["rect"] == [0, 0, 800, 600]
     assert tool_result["windows"][0]["foreground"] is True
+
+
+def test_background_inventory_failure_never_blocks_visual_action() -> None:
+    _, clients = _build_clients(_tool_response())
+    calls = 0
+
+    def unavailable_inventory() -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        raise OSError("window enumeration unavailable")
+
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        windows_reader=unavailable_inventory,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert calls == 1
+    context = json.loads(
+        clients[0].requests[0]["messages"][-1]["content"][1]["text"]
+    )
+    assert "background_applications" not in context
 
 
 def test_visual_turn_can_paste_image_before_gui_action() -> None:

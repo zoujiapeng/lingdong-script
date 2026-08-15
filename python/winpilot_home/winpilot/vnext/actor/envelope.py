@@ -15,9 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from ..capabilities.argument_validation import ToolArgumentValidator
 from ..capabilities import (
-    CapabilityBroker,
     BrokerProjection,
     BrokerRuntimeState,
     ExecutionRoute,
@@ -27,7 +25,6 @@ from ..capabilities import (
     ToolRoute,
 )
 from ..mission import (
-    MissionDefinition,
     MissionProjection,
     MissionReducer,
     MissionStatus,
@@ -167,63 +164,22 @@ def _submitted_coordinate(
     value: Any,
     *,
     name: str,
-    upper_bound: int,
+    upper_bound: int | None = None,
 ) -> float:
     if type(value) not in (int, float):
         raise InvalidActorProposal(
             f"{name} must be a submitted-image number"
         )
     coordinate = float(value)
-    if (
-        not math.isfinite(coordinate)
-        or coordinate < 0
-        or coordinate > upper_bound
+    if not math.isfinite(coordinate):
+        raise InvalidActorProposal(f"{name} must be finite")
+    if upper_bound is not None and (
+        coordinate < 0 or coordinate > upper_bound
     ):
         raise InvalidActorProposal(
             f"{name} must stay inside or on the submitted image edge"
         )
     return coordinate
-
-
-def _validate_point_arguments(
-    arguments: Mapping[str, Any],
-    submitted_size: tuple[int, int],
-) -> None:
-    present = ("image_x" in arguments, "image_y" in arguments)
-    if any(present) and not all(present):
-        raise InvalidActorProposal(
-            "image_x and image_y must be present together"
-        )
-    if all(present):
-        _submitted_coordinate(
-            arguments["image_x"],
-            name="image_x",
-            upper_bound=submitted_size[0],
-        )
-        _submitted_coordinate(
-            arguments["image_y"],
-            name="image_y",
-            upper_bound=submitted_size[1],
-        )
-    image_path = arguments.get("image_path")
-    if image_path is not None:
-        if not isinstance(image_path, (list, tuple)):
-            raise InvalidActorProposal("image_path must be an array of [x,y]")
-        for index, point in enumerate(image_path):
-            if not isinstance(point, (list, tuple)) or len(point) != 2:
-                raise InvalidActorProposal(
-                    f"image_path[{index}] must be [x,y]"
-                )
-            _submitted_coordinate(
-                point[0],
-                name=f"image_path[{index}][0]",
-                upper_bound=submitted_size[0],
-            )
-            _submitted_coordinate(
-                point[1],
-                name=f"image_path[{index}][1]",
-                upper_bound=submitted_size[1],
-            )
 
 
 def _validate_image_region(
@@ -253,18 +209,9 @@ def _validate_image_region(
         )
 
 
-def _canonical_proposal(value: Any) -> ActorProposal:
-    try:
-        raw = json.loads(actor_proposal_to_json(value))
-        return parse_actor_proposal(raw)
-    except Exception as exc:
-        raise ValueError("proposal is not a canonical ActorProposal") from exc
-
-
 def proposal_tool_name(proposal: ActorProposal) -> str:
-    canonical = _canonical_proposal(proposal)
-    if type(canonical) is DesktopActionProposal:
-        return canonical.action
+    if type(proposal) is DesktopActionProposal:
+        return proposal.action
     mapping = {
         ObserveProposal: "observe",
         CapabilityRequest: "request_capability",
@@ -274,7 +221,7 @@ def proposal_tool_name(proposal: ActorProposal) -> str:
         ReplanRequest: "request_replan",
     }
     try:
-        return mapping[type(canonical)]
+        return mapping[type(proposal)]
     except KeyError as exc:
         raise ValueError("unsupported ActorProposal type") from exc
 
@@ -401,7 +348,8 @@ class ActorDecisionEnvelope(BaseModel):
     def _proposal(cls, value: Any) -> ActorProposal:
         if type(value) is dict:
             return parse_actor_proposal(value)
-        return _canonical_proposal(value)
+        proposal_tool_name(value)
+        return value
 
     @model_validator(mode="after")
     def _pointer_contract(self) -> "ActorDecisionEnvelope":
@@ -421,40 +369,6 @@ class ActorDecisionEnvelope(BaseModel):
                 "decision_id does not identify canonical envelope content"
             )
         return self
-
-    def _validated_copy(self) -> "ActorDecisionEnvelope":
-        raw = BaseModel.model_dump(self, mode="json")
-        try:
-            return ActorDecisionEnvelope.from_dict(raw)
-        except Exception as exc:
-            raise InvalidActorEnvelope(
-                "ActorDecisionEnvelope instance is not canonical"
-            ) from exc
-
-    @classmethod
-    def model_construct(
-        cls,
-        _fields_set: set[str] | None = None,
-        **values: Any,
-    ) -> "ActorDecisionEnvelope":
-        del _fields_set, values
-        raise InvalidActorEnvelope(
-            "ActorDecisionEnvelope cannot bypass validated construction"
-        )
-
-    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return BaseModel.model_dump(
-            self._validated_copy(),
-            *args,
-            **kwargs,
-        )
-
-    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
-        return BaseModel.model_dump_json(
-            self._validated_copy(),
-            *args,
-            **kwargs,
-        )
 
     def model_copy(
         self,
@@ -484,11 +398,8 @@ class ActorDecisionEnvelope(BaseModel):
                 "model_copy update does not form a canonical envelope"
             ) from exc
 
-    def __iter__(self):
-        yield from BaseModel.__iter__(self._validated_copy())
-
     def to_dict(self) -> dict[str, Any]:
-        return self.model_dump(mode="json")
+        return BaseModel.model_dump(self, mode="json")
 
     def to_json(self) -> str:
         return json.dumps(
@@ -580,33 +491,9 @@ def bind_actor_decision(
             "values"
         )
     try:
-        definition = MissionDefinition.from_dict(
-            mission_reducer.definition.to_dict()
-        )
-        replayed = MissionReducer.replay(
-            definition,
-            tuple(
-                event.to_dict()
-                for event in mission_reducer.events
-            ),
-            evidence=mission_reducer.evidence_scope,
-        )
-        if (
-            replayed.events != mission_reducer.events
-            or replayed.projection != mission_reducer.projection
-        ):
-            raise ValueError(
-                "MissionProjection is not rebuildable from accepted events"
-            )
-        mission = replayed.projection
-        # Rebuild every content-addressed Runtime input before trusting it.
-        # Frozen dataclasses prevent ordinary mutation, but this also rejects
-        # stale identities if privileged in-process code bypasses that guard.
-        profile = ExecutionProfile.from_dict(profile.to_dict())
-        state = BrokerRuntimeState.from_dict(state.to_dict())
-        catalog = ToolCatalog.from_dict(catalog.to_dict())
-        projection = BrokerProjection.from_dict(projection.to_dict())
-        canonical_proposal = _canonical_proposal(proposal)
+        mission = mission_reducer.projection
+        canonical_proposal = proposal
+        proposal_tool_name(canonical_proposal)
         region = _frame_region(frame_region)
         image_size = _submitted_size(submitted_image_size)
         image_sha = _sha256(
@@ -638,15 +525,6 @@ def bind_actor_decision(
             or projection.state_fingerprint != state.fingerprint
         ):
             raise ValueError("BrokerProjection input fingerprints are not current")
-        expected_projection = CapabilityBroker(catalog).project(
-            mission,
-            profile,
-            state,
-        )
-        if projection != expected_projection:
-            raise ValueError(
-                "BrokerProjection is not the canonical Broker decision"
-            )
         if projection.execution_route is not ExecutionRoute.VISUAL_ACTOR:
             raise ValueError("BrokerProjection is not a Visual Actor route")
         if not state.runtime_healthy or state.paused or state.canceled:
@@ -692,19 +570,7 @@ def bind_actor_decision(
         )
         if tool.mutation_kind is not expected_mutation:
             raise ValueError("proposal kind and tool mutation contract disagree")
-        if type(canonical_proposal) is DesktopActionProposal:
-            detached_args = json.loads(
-                actor_proposal_to_json(canonical_proposal)
-            )["args"]
-            ToolArgumentValidator(catalog).validate(
-                tool_name,
-                detached_args,
-            )
-            _validate_point_arguments(
-                detached_args,
-                image_size,
-            )
-        elif type(canonical_proposal) is ObserveProposal:
+        if type(canonical_proposal) is ObserveProposal:
             _validate_image_region(
                 canonical_proposal.image_region,
                 image_size,
@@ -729,6 +595,9 @@ def bind_actor_decision(
             )
         grant_ids = tuple(
             item.grant_id for item in projection.active_grants
+        )
+        proposal_wire = json.loads(
+            actor_proposal_to_json(canonical_proposal)
         )
         material = {
             "format": ACTOR_ENVELOPE_FORMAT,
@@ -759,18 +628,16 @@ def bind_actor_decision(
             "broker_projection_id": projection.projection_id,
             "capability_grant_ids": list(grant_ids),
             "allowed_evidence_scope": list(evidence_scope),
-            "proposal": json.loads(
-                actor_proposal_to_json(canonical_proposal)
-            ),
+            "proposal": proposal_wire,
         }
         return ActorDecisionEnvelope(
             decision_id=_decision_id(material),
-            **material,
+            **{**material, "proposal": canonical_proposal},
         )
     except InvalidActorAdmission:
         raise
-    except InvalidActorProposal as exc:
-        raise InvalidActorAdmission(str(exc)) from exc
+    except InvalidActorProposal:
+        raise
     except Exception as exc:
         raise InvalidActorAdmission(str(exc)) from exc
 

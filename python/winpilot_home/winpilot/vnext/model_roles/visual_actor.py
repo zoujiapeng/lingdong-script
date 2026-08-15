@@ -21,8 +21,6 @@ from ...modeling import (
 from ..actor import (
     ACTOR_PROPOSAL_FORMAT,
     InvalidActorProposal,
-    actor_proposal_to_json,
-    parse_actor_proposal,
 )
 from ..runtime.contracts import (
     APPROVED_DESKTOP_ACTIONS,
@@ -108,18 +106,21 @@ _TOOL_DESCRIPTIONS = {
         "next screen to judge the resulting level."
     ),
     "input_sequence": (
-        "Run one atomic human-like mouse/keyboard timeline. Separate commands "
-        "with semicolons: `move x,y duration_ms`; `mouse_down button`; "
-        "`mouse_up button`; `key_down key`; `key_up key`; `click button`; "
-        "`press key`; `wheel amount`; `hwheel amount`; `wait duration_ms`. "
+        "Run one atomic human-like mouse/keyboard timeline. Use semicolons: "
+        "`move x,y [duration_ms]`; `mouse_down [button] [x,y]`; "
+        "`mouse_up [button] [x,y]`; `click [button] [x,y]`; "
+        "`key_down key`; `key_up key`; `press key`; `wheel amount`; "
+        "`hwheel amount`; `wait duration_ms`. "
         "Wheel amounts are native deltas (120 is one ordinary notch). "
         "Use `move_by dx,dy duration_ms` for relative raw/game movement. "
         "Absolute coordinates and relative deltas are from the current image. "
-        "Keys/buttons still held at the end are released automatically."
+        "Inputs newly held by this sequence are released automatically. "
+        "An existing pointer_held remains until explicit mouse_up or drag release."
     ),
     "launch_application": (
-        "Start one installed application or file/URL association by display "
-        "name, alias, or path. This is a generic launch, not a click."
+        "Open or restore one installed application or file/URL association "
+        "by display name, alias, or path. If it is already running, this "
+        "activates that instance instead of starting another."
     ),
     "observe": (
         "Request a fresh whole-desktop frame without physical input. Use this "
@@ -976,8 +977,8 @@ def _proposal_from_response(
         state_update = ActorTaskStateUpdate.from_dict(
             arguments.pop("task_state_update", None)
         )
-    except ActorTaskStateError as exc:
-        raise InvalidActorProposal(str(exc)) from exc
+    except ActorTaskStateError:
+        state_update = ActorTaskStateUpdate()
     local_intent = arguments.pop("local_intent", None)
     runtime_name = _RUNTIME_TOOL_NAMES.get(name, name)
     if runtime_name not in available_runtime_names:
@@ -1019,9 +1020,8 @@ def _proposal_from_response(
         }
     else:  # pragma: no cover - guarded by the exact minimal tool set
         raise LiveModelRoleError("Visual Actor returned an unsupported outcome")
-    proposal = parse_actor_proposal(raw_proposal)
     return ActorTurnDecision(
-        proposal=json.loads(actor_proposal_to_json(proposal)),
+        proposal=raw_proposal,
         task_state_update=state_update,
         narration=narration,
     )
@@ -1369,7 +1369,10 @@ def _capture_screen_tool_definitions() -> list[dict[str, Any]]:
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 512,
-                            "description": "Absolute .png/.jpg path.",
+                            "description": (
+                                "PNG/JPEG path; relative paths use the runtime "
+                                "working directory."
+                            ),
                         },
                         "window": {
                             "type": "boolean",
@@ -1394,7 +1397,7 @@ def _list_windows_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _LIST_WINDOWS_TOOL,
-                "description": "List visible windows.",
+                "description": "List visible windows and background applications.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -1690,7 +1693,7 @@ def _call_capture_screen(
 def _call_list_windows(
     windows_reader: Any,
 ) -> dict[str, Any]:
-    """Return the visible window inventory through the injected reader."""
+    """Return the window/application inventory through the injected reader."""
     if windows_reader is None or not callable(windows_reader):
         return _actionable_tool_result(
             _LIST_WINDOWS_TOOL,
@@ -2785,15 +2788,7 @@ class LiveVisualActor:
                     )
                 if observe_envelopes:
                     observe_arguments = dict(observe_envelopes[0][2])
-                    try:
-                        ActorTaskStateUpdate.from_dict(
-                            observe_arguments.pop(
-                                "task_state_update",
-                                None,
-                            )
-                        )
-                    except ActorTaskStateError as exc:
-                        raise LiveModelRoleError(str(exc)) from exc
+                    observe_arguments.pop("task_state_update", None)
                     if observe_arguments:
                         raise LiveModelRoleError(
                             "observe_desktop does not accept arguments"
@@ -3051,6 +3046,43 @@ class LiveVisualActor:
             "submitted_image_size": list(submitted_size),
             **turn_context,
         }
+        # A whole-screen frame cannot show applications collapsed into the
+        # notification area.  Add the backend's compact, current inventory as
+        # an environment fact; failure to read this optional hint never blocks
+        # the visual turn.  Reuse the same snapshot if the model also asks for
+        # list_windows during this turn.
+        turn_windows_reader = self._windows_reader
+        if self._windows_reader is not None:
+            try:
+                window_inventory = self._windows_reader()
+            except Exception:
+                window_inventory = None
+            if window_inventory is not None:
+                turn_windows_reader = (
+                    lambda inventory=window_inventory: inventory
+                )
+            if isinstance(window_inventory, Mapping):
+                compact_background: list[dict[str, str]] = []
+                items = window_inventory.get("background_applications")
+                if isinstance(items, Sequence) and not isinstance(
+                    items, (str, bytes)
+                ):
+                    for item in items[:24]:
+                        if not isinstance(item, Mapping):
+                            continue
+                        projected = {
+                            key: str(item.get(key) or "").strip()
+                            for key in ("process_name", "title", "state")
+                        }
+                        projected = {
+                            key: value
+                            for key, value in projected.items()
+                            if value
+                        }
+                        if projected:
+                            compact_background.append(projected)
+                if compact_background:
+                    context["background_applications"] = compact_background
         previous_action = context.get("previous_action")
         if (
             isinstance(previous_action, dict)
@@ -3094,8 +3126,8 @@ class LiveVisualActor:
             )
         previous_exchange = self._previous_visual_exchange
         if rejection_feedback:
-            # The latest proposal was not admitted/executed.  Never attach its
-            # raw call to an older same-named physical action.
+            # The latest proposal has no safely reusable completed exchange.
+            # Never attach its raw call to an older same-named physical action.
             self._previous_visual_exchange = None
         elif (
             previous_exchange is not None
@@ -3237,7 +3269,7 @@ class LiveVisualActor:
                         connector_gateway=self._connector_gateway,
                         window_text_reader=self._window_text_reader,
                         capture_runner=self._capture_runner,
-                        windows_reader=self._windows_reader,
+                        windows_reader=turn_windows_reader,
                         turn=turn,
                         timeout_s=min(30.0, self._total_timeout_s),
                         stop_event=stop_event,
@@ -3435,7 +3467,7 @@ class LiveVisualActor:
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
                 )
-                result = _call_list_windows(self._windows_reader)
+                result = _call_list_windows(turn_windows_reader)
                 self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,

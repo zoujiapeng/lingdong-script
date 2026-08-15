@@ -27,8 +27,6 @@ from ..capabilities import (
     CapabilityBroker,
     ExecutionRoute,
     MutationKind,
-    ToolArgumentValidationError,
-    ToolArgumentValidator,
     ToolCatalog,
     ToolRoute,
 )
@@ -126,7 +124,6 @@ class MissionRuntime:
         self._profile = profile
         self._broker = broker
         self._catalog = catalog
-        self._argument_validator = ToolArgumentValidator(catalog)
         self._actor = actor
         self._state = state
         self._controller = controller
@@ -227,10 +224,8 @@ class MissionRuntime:
 
     @property
     def verified_completion_result(self) -> str | None:
-        """Return Actor-authored result text only after mission verification."""
+        """Return the Actor-authored completion result, if it claimed one."""
 
-        if self._reducer.projection.status is not MissionStatus.VERIFIED:
-            return None
         return self._verified_completion_result
 
     @property
@@ -485,6 +480,10 @@ class MissionRuntime:
             return self._cancel(
                 detail="run was canceled before claim completion",
             )
+        self._verified_completion_result = proposal.concise_claim
+        self._latest_narration = proposal.concise_claim
+        event_ids: tuple[str, ...] = ()
+        diagnostics: list[str] = []
         try:
             event_ids = self._accept(
                 "actor_completed",
@@ -492,20 +491,14 @@ class MissionRuntime:
                 base_revision=envelope.mission_revision,
             )
         except Exception as exc:
-            return self._result(
-                RuntimeStatus.STATE_REJECTED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=envelope.decision_id,
-                detail=f"actor completion could not be recorded: {exc}",
-            )
-        self._verified_completion_result = proposal.concise_claim
+            diagnostics.append(f"completion history unavailable: {exc}")
         return self._result(
             RuntimeStatus.MISSION_VERIFIED,
             route=route,
             proposal_kind=proposal_kind,
             decision_id=envelope.decision_id,
             event_ids=event_ids,
+            detail="; ".join(diagnostics),
         )
 
     def _record_rejected_transition(
@@ -597,13 +590,29 @@ class MissionRuntime:
                 detail="Controller could not prove the mutation outcome",
             )
         if transition.outcome is ControllerOutcome.UNKNOWN:
-            if transition.input_completed is not True:
+            if transition.error_kind == "release_cleanup_incomplete":
                 return self._block_unknown(
                     obligation_id=obligation_id,
                     route=route,
                     proposal_kind=proposal_kind,
                     decision_id=envelope.decision_id,
-                    detail="Controller could not prove the mutation outcome",
+                    detail=(
+                        "Controller could not confirm physical input release; "
+                        "no further mutation is safe"
+                    ),
+                )
+            if transition.input_completed is not True:
+                return self._result(
+                    RuntimeStatus.STALE_DISCARDED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=envelope.decision_id,
+                    detail=(
+                        "Controller could not prove whether "
+                        f"{proposal.action} completed for intent "
+                        f"{proposal.local_intent[:500]!r}; "
+                        "no replay occurred; inspect the next fresh screen"
+                    ),
                 )
             event_ids: tuple[str, ...] = ()
             diagnostics: list[str] = []
@@ -884,12 +893,8 @@ class MissionRuntime:
                 pending_task_state = self._task_state.apply(
                     actor_decision.task_state_update
                 )
-            except ActorTaskStateError as exc:
-                return self._result(
-                    RuntimeStatus.INVALID_PROPOSAL,
-                    route=route,
-                    detail=str(exc),
-                )
+            except ActorTaskStateError:
+                pending_task_state = self._task_state
         try:
             proposal = parse_actor_proposal(raw)
         except InvalidActorProposal as exc:
@@ -935,10 +940,6 @@ class MissionRuntime:
                         proposal_kind=proposal_kind,
                         detail="desktop action is not approved",
                     )
-                self._argument_validator.validate(
-                    proposal.action,
-                    proposal.model_dump(mode="json")["args"],
-                )
             visible_scope = tuple(
                 evidence_id
                 for evidence_id in initial.frame.evidence_refs
@@ -957,32 +958,10 @@ class MissionRuntime:
                 frame_image_sha256=initial.frame.image_sha256,
                 allowed_evidence_scope=visible_scope,
             )
-        except ToolArgumentValidationError as exc:
-            logger.warning(
-                "vNext tool arguments rejected: tool=%s code=%s "
-                "keyword=%s path=%s expected=%s actual=%s",
-                exc.tool_name,
-                exc.code,
-                exc.keyword or "",
-                exc.instance_path,
-                exc.expected or "",
-                exc.actual or "",
-            )
-            # The action failed mechanically, but the Actor's own task notes
-            # remain useful input for its next attempt. Authority freshness was
-            # checked above, and task state carries no execution authority.
-            self._task_state = pending_task_state
-            return self._result(
-                RuntimeStatus.INVALID_PROPOSAL,
-                route=route,
-                proposal_kind=proposal_kind,
-                detail=str(exc),
-            )
         except InvalidActorProposal as exc:
-            # A point outside the submitted image is a correctable model
-            # argument error, not a broken Runtime authority boundary. Keep
-            # the Actor's working state and return the exact reason so the
-            # ordinary next-turn redecision can use a fresh frame.
+            # A malformed observation proposal is a correctable model error,
+            # not a broken Runtime authority boundary. Keep its working state
+            # so the ordinary next turn can use a fresh frame.
             self._task_state = pending_task_state
             return self._result(
                 RuntimeStatus.INVALID_PROPOSAL,

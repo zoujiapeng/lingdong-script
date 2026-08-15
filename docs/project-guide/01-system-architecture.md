@@ -8,10 +8,10 @@
 
 1. 一个原始 goal：产品入口只接收 `goal` 和可选 `thread_id`；客户端不能替用户提交图、runtime、stage 或执行媒介。
 2. 一个语义 Actor：同一个 `LiveVisualActor` 决定直接回复、只读 connector 或桌面观察；进入桌面后仍是它选择下一笔动作。
-3. 一条视觉执行线：每个空间 mutation 前必须绑定当前目标和当前权威帧；一笔动作后重新观察。
+3. 一条视觉执行线：默认把当前完整真实屏幕交给模型；一笔动作后重新观察，窗口裁剪只作显式 opt-in。
 4. 小而通用的工具面：当前 Runtime 只有 `click`、`double_click`、`move_mouse`、`drag`、`scroll`、`type_text`、`hotkey`、`input_sequence`、`launch_application`、`observe`、`claim_obligation_done`、`blocked`。
-5. 物理层无应用语义：Broker、坐标映射、队列、RawDevice 和 evidence 只验证身份、新鲜度、权限、调用一次与回执，不知道“保存”“答题”“播放”等任务。
-6. 完成不等于像素变化：生产 Runtime 接受 Actor 对当前帧的 claim 并建立一致性事件；真实测试仍必须由外部 oracle 独立判定用户目标。
+5. 物理层无应用语义：Broker 投影当前工具；Adapter 只做一次坐标映射，队列和 RawDevice 只负责单写入与释放清理，不知道“保存”“答题”“播放”等任务。
+6. 完成由模型自验：生产 Runtime 接受同一个 Actor 基于当前真实屏幕作出的 claim。trace、运行详情和 memory 只诊断首分歧，不是 task-pass 门，也不作第二次语义裁决。
 7. 无静默 Legacy fallback：`vnext.live_agent_enabled` 未开启或主链不可用时失败；不会退回 `/api/chat`、AgentRunner、FlowScript 或旧 planner。
 8. 失败按首分歧修复：`model arguments → canonical arguments → physical_attempt → external state`。
 
@@ -91,7 +91,7 @@ AgentCockpit.execute
   -> POST /api/v2/goals/runs { goal, thread_id }
 ```
 
-Renderer 保存的 run ID 列表只用于界面聚合。服务端 Thread/Turn、ARP execution、Mission projection、目标和证据仍是权威状态。
+Renderer 保存的 run ID 列表只用于界面聚合。服务端 Thread/Turn、ARP execution、Mission projection 与当前屏幕状态仍是运行事实；它们不替 Actor 判断任务是否完成。
 
 ### 2.3 托管 Python Runtime
 
@@ -111,7 +111,7 @@ Renderer 保存的 run ID 列表只用于界面聚合。服务端 Thread/Turn、
 - 模型 provider 通过 `modeling` 层的 canonical request 和显式 protocol adapter 调用；
 - connector 只从显式 MCP 配置发现，Gateway 重新核验 descriptor 后才调用；
 - Windows GUI 通过 `FrameAuthority`、`AtomicDesktopAdapter`、`RawDeviceExecutor` 与 SendInput 类 backend 交互；
-- trace、artifact、runtime evidence、memory 与 replay 文件各有独立 owner，不应混成一个“成功账本”。
+- trace、artifact、memory 与 replay 文件各有独立 owner，只用于诊断或显式离线功能，不应混成生产任务的“成功账本”。
 
 ## 3. 产品主链的组合结构
 
@@ -133,7 +133,7 @@ flowchart TD
   Session --> Frame["FrameAuthority + _LiveRuntimeState"]
   Session --> Broker["CapabilityBroker + ToolCatalog"]
   Session --> Adapter["AtomicDesktopAdapter"]
-  Session --> Evidence["EvidenceRegistry + RuntimeEvidencePlane"]
+  Session --> Registry["EvidenceRegistry\nframe refs; not task-pass"]
   Session --> Runtime["MissionRuntime"]
 ```
 
@@ -149,12 +149,10 @@ flowchart TD
 | 当前桌面目标 | `DesktopLeaseSlot` + 冻结 `TargetBinding` | Electron提供让出后的目标事实 | 模型或旧 router 偷换 HWND/PID |
 | 当前权威帧 | `FrameAuthority` | `_LiveRuntimeState` 投影为 RuntimeFrame | 从旧截图继续执行空间动作 |
 | 当前可用工具 | `CapabilityBroker` | Actor只看 projection | 根据任务关键词加/删工具 |
-| 一笔语义动作 | `LiveVisualActor.propose` | Runtime严格解析和绑定 envelope | Controller修改目标点或替模型重试 |
-| mutation admission | `MutationPermitAuthority` | Adapter消费一次 permit | 多次调用物理输入或回放同一动作 |
-| 物理参数与输入 | `AtomicDesktopAdapter` + `RawDeviceExecutor` | evidence记录参数和 receipt | snap、offset、目标吸附、应用宏 |
+| 一笔语义动作 | `LiveVisualActor.propose` + `MissionRuntime` | Actor 解码 provider call；Runtime入口只做一次 typed parse；Envelope只绑定当前身份 | Controller修改目标点、重复跑 schema 或替模型重试 |
+| 物理参数与输入 | `AtomicDesktopAdapter` + `RawDeviceExecutor` | trace旁路记录参数和 receipt | snap、offset、目标吸附、应用宏、前台/hit-test veto |
 | Mission 状态 | `MissionReducer` | Runtime提交事件 | UI根据文字猜状态 |
-| 物理审计链 | `RuntimeEvidencePlane` | 报告层公开最小摘要 | 当第二语义 verifier |
-| 用户任务 E2E 结果 | 外部 oracle | trace用于解释首分歧 | 用模型 claim/runtime done 覆盖失败 |
+| 用户任务完成 | 当前屏幕上的 `LiveVisualActor` 自验与 claim | trace/memory解释首分歧；E2E报告观察真实终态 | 独立 verifier、trace或memory反判模型 |
 
 ## 5. 数据权威关系
 
@@ -181,7 +179,8 @@ flowchart LR
 - `TargetBinding` 将目标窗口与 run、epoch 绑定；标题只是辅助，不是唯一身份；
 - `FrameState` 的图片、窗口、区域、捕获时间和 hash 必须一起发布；
 - Actor 坐标位于它实际收到的 submitted JPEG 像素空间；
-- Adapter 只做一次确定性映射，且在队列执行前再次核验目标、帧、hit-test 和 permit；
+- Envelope 不再按 submitted-image 范围或完整 schema 重验 proposal；Adapter 只确认数值有限并做一次确定性映射；
+- screen-first 下物理输入去往模型所指位置，不因绑定窗口、前台或 hit-test 推断而拒绝；
 - post-action frame 用于建立输入之后的因果观察，不能把任意新画面归因给旧动作；
 - action effect 只说明局部画面是否改变，不知道用户任务是否语义完成。
 
@@ -224,10 +223,10 @@ obligations = [
 - ToolCatalog 恰好等于十二个批准工具；
 - 每个工具都由 Visual Actor route 拥有；
 - GUI mutation、无输入 observation 与 outcome/control 工具类型严格对应；
-- 目标必须预先绑定；
-- Runtime、Reducer、Registry、Broker、Catalog、permit 和 evidence plane 的 mission/run 身份一致。
+- observation workspace 必须预先建立 binding；full-desktop 输入不因此限制在该窗口；
+- Runtime、Reducer、Registry、Broker 和 Catalog 的共享 owner 只在 session 构造时核对一次。
 
-这组检查看起来繁琐，但它的作用是阻止架构在运行时悄悄长出第二 planner、第二 verifier 或另一套目标。
+这些 session 级核对不在每个 Actor proposal 上重放；每轮 binder 只附加当前 mission/frame/Broker 身份。
 
 ## 7. 模型层
 
@@ -308,48 +307,46 @@ ConnectorGateway 不是新 Agent。它只给同一个 Actor两项通用工具：
 - 判断按钮在哪里；
 - 决定下一步语义动作。
 
-### 9.2 Adapter 是 call-once 事务
+### 9.2 Adapter 是一笔机械调用
 
-`MissionRuntime` 为桌面 proposal 绑定 `ActorDecisionEnvelope`，记录 actor decision，然后通过 `call_once_with_permit` 调用 Controller。`AtomicDesktopAdapter` 再完成：
+`LiveVisualActor` 把 provider function call 解码成 raw proposal；`MissionRuntime` 入口对它
+做唯一一次 typed parse，再取得当前快照并用 `bind_actor_decision` 附加
+mission/frame/Broker 身份。格式错误的辅助 `task_state_update` 只被丢弃，不会连带否决
+可执行动作。binder 不重新序列化后验证整套 Mission、Broker 或工具 schema，
+`AtomicDesktopAdapter` 也不重复解析 proposal。Adapter只：
 
-1. 严格复制并验证 envelope；
-2. 将 submitted-image 坐标准备为物理参数；
-3. 核对 frozen target；
-4. 在 `FrameAuthority.run_if_current` 内锁定当前帧；
-5. 再查前台、窗口身份、每个 point 的 hit-test、取消信号；
-6. 开启 mutation admission；
-7. 先持久化 before frame 和 physical attempt；
-8. 通过全局 desktop action queue 调用 RawDevice 一次；
-9. 记录 receipt；
-10. 捕获 post-action frame，生成 deterministic action-effect；
-11. 非持续 hold 时强制释放指针。
+1. 在 `FrameAuthority.run_if_current` 内确认所引用帧仍是当前帧；
+2. 对图片坐标做有限数检查与一次 submitted-image → 物理屏幕线性映射；
+3. 通过全局 desktop action queue 调用 RawDevice 一次；若 raw 回执表明 release cleanup
+   不完整，在同一个 physical lease 内做最多两轮 pointer/key 释放，禁止下一动作插队；
+4. 记录供诊断的 physical attempt 与 receipt；
+5. 捕获下一张权威屏幕给同一个 Actor继续判断；
+6. 非持续 hold 时强制释放指针。
 
-Controller 的 `UNKNOWN` 还要看独立的 `input_completed` 三态：若为 `true` 且身份、permit、evidence 链仍有效，Runtime 记录 `transition_recorded`、返回 `ACTION_RECORDED`，在新帧恢复效果但绝不重放；若不是 `true`，或身份/证据/admission 无法闭合，则关闭 mutation authority 并 fail closed。明确 `input_completed=false` 的 REJECTED/陈旧提案才可以安全丢弃并让 Actor 在新帧上重决策。
+screen-first 路径不强制绑定窗口置前，也不以 foreground/hit-test 推断 veto 模型点击。
+Controller 的 `UNKNOWN` 若显示输入可能已发生就绝不重放；Runtime把回执和新屏幕交给
+Actor恢复。瞬态清理成功后只保留“输入结果未知”并交回新屏幕；只有同一 lease 内两轮
+物理释放仍未完成或身份真正错乱才终止。
 
 ### 9.3 跨帧 held pointer
 
 `drag(..., keep_holding=true)` 是唯一允许跨帧保留物理按住的当前模型入口。Broker 在 pointer held 时只投影 `drag`；lease 有过期时间，取消、异常、失焦或 close 都尝试强制 `mouse_up`。旧帧坐标不能跨帧复用，下一段路径仍由新 JPEG 决定。
 
-## 10. 完成与证据
+### 9.4 通用窗口与截图工具
 
-Actor 调用 `claim_obligation_done` 时，Runtime要求当前 run-scoped frame evidence，然后依次写入：
+`launch_application` 只做通用候选窗排序：普通窗优先于 `WS_EX_TOOLWINDOW`，再按可见、
+隐藏和 hidden-topmost 排序；只恢复选中的一个候选，不含应用名、标题或进程配方。
+`capture_screen` 接受相对路径并原样交给物理 backend，由 backend按 Runtime cwd和图片格式处理。
 
-```mermaid
-flowchart LR
-  subgraph O["ObligationStatus"]
-    OA["ACTIVE"] -->|obligation_claimed| OC["CLAIMED"]
-    OC -->|"verification_recorded\nverifier_kind=actor_claim"| OV["VERIFIED"]
-    OA -->|obligation_blocked| OB["BLOCKED"]
-  end
-  subgraph M["MissionStatus"]
-    MR["RUNNING\nclaim 后仍是 RUNNING"] -->|"全部 required obligation VERIFIED"| MA["AWAITING_MISSION_VERIFICATION"]
-    MA -->|mission_verified| MV["VERIFIED"]
-    MR --> MB["BLOCKED / CANCELED / FAILED"]
-  end
-  OV -. "Reducer recompute" .-> MA
-```
+## 10. 完成与诊断
 
-Runtime 在 claim 时要求同 run 的当前帧 evidence，然后直接构造 `verifier_kind="actor_claim"` 的成功 assessment，写 `verification_recorded`；这里的帧证据只证明“被引用的当前帧真实存在且 scope 正确”，不独立证明模型的语义判断正确。deterministic mission completion verifier 只核对所需 obligation 都有同 run、同 scope、可追溯的已接受 verification，不会再次看图判断用户目标。因此生产 Runtime 可以得到一致终态，而外部 E2E 仍可能证明 Actor claim 错了。外层 `RuntimeStatus.STATE_REJECTED` 或 ARP `failed` 也不是 `MissionStatus` 的同一枚举。
+Actor 调用 `claim_obligation_done` 时，语义判断已经由同一个模型在当前真实屏幕上完成。
+Runtime只把 claim 投影为 Mission 终态，便于状态机和 UI 展示；它不再调用另一个图像判断器、
+结果 oracle 或 trace/memory gate 来决定 pass。帧引用、physical attempt、receipt 和运行日志
+用于回答“哪一层先偏离”，不能推翻或补造 Actor 的完成判断。E2E harness 可以从真实应用
+终态报告测试结果，但该报告不反馈生产 Actor，也不成为生产执行链的一层。Runtime在写
+辅助 history 之前先缓存 claim 和最终 narration；history、completion snapshot 或诊断投影
+失败时仍返回原始 `user_result`。
 
 ## 11. 当前路径与 Legacy 的物理边界
 
@@ -377,7 +374,7 @@ flowchart TB
 
 当前有效证据中，MiMo 能完成精确点击、普通拖放、滑块、动态按住和 Notepad 精确文本，却在窄 corridor 和 Calculator 上把错误目标或路径直接提交出来；canonical 与 physical 层忠实执行了它的选择。因此复杂合同不是替模型思考，而是让团队能确定“这次到底是谁错了”。
 
-正确的改进方向是固定相同 goal、截图、工具 schema、预算和外部 oracle 做 provider/模型盲 A/B，或修复确实发生分歧的基础层。错误方向是把当前失败样本重新编码成 prompt 教程、坐标修正器、应用 recipe、答案器、target snapping 或第二语义角色。
+正确的改进方向是固定相同 goal、截图、工具 schema 和预算，比较可见真实终态做 provider/模型盲 A/B，或修复确实发生分歧的基础层。错误方向是把当前失败样本重新编码成 prompt 教程、坐标修正器、应用 recipe、答案器、target snapping 或第二语义角色。
 
 ## 13. 维护准入
 
@@ -387,7 +384,7 @@ flowchart TB
 2. 现有 owner 为什么结构上无法修复？
 3. 新 owner 的通用输入、输出、失败语义和生命周期是什么？
 4. 它替代并删除哪个旧 owner，还是会造成双写？
-5. 至少两个不同任务族的可见 Electron + 外部 oracle 是否都有实质提升？
+5. 至少两个不同任务族的可见 Electron 真实终态是否都有实质提升？
 6. 是否没有增加应用关键词、测试坐标、提示教学或第二模型角色？
 
 若这些问题没有证据答案，优先删除、归并或保持现状。

@@ -34,29 +34,8 @@ def capture_screen(
     path: str,
     window: bool,
 ) -> dict[str, Any]:
-    """Validate one capture request and delegate to the physical backend."""
-    if not path or not path.strip():
-        return {
-            "format": CAPTURE_FORMAT,
-            "ok": False,
-            "error": "capture_screen requires an absolute output path",
-        }
-    target = path.strip()
-    if not target.startswith(("\\\\", "/", "C:", "c:")) and not (
-        len(target) >= 3 and target[1:3] in (":\\", ":/")
-    ):
-        return {
-            "format": CAPTURE_FORMAT,
-            "ok": False,
-            "error": "capture_screen path must be absolute",
-        }
-    lowered = target.casefold()
-    if not lowered.endswith((".png", ".jpg", ".jpeg")):
-        return {
-            "format": CAPTURE_FORMAT,
-            "ok": False,
-            "error": "capture_screen path must end in .png, .jpg, or .jpeg",
-        }
+    """Delegate one capture request to its physical owner."""
+    target = str(path or "").strip()
     try:
         result = backend(path=target, window=bool(window))
     except Exception as exc:
@@ -77,7 +56,7 @@ def capture_screen(
 
 
 def list_windows(backend: WindowsBackend) -> dict[str, Any]:
-    """Return the visible window inventory from the injected backend."""
+    """Return visible windows and background apps from the backend."""
     try:
         result = backend()
     except Exception as exc:

@@ -70,6 +70,8 @@ _press_probe_local = threading.local()
 _held_mouse_lock = threading.Lock()
 _held_mouse_buttons: set[str] = set()
 _held_mouse_key_vks: dict[str, tuple[int, ...]] = {}
+_held_keyboard_vks: set[int] = set()
+_held_unicode_units: set[int] = set()
 
 
 def _valid_stop_signal(value: object) -> bool:
@@ -869,7 +871,11 @@ def _raw_click(
             )
             return _click_progress(
                 None, completed_clicks, "click down outcome unknown",
-                error_kind="mouse_down_outcome_unknown",
+                error_kind=(
+                    "release_cleanup_incomplete"
+                    if attempted and not released
+                    else "mouse_down_outcome_unknown"
+                ),
                 cleanup=released if attempted else False,
                 held_after=held_after,
             )
@@ -886,7 +892,7 @@ def _raw_click(
         if not released:
             return _click_progress(
                 None, completed_clicks, "click up outcome unknown",
-                error_kind="mouse_up_outcome_unknown",
+                error_kind="release_cleanup_incomplete",
                 cleanup=False if attempted else None,
                 held_after=held_after,
             )
@@ -924,10 +930,9 @@ def _abs_mouse_move(x: int, y: int) -> None:
 def _absolute_mouse_input(x: int, y: int) -> _Input:
     """Build one virtual-desktop absolute move matching screenshot pixels."""
 
-    vx = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
-    vy = user32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
-    vw = user32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
-    vh = user32.GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
+    vx, vy, vw, vh = _virtual_screen_geometry()
+    x = max(vx, min(vx + vw - 1, int(x)))
+    y = max(vy, min(vy + vh - 1, int(y)))
     nx = max(0, min(65535, round((int(x) - vx) * 65535 / max(1, vw - 1))))
     ny = max(0, min(65535, round((int(y) - vy) * 65535 / max(1, vh - 1))))
     flags = (
@@ -937,6 +942,23 @@ def _absolute_mouse_input(x: int, y: int) -> _Input:
         | 0x4000  # MOUSEEVENTF_VIRTUALDESK
     )
     return _mouse_input(flags, dx=nx, dy=ny)
+
+
+def _virtual_screen_geometry() -> tuple[int, int, int, int]:
+    return (
+        int(user32.GetSystemMetrics(76)),  # SM_XVIRTUALSCREEN
+        int(user32.GetSystemMetrics(77)),  # SM_YVIRTUALSCREEN
+        max(1, int(user32.GetSystemMetrics(78))),  # SM_CXVIRTUALSCREEN
+        max(1, int(user32.GetSystemMetrics(79))),  # SM_CYVIRTUALSCREEN
+    )
+
+
+def _saturate_virtual_point(x: int, y: int) -> tuple[int, int]:
+    vx, vy, vw, vh = _virtual_screen_geometry()
+    return (
+        max(vx, min(vx + vw - 1, int(x))),
+        max(vy, min(vy + vh - 1, int(y))),
+    )
 
 
 def _emit_move(x: int, y: int) -> None:
@@ -963,6 +985,9 @@ def _move_pointer_relative(
 ) -> bool:
     """Emit a smooth relative mouse path for raw-input/game consumers."""
 
+    _vx, _vy, vw, vh = _virtual_screen_geometry()
+    dx = max(-vw, min(vw, int(dx)))
+    dy = max(-vh, min(vh, int(dy)))
     distance = math.hypot(dx, dy)
     steps = max(1, int(math.ceil(distance / 8.0)))
     previous_x = previous_y = 0
@@ -1042,6 +1067,8 @@ def _move_pointer_path(
 ) -> bool:
     """Emit a real absolute path without changing any button state."""
     del hwnd
+    start = _saturate_virtual_point(*start)
+    end = _saturate_virtual_point(*end)
     distance = math.hypot(end[0] - start[0], end[1] - start[1])
     steps = max(1, int(math.ceil(distance / 8.0)))
     for index in range(1, steps + 1):
@@ -1071,6 +1098,7 @@ def _move_path_while_pressed(
 ) -> bool:
     """Move an already-held pointer without changing button state."""
     del hwnd
+    waypoints = [_saturate_virtual_point(*point) for point in waypoints]
     seg_lens = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
                 for a, b in zip(waypoints, waypoints[1:])]
     total = max(sum(seg_lens), 1.0)
@@ -1279,6 +1307,8 @@ def _held_drag_failure(
         button,
         force=True,
     )
+    if attempted and not released:
+        error_kind = "release_cleanup_incomplete"
     return _physical_drag_result(
         None,
         error=error,
@@ -1337,6 +1367,24 @@ def _execute_held_drag_segment(
             moves_completed=0,
             button=button,
         )
+
+    if phase != "begin":
+        with _held_mouse_lock:
+            held_key_vks = _held_mouse_key_vks.get(button.value, ())
+        if held_key_vks:
+            try:
+                _send_inputs([
+                    _hardware_key_input(vk) for vk in held_key_vks
+                ])
+            except Exception:
+                return _held_drag_failure(
+                    phase,
+                    error="held drag modifier outcome unknown",
+                    guard_decision=None,
+                    held_before=True,
+                    moves_completed=0,
+                    button=button,
+                )
 
     if phase == "begin":
         if _stop_requested(stop_event):
@@ -1475,13 +1523,8 @@ def execute_admitted_physical_drag(
         else None
     )
     held_mode = pointer_already_held or keep_holding
-    stationary_held = bool(
-        pointer_already_held is True
-        and not canonical_points
-        and (x1, y1) == (x2, y2)
-    )
-    closed_path = bool(
-        canonical_points
+    stationary_path = bool(
+        not canonical_points
         and (x1, y1) == (x2, y2)
     )
     valid_hold_token = (
@@ -1511,11 +1554,6 @@ def execute_admitted_physical_drag(
             not cleanup_only
             and (
                 any(type(value) is not int for value in (x1, y1, x2, y2))
-                or (
-                    (x1, y1) == (x2, y2)
-                    and not stationary_held
-                    and not closed_path
-                )
                 or (held_mode and not valid_hold_token)
                 or (not held_mode and hold_token is not None)
             )
@@ -1579,7 +1617,7 @@ def execute_admitted_physical_drag(
     end = (x2, y2)
     path = (
         [start]
-        if stationary_held
+        if stationary_path
         else [start, *canonical_points, end]
     )
     if held_mode:
@@ -2008,7 +2046,9 @@ def _unicode_units(char: str) -> tuple[int, ...]:
     return (0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF))
 
 
-def _vk_character_inputs(char: str) -> tuple[list[_Input], list[_Input]] | None:
+def _vk_character_inputs(
+    char: str,
+) -> tuple[list[_Input], list[_Input], tuple[int, ...]] | None:
     # Ask Windows to map against US English explicitly and emit scan codes:
     # virtual-key-only OEM punctuation (notably ``-``) can otherwise be
     # reinterpreted through a different foreground layout.  The matching
@@ -2040,7 +2080,7 @@ def _vk_character_inputs(char: str) -> tuple[list[_Input], list[_Input]] | None:
         _hardware_key_input(modifier, key_up=True)
         for modifier in reversed(modifiers)
     )
-    return downs, ups
+    return downs, ups, (*modifiers, vk)
 
 
 def _best_effort_key_releases(ups: list[_Input]) -> tuple[bool, bool]:
@@ -2052,6 +2092,43 @@ def _best_effort_key_releases(ups: list[_Input]) -> tuple[bool, bool]:
     return attempted, completed
 
 
+def _best_effort_owned_key_releases(
+    vks: tuple[int, ...],
+) -> tuple[bool, bool]:
+    attempted = bool(vks)
+    completed = True
+    for vk in vks:
+        if _try_release(
+            _send_inputs,
+            [_hardware_key_input(vk, key_up=True)],
+        ):
+            with _held_mouse_lock:
+                _held_keyboard_vks.discard(vk)
+        else:
+            completed = False
+    return attempted, completed
+
+
+def _best_effort_owned_unicode_releases(
+    units: tuple[int, ...],
+) -> tuple[bool, bool]:
+    attempted = bool(units)
+    completed = True
+    for unit in units:
+        if _try_release(
+            _send_inputs,
+            [_key_input(
+                scan=unit,
+                flags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP,
+            )],
+        ):
+            with _held_mouse_lock:
+                _held_unicode_units.discard(unit)
+        else:
+            completed = False
+    return attempted, completed
+
+
 def _send_text_codepoint(char: str, *, via_vk: bool) -> tuple[bool | None, bool, bool]:
     if char == "\n":
         vk = _VK["enter"]
@@ -2059,13 +2136,15 @@ def _send_text_codepoint(char: str, *, via_vk: bool) -> tuple[bool | None, bool,
             [_hardware_key_input(vk)],
             [_hardware_key_input(vk, key_up=True)],
             True,
+            (vk,),
+            (),
         )]
     elif via_vk:
         inputs = _vk_character_inputs(char)
         if inputs is None:
             return False, False, True
-        downs, ups = inputs
-        batches = [(downs, ups, False)]
+        downs, ups, vks = inputs
+        batches = [(downs, ups, False, vks, ())]
     else:
         batches = [(
             [_key_input(scan=unit, flags=_KEYEVENTF_UNICODE)],
@@ -2074,16 +2153,31 @@ def _send_text_codepoint(char: str, *, via_vk: bool) -> tuple[bool | None, bool,
                 flags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP,
             )],
             False,
+            (),
+            (unit,),
         ) for unit in _unicode_units(char)]
 
-    for downs, ups, split_release in batches:
+    for downs, ups, split_release, owned_vks, owned_units in batches:
+        with _held_mouse_lock:
+            _held_keyboard_vks.update(owned_vks)
+            _held_unicode_units.update(owned_units)
         try:
             _send_inputs(downs if split_release else [*downs, *ups])
             if split_release:
                 _send_inputs(ups)
         except Exception:
-            cleanup_attempted, cleanup_completed = _best_effort_key_releases(ups)
+            if owned_vks:
+                cleanup_attempted, cleanup_completed = (
+                    _best_effort_owned_key_releases(tuple(reversed(owned_vks)))
+                )
+            else:
+                cleanup_attempted, cleanup_completed = (
+                    _best_effort_owned_unicode_releases(owned_units)
+                )
             return None, cleanup_attempted, cleanup_completed
+        with _held_mouse_lock:
+            _held_keyboard_vks.difference_update(owned_vks)
+            _held_unicode_units.difference_update(owned_units)
     return True, False, True
 
 
@@ -2156,7 +2250,9 @@ def _execute_physical_type_text(
                         else "text input unavailable"
                     ),
                     error_kind=(
-                        "text_input_outcome_unknown"
+                        "release_cleanup_incomplete"
+                        if cleanup_attempted and not cleanup_completed
+                        else "text_input_outcome_unknown"
                         if sent is None
                         else "text_input_unavailable"
                     ),
@@ -2242,6 +2338,8 @@ def _execute_physical_hotkey_vks(
     release_had_error = False
     try:
         down_attempted = True
+        with _held_mouse_lock:
+            _held_keyboard_vks.update(vks)
         _send_inputs(downs)
         down_completed = True
         time.sleep(0.03)
@@ -2249,10 +2347,11 @@ def _execute_physical_hotkey_vks(
         pass
     finally:
         if down_attempted:
+            ordered_vks = tuple(reversed(vks))
             ordered_ups = list(reversed(ups))
             if release_individually:
-                release_attempted, release_completed = _best_effort_key_releases(
-                    ordered_ups
+                release_attempted, release_completed = (
+                    _best_effort_owned_key_releases(ordered_vks)
                 )
             else:
                 release_attempted = bool(ordered_ups)
@@ -2260,9 +2359,12 @@ def _execute_physical_hotkey_vks(
                     _send_inputs(ordered_ups)
                 except Exception:
                     release_had_error = True
-                    _attempted, release_completed = _best_effort_key_releases(
-                        ordered_ups
+                    _attempted, release_completed = (
+                        _best_effort_owned_key_releases(ordered_vks)
                     )
+                else:
+                    with _held_mouse_lock:
+                        _held_keyboard_vks.difference_update(vks)
 
     completed = bool(
         down_completed
@@ -2282,7 +2384,11 @@ def _execute_physical_hotkey_vks(
         release_cleanup_attempted=release_attempted,
         release_cleanup_completed=release_completed,
         error="hotkey outcome unknown",
-        error_kind="hotkey_outcome_unknown",
+        error_kind=(
+            "release_cleanup_incomplete"
+            if not release_completed
+            else "hotkey_outcome_unknown"
+        ),
         guard_decision=FinalKeyboardGuardDecision.TARGET_UNAVAILABLE,
     )
 
@@ -2403,13 +2509,15 @@ def _release_sequence_inputs(
         if not released:
             completed = False
     for vk in reversed(pressed_keys):
-        if not _try_release(
+        released = _try_release(
             _send_inputs,
             [_hardware_key_input(vk, key_up=True)],
-        ):
+        )
+        if released:
+            with _held_mouse_lock:
+                _held_keyboard_vks.discard(vk)
+        else:
             completed = False
-    pressed_buttons.clear()
-    pressed_keys.clear()
     return attempted, completed
 
 
@@ -2558,6 +2666,8 @@ def execute_admitted_physical_sequence(
                 vk = _vk_of(event.key)
                 if vk not in pressed_keys:
                     pressed_keys.append(vk)
+                with _held_mouse_lock:
+                    _held_keyboard_vks.add(vk)
                 physical_attempted = True
                 _send_inputs([_hardware_key_input(vk)])
             elif event.kind is InputEventKind.KEY_UP:
@@ -2565,6 +2675,8 @@ def execute_admitted_physical_sequence(
                 vk = _vk_of(event.key)
                 physical_attempted = True
                 _send_inputs([_hardware_key_input(vk, key_up=True)])
+                with _held_mouse_lock:
+                    _held_keyboard_vks.discard(vk)
                 if vk in pressed_keys:
                     pressed_keys.remove(vk)
             elif event.kind in {InputEventKind.WHEEL, InputEventKind.HWHEEL}:
@@ -3202,6 +3314,7 @@ def agent_holds_mouse_button(button: str = "left") -> bool:
         return str(button or "left") in _held_mouse_buttons
 
 
+@queued_desktop_action("release_held_mouse_buttons")
 def release_held_mouse_buttons() -> list[str]:
     """Release mouse buttons left held by an interrupted or completed run."""
     with _held_mouse_lock:
@@ -3211,10 +3324,39 @@ def release_held_mouse_buttons() -> list[str]:
         buttons = sorted(_held_mouse_buttons | set(_held_mouse_key_vks))
     released: list[str] = []
     for button in buttons:
-        result = mouse_up(button)
-        if result.get("ok"):
+        _attempted, completed, _held_after = _best_effort_release_button(
+            MouseButton(button),
+            force=True,
+        )
+        if completed:
             released.append(button)
     return released
+
+
+@queued_desktop_action("release_held_input_state")
+def release_held_input_state() -> bool:
+    """Boundedly retry every mouse/key release still owned by this process."""
+
+    release_held_mouse_buttons()
+    with _held_mouse_lock:
+        keys = tuple(_held_keyboard_vks)
+    for vk in reversed(keys):
+        if _try_release(
+            _send_inputs,
+            [_hardware_key_input(vk, key_up=True)],
+        ):
+            with _held_mouse_lock:
+                _held_keyboard_vks.discard(vk)
+    with _held_mouse_lock:
+        units = tuple(_held_unicode_units)
+    _best_effort_owned_unicode_releases(units)
+    with _held_mouse_lock:
+        return not (
+            _held_mouse_buttons
+            or _held_mouse_key_vks
+            or _held_keyboard_vks
+            or _held_unicode_units
+        )
 
 
 # --------------------------------------------------------------- screenshot base64

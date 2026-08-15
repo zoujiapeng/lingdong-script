@@ -47,8 +47,6 @@ from winpilot.visual_runtime.frame_observer import FrameObserver
 from winpilot.vnext.actor import InvalidActorProposal, parse_actor_proposal
 from winpilot.vnext.capabilities import (
     ExecutionMedium,
-    ToolArgumentValidationError,
-    ToolArgumentValidator,
 )
 from winpilot.vnext.evidence import EvidenceRegistry
 from winpilot.vnext.mission import (
@@ -302,6 +300,23 @@ def _config() -> dict[str, Any]:
     }
 
 
+def test_budget_freezes_configured_long_task_limits_without_derived_caps() -> None:
+    config = _config()
+    config["vnext"].update(
+        {
+            "max_turns": 250,
+            "max_runtime_s": 7200,
+            "max_model_calls": 750,
+        }
+    )
+
+    assert live_agent._freeze_budget(config).to_dict() == {
+        "max_turns": 250,
+        "max_runtime_s": 7200,
+        "max_model_calls": 750,
+    }
+
+
 def _observe_desktop_response(content: str = "") -> dict[str, Any]:
     return {
         "choices": [
@@ -431,6 +446,7 @@ def _facts(
 class _FakeSession:
     results: list[MissionRuntimeResult]
     model_calls: int = 0
+    latest_narration: str = ""
     closed: bool = False
     calls: int = 0
     mission_id: str = ""
@@ -1528,6 +1544,10 @@ def test_tool_catalog_exposes_generic_mouse_keyboard_mechanics() -> None:
     assert "maxItems" not in path
     assert path["items"]["minItems"] == 2
     assert path["items"]["maxItems"] == 2
+    assert "minimum" not in path["items"]["items"]
+    for action in ("click", "double_click", "move_mouse", "scroll"):
+        for coordinate in ("image_x", "image_y"):
+            assert "minimum" not in schemas[action]["properties"][coordinate]
     assert drag["properties"]["keep_holding"] == {
         "type": "boolean",
         "default": False,
@@ -1535,18 +1555,6 @@ def test_tool_catalog_exposes_generic_mouse_keyboard_mechanics() -> None:
     held_keys = drag["properties"]["held_keys"]
     assert set(held_keys["items"]["enum"]) == set(CANONICAL_HOTKEY_KEYS)
     assert held_keys["uniqueItems"] is True
-    validator = ToolArgumentValidator(catalog)
-    straight = {
-        "image_path": [[10, 20], [300, 200]],
-    }
-    assert validator.validate("drag", straight) == straight
-    held_segment = {
-        "image_path": [[160, 120]],
-        "keep_holding": True,
-    }
-    assert validator.validate("drag", held_segment) == held_segment
-    with pytest.raises(ToolArgumentValidationError):
-        validator.validate("drag", {**straight, "image_path": [[1, 2, 3]]})
     blocker = schemas["blocked"]["properties"]["blocker_kind"]
     assert blocker["maxLength"] == 64
     assert blocker["pattern"] == r"^[a-z][a-z0-9_]{0,63}$"
@@ -1577,20 +1585,6 @@ def test_tool_catalog_exposes_generic_mouse_keyboard_mechanics() -> None:
 
     with pytest.raises(ValueError, match="ordered modifiers"):
         HotkeyChord(("shift", "ctrl", "a"))
-    validator = ToolArgumentValidator(catalog)
-    with pytest.raises(ToolArgumentValidationError):
-        validator.validate(
-            "claim_obligation_done",
-            {"concise_claim": " \t "},
-        )
-    with pytest.raises(ToolArgumentValidationError):
-        validator.validate(
-            "blocked",
-            {
-                "blocker_kind": "visible_blocker",
-                "observed_facts": [" \n "],
-            },
-        )
     with pytest.raises(InvalidActorProposal):
         parse_actor_proposal(
             {
@@ -2091,9 +2085,10 @@ class _SnapshotErrorSession(_FakeSession):
         raise RuntimeError("snapshot unavailable")
 
 
-def test_completion_snapshot_error_still_closes_and_fails_closed() -> None:
+def test_completion_snapshot_error_does_not_overturn_runtime_completion() -> None:
     session = _SnapshotErrorSession(
-        [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
+        [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)],
+        latest_narration="the requested state is visibly present",
     )
     manager = ArpRunManager()
     execution = _prepare(
@@ -2106,10 +2101,14 @@ def test_completion_snapshot_error_still_closes_and_fails_closed() -> None:
 
     snapshot = _run_prepared(manager, execution)
 
-    assert snapshot["status"] == ArpRunStatus.FAILED.value
-    assert "completion snapshot failed closed" in snapshot["error"]
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"]["status"] == RuntimeStatus.MISSION_VERIFIED.value
+    assert execution.runtime_state["user_result"] == (
+        "the requested state is visibly present"
+    )
     assert session.closed is True
-    assert snapshot["evidence"] == []
+    assert len(snapshot["evidence"]) == 1
+    assert snapshot["evidence"][0]["verified"] is True
 
 
 def test_verified_result_survives_unavailable_diagnostic_summary(
@@ -2152,6 +2151,10 @@ def test_verified_result_survives_unavailable_diagnostic_summary(
     assert snapshot["result"]["status"] == RuntimeStatus.MISSION_VERIFIED.value
     assert snapshot["result"]["runtime_evidence"]["available"] is False
     assert session.closed is True
+    assert (
+        execution.runtime_state["user_result"]
+        == "the requested state is visibly present"
+    )
 
 
 def test_product_failure_detail_is_typed_status_only() -> None:
@@ -2223,14 +2226,6 @@ def test_completion_projection_follows_current_workspace_target() -> None:
         "frame_epoch": successor_epoch,
     }
 
-    assert (
-        live_agent._completion_binding_error(
-            source,
-            mission_id="mission-current-target",
-            run_id="run-current-target",
-        )
-        is None
-    )
     projected = live_agent._public_completion_snapshot(
         source,
         mission_id="mission-current-target",
@@ -2469,32 +2464,47 @@ def test_public_runtime_evidence_summary_requires_exact_explicit_scope(
 
 
 @pytest.mark.parametrize(
-    ("mutate", "rejected"),
+    ("mutate", "expected_result"),
     (
-        (lambda snapshot: snapshot.update({"run_id": "other-run"}), True),
-        (lambda snapshot: snapshot.update({"target_hwnd": HWND + 1}), False),
-        (lambda snapshot: snapshot.update({"frame_id": 10}), False),
+        (
+            lambda snapshot: snapshot.update({"mission_id": "other-mission"}),
+            "actor fallback",
+        ),
+        (
+            lambda snapshot: snapshot.update({"run_id": "other-run"}),
+            "actor fallback",
+        ),
+        (
+            lambda snapshot: snapshot.update({"target_hwnd": HWND + 1}),
+            "snapshot result",
+        ),
+        (
+            lambda snapshot: snapshot.update({"frame_id": 10}),
+            "snapshot result",
+        ),
         (
             lambda snapshot: snapshot["verified_evidence_bindings"][0].update(
                 {"run_id": "other-run"}
             ),
-            False,
+            "snapshot result",
         ),
     ),
 )
-def test_completion_only_requires_same_runtime_run(
+def test_completion_snapshot_metadata_cannot_overturn_runtime_completion(
     mutate: Any,
-    rejected: bool,
+    expected_result: str,
 ) -> None:
     class InvalidBindingSession(_FakeSession):
         def completion_snapshot(self) -> dict[str, Any]:
             snapshot = super().completion_snapshot()
+            snapshot["result"] = "snapshot result"
             mutate(snapshot)
             return snapshot
 
     session = InvalidBindingSession(
         [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
     )
+    session.latest_narration = "actor fallback"
     manager = ArpRunManager()
     execution = _prepare(
         _graph(),
@@ -2510,21 +2520,14 @@ def test_completion_only_requires_same_runtime_run(
     finally:
         BUS.remove_sink(events.append)
 
-    assert result["status"] == (
-        ArpRunStatus.FAILED.value if rejected else ArpRunStatus.DONE.value
-    )
+    assert result["status"] == ArpRunStatus.DONE.value
     done = [
         event for event in events
         if event["type"] == "live_agent_done"
     ]
     assert len(done) == 1
-    assert done[0]["status"] == (
-        RuntimeStatus.STATE_REJECTED.value
-        if rejected
-        else RuntimeStatus.MISSION_VERIFIED.value
-    )
-    if rejected:
-        assert "did not belong to this run" in result["error"]
+    assert done[0]["status"] == RuntimeStatus.MISSION_VERIFIED.value
+    assert execution.runtime_state["user_result"] == expected_result
 
 
 def test_pause_state_is_independent_of_frame_evidence_kind() -> None:
@@ -2650,23 +2653,6 @@ def test_pause_state_is_independent_of_frame_evidence_kind() -> None:
     )
 
     assert state.current(reducer.projection, turn_index=0).broker_state.paused is True
-
-
-def test_goal_admission_audit_is_validated_without_runtime_policy() -> None:
-    context = {
-        "runtime_state": {
-            "goal_admission": {
-                "format": "goal-admission/1",
-                "goal": GOAL,
-                "route": "live_agent",
-                "runtime_version": "vnext",
-                "reason": "single_semantic_agent",
-                "no_legacy_fallback": True,
-            },
-        },
-    }
-
-    assert live_agent._validate_goal_admission(context, goal=GOAL) is None
 
 
 class _RawClient:

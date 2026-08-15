@@ -2157,6 +2157,11 @@ def test_fast_controller_acquires_combined_clipboard_and_physical_lease(monkeypa
         return fn()
 
     monkeypatch.setattr(controller_module.DESKTOP_ACTION_QUEUE, "run", fake_run)
+    monkeypatch.setattr(
+        controller_module.action_executor,
+        "release_held_mouse_buttons",
+        lambda: [],
+    )
 
     class Session:
         snapshot = None
