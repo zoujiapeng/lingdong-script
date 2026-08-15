@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -575,20 +575,20 @@ describe('primary agent surface', () => {
     );
 
     expect(screen.queryByLabelText('快速入口')).not.toBeInTheDocument();
-    expect(screen.queryByText('步骤、画面、证据和运行审计')).not.toBeInTheDocument();
+    expect(screen.queryByText('执行、资料、流程与设置')).not.toBeInTheDocument();
     expect(screen.getByLabelText('输入框运行上下文')).toHaveClass('soft-hidden');
 
     await user.click(screen.getByRole('textbox', { name: '消息输入' }));
 
     expect(screen.getByLabelText('快速入口')).toBeInTheDocument();
-    expect(screen.getByText('步骤、画面、证据和运行审计')).toBeInTheDocument();
+    expect(screen.getByText('执行、资料、流程与设置')).toBeInTheDocument();
     expect(screen.getByLabelText('输入框运行上下文')).not.toHaveClass('soft-hidden');
 
     await user.click(screen.getByRole('button', { name: 'Visual Actor' }));
     await user.click(screen.getByRole('option', { name: '模型与接口设置' }));
     expect(openSystem).toHaveBeenCalledOnce();
 
-    await user.click(screen.getByRole('button', { name: /执行工作台/ }));
+    await user.click(screen.getByRole('button', { name: /^工作台/ }));
     expect(openWorkbench).toHaveBeenCalledOnce();
     expect(openResources).not.toHaveBeenCalled();
     expect(openCommand).not.toHaveBeenCalled();
@@ -789,7 +789,7 @@ describe('primary agent surface', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('任务未完成');
     expect(screen.getByRole('alert')).not.toHaveTextContent('已回复');
     expect(screen.getByRole('button', { name: '再次编辑' })).toBeVisible();
-    expect(screen.getByRole('button', { name: '打开资料' })).toHaveTextContent('任务未完成');
+    expect(screen.getByRole('button', { name: '打开对话列表' })).toHaveTextContent('任务未完成');
     expect(document.querySelector('.ld-window-signal.stopped')).not.toBeNull();
   });
 
@@ -821,7 +821,7 @@ describe('primary agent surface', () => {
 
     expect(screen.getByRole('status', { name: '任务结果' })).toHaveTextContent(result);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '打开资料' })).toHaveTextContent('Agent 已回复');
+    expect(screen.getByRole('button', { name: '打开对话列表' })).toHaveTextContent('Agent 已回复');
   });
 
   it('locks conversation mutation controls while a follow-up is submitting', async () => {
@@ -1016,7 +1016,7 @@ describe('primary agent surface', () => {
     expect(screen.getByLabelText('Agent 当前状态')).toBeInTheDocument();
   });
 
-  it('shows model narration, commands, results, and local replanning while work is active', () => {
+  it('shows live narration and replanning while keeping tool calls collapsed by default', async () => {
     const activeRun = {
       run_id: 'run-live-activity',
       kind: 'agent',
@@ -1075,12 +1075,84 @@ describe('primary agent surface', () => {
 
     const liveActivity = screen.getByLabelText('Agent 实时活动');
     expect(liveActivity).toBeInTheDocument();
-    expect(screen.getByLabelText('动态任务板')).toHaveTextContent('模型已更新 2 次');
-    expect(screen.getByLabelText('动态任务板')).toHaveTextContent('fix parser');
+    const taskBoard = document.querySelector('.ld-capsule-task-board');
+    expect(taskBoard).toHaveTextContent('模型已更新 2 次');
+    expect(taskBoard).toHaveTextContent('fix parser');
     expect(liveActivity).toHaveTextContent('I found the failing test and will repair it.');
-    expect(liveActivity).toHaveTextContent('python -m pytest -q');
-    expect(liveActivity).toHaveTextContent('12 passed');
-    expect(screen.getAllByText('运行命令').length).toBeGreaterThan(0);
+    const toolCalls = liveActivity.querySelector('details.ld-tool-call-group');
+    expect(toolCalls).toBeInstanceOf(HTMLDetailsElement);
+    expect(toolCalls).not.toHaveAttribute('open');
+    expect(within(toolCalls as HTMLElement).getByText(/工具调用/)).toBeVisible();
+    expect(within(toolCalls as HTMLElement).getByText('python -m pytest -q')).not.toBeVisible();
+    expect(within(toolCalls as HTMLElement).getByText('12 passed')).not.toBeVisible();
+
+    await userEvent.click(within(toolCalls as HTMLElement).getByText(/工具调用/));
+
+    expect(toolCalls).toHaveAttribute('open');
+    expect(within(toolCalls as HTMLElement).getByText('python -m pytest -q')).toBeVisible();
+    expect(within(toolCalls as HTMLElement).getByText('12 passed')).toBeVisible();
+    expect(within(toolCalls as HTMLElement).getAllByText('运行命令').length).toBeGreaterThan(0);
+  });
+
+  it('keeps terminal tool calls in the conversation and collapsed by default', async () => {
+    const completedRun = {
+      run_id: 'run-terminal-tool-activity',
+      kind: 'agent',
+      status: 'done',
+      phase: 'terminal',
+      goal: 'Run the focused tests and report the result',
+      started_at: 1,
+      updated_at: 5,
+      finished_at: 5,
+      result: 'The focused tests passed.',
+      timeline: [
+        {
+          type: 'live_agent_activity',
+          ts: 2,
+          kind: 'tool_start',
+          tool: 'run_shell',
+          status: 'running',
+          summary: 'python -m pytest src/renderer/test -q',
+        },
+        {
+          type: 'live_agent_activity',
+          ts: 4,
+          kind: 'tool_result',
+          tool: 'run_shell',
+          status: 'done',
+          summary: '24 passed',
+        },
+      ],
+      evidence: [],
+      metrics: {},
+    };
+
+    render(
+      <AgentCockpit
+        plane={cockpitPlane(
+          vi.fn(async () => goalRunStart()),
+          completedRun,
+          [completedRun],
+        ) as never}
+      />,
+    );
+
+    expect(screen.getByRole('status', { name: '任务结果' })).toHaveTextContent(
+      'The focused tests passed.',
+    );
+    const liveActivity = screen.getByLabelText('Agent 实时活动');
+    const toolCalls = liveActivity.querySelector('details.ld-tool-call-group');
+    expect(toolCalls).toBeInstanceOf(HTMLDetailsElement);
+    expect(toolCalls).not.toHaveAttribute('open');
+    expect(within(toolCalls as HTMLElement).getByText(/工具调用/)).toBeVisible();
+    expect(within(toolCalls as HTMLElement).getByText('python -m pytest src/renderer/test -q')).not.toBeVisible();
+    expect(within(toolCalls as HTMLElement).getByText('24 passed')).not.toBeVisible();
+
+    await userEvent.click(within(toolCalls as HTMLElement).getByText(/工具调用/));
+
+    expect(toolCalls).toHaveAttribute('open');
+    expect(within(toolCalls as HTMLElement).getByText('python -m pytest src/renderer/test -q')).toBeVisible();
+    expect(within(toolCalls as HTMLElement).getByText('24 passed')).toBeVisible();
   });
 
   it('collapses a long Agent answer without making it inaccessible', async () => {

@@ -1,4 +1,5 @@
 import type {
+  AgentThreadSnapshot,
   ArpExecutionSnapshot,
   ArpGraph,
   ChatGPTDesktopIntegration,
@@ -196,6 +197,14 @@ export class ControlPlaneClient {
   async runs(limit = 50): Promise<RunProjection[]> {
     const response = await this.request<{ ok: boolean; runs: RunProjection[] }>(`api/v2/runs?limit=${limit}`);
     return response.runs;
+  }
+
+  async listAgentThreads(limit = 100): Promise<AgentThreadSnapshot[]> {
+    const boundedLimit = Math.max(1, Math.min(Math.trunc(limit), 100));
+    const response = await this.request<{ ok: boolean; threads: AgentThreadSnapshot[] }>(
+      `api/v2/threads?limit=${boundedLimit}`,
+    );
+    return response.threads;
   }
 
   config(): Promise<Record<string, any>> {
