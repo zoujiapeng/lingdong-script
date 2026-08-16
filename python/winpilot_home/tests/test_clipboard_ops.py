@@ -100,6 +100,63 @@ def test_capture_screen_delegates_relative_path_to_backend() -> None:
     }
 
 
+def test_capture_screen_backend_puts_image_on_clipboard(monkeypatch, tmp_path):
+    import numpy as np
+    from winpilot.utils import screenshot as screenshot_utils
+
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    monkeypatch.setattr(
+        screenshot_utils, "capture", lambda region=None: frame
+    )
+    clipboard_dibs: list[bytes] = []
+    monkeypatch.setattr(
+        clipboard_ops, "_image_file_to_dib", lambda path: (b"dib", 8, 8)
+    )
+    monkeypatch.setattr(
+        clipboard_ops, "set_clipboard_dib", clipboard_dibs.append
+    )
+
+    target = tmp_path / "shot.png"
+    result = clipboard_ops.capture_screen_backend(
+        path=str(target), window=False
+    )
+
+    assert result["ok"] is True
+    assert result["path"] == str(target)
+    assert result["clipboard"] is True
+    assert "clipboard_error" not in result
+    assert clipboard_dibs == [b"dib"]
+    assert target.is_file()
+
+
+def test_capture_screen_backend_busy_clipboard_keeps_file_ok(monkeypatch, tmp_path):
+    import numpy as np
+    from winpilot.utils import screenshot as screenshot_utils
+
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    monkeypatch.setattr(
+        screenshot_utils, "capture", lambda region=None: frame
+    )
+    monkeypatch.setattr(
+        clipboard_ops, "_image_file_to_dib", lambda path: (b"dib", 8, 8)
+    )
+
+    def busy(_dib: bytes) -> None:
+        raise RuntimeError("clipboard is busy")
+
+    monkeypatch.setattr(clipboard_ops, "set_clipboard_dib", busy)
+
+    target = tmp_path / "shot.png"
+    result = clipboard_ops.capture_screen_backend(
+        path=str(target), window=False
+    )
+
+    assert result["ok"] is True
+    assert result["clipboard"] is False
+    assert "clipboard_error" in result
+    assert target.is_file()
+
+
 def test_list_windows_keeps_frontmost_24_with_truthful_facts(monkeypatch) -> None:
     handles = list(range(100, 130))
     user32 = _FakeUser32(handles, foreground=103)

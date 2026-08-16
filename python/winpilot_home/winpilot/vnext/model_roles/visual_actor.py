@@ -119,8 +119,11 @@ _TOOL_DESCRIPTIONS = {
     ),
     "launch_application": (
         "Open or restore one installed application or file/URL association "
-        "by display name, alias, or path. If it is already running, this "
-        "activates that instance instead of starting another."
+        "by display name, alias, or path; the name the user mentioned can be "
+        "passed directly because the runtime resolves it against a local app "
+        "index that includes desktop shortcuts and Store (UWP) apps, and the "
+        "tool reports its own resolution failure. If it is already running, "
+        "this activates that instance instead of starting another."
     ),
     "observe": (
         "Request a fresh whole-desktop frame without physical input. Use this "
@@ -1361,7 +1364,11 @@ def _capture_screen_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _CAPTURE_SCREEN_TOOL,
-                "description": "Save a screen or window image.",
+                "description": (
+                    "Save a screen or window image and put the same image on "
+                    "the clipboard, so a later Ctrl+V in a chat input pastes "
+                    "it; the result reports the absolute saved path."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1370,8 +1377,8 @@ def _capture_screen_tool_definitions() -> list[dict[str, Any]]:
                             "minLength": 1,
                             "maxLength": 512,
                             "description": (
-                                "PNG/JPEG path; relative paths use the runtime "
-                                "working directory."
+                                "PNG/JPEG path; the result echoes the absolute "
+                                "saved path."
                             ),
                         },
                         "window": {
@@ -1418,7 +1425,12 @@ def _paste_image_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _PASTE_IMAGE_TOOL,
-                "description": "Paste an image file.",
+                "description": (
+                    "Load one image file onto the clipboard and press Ctrl+V "
+                    "into the current foreground window; pass the exact path "
+                    "returned by capture_screen. The result echoes the loaded "
+                    "file's absolute path, size, and modification time."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {

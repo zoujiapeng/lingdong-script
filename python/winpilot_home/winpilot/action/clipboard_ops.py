@@ -63,6 +63,8 @@ def capture_screen_backend(*, path: str, window: bool) -> dict[str, Any]:
 
     ensure_process_dpi_awareness()
     target = Path(str(path or "")).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
     if target.suffix.casefold() not in _CAPTURE_EXTENSIONS:
         return {
             "format": CAPTURE_FORMAT,
@@ -100,7 +102,7 @@ def capture_screen_backend(*, path: str, window: bool) -> dict[str, Any]:
         save_options.update({"quality": 85, "optimize": True})
     image.save(payload, **save_options)
     target.write_bytes(payload.getvalue())
-    return {
+    result = {
         "format": CAPTURE_FORMAT,
         "ok": True,
         "path": str(target),
@@ -108,7 +110,20 @@ def capture_screen_backend(*, path: str, window: bool) -> dict[str, Any]:
         "height": int(image.height),
         "size_bytes": len(payload.getvalue()),
         "scope": "window" if window else "screen",
+        "clipboard": True,
     }
+    # Best effort: put the saved image onto the clipboard too, so a plain
+    # Ctrl+V in a chat input works with the freshly captured image.  The file
+    # save is authoritative; a busy clipboard must not fail the capture.
+    try:
+        dib, _, _ = _image_file_to_dib(target)
+        set_clipboard_dib(dib)
+    except Exception as exc:
+        result["clipboard"] = False
+        result["clipboard_error"] = (
+            f"{type(exc).__name__}: {exc}"[:400]
+        )
+    return result
 
 
 def list_windows_backend() -> dict[str, Any]:
@@ -256,6 +271,8 @@ def paste_image_backend(*, path: str) -> dict[str, Any]:
     import win32con
 
     image_path = Path(str(path or "")).expanduser()
+    if not image_path.is_absolute():
+        image_path = Path.cwd() / image_path
     if not image_path.is_file():
         return {
             "format": PASTE_FORMAT,
@@ -289,6 +306,8 @@ def paste_image_backend(*, path: str) -> dict[str, Any]:
         "path": str(image_path),
         "width": int(width),
         "height": int(height),
+        "size_bytes": int(image_path.stat().st_size),
+        "modified_at": int(image_path.stat().st_mtime),
         "via": "clipboard_dib",
     }
 

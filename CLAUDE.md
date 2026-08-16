@@ -310,7 +310,8 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 - `hotkey`（模型侧名称 `press_key`）
 - `input_sequence`（一条原子鼠标/键盘时间线）
 - `launch_application`（按显示名/别名/PATH 裸命令/路径通用启动，成功后经 workspace
-  因果后继机制重绑定到新窗口）
+  因果后继机制重绑定到新窗口；模型可见描述写明 app 在本地应用索引中解析、
+  含商店 UWP 应用，解析失败由工具自身上报）
 - `observe`（模型侧名称 `refresh_desktop`；不产生物理输入或完成判决，只把控制权交回
   下一张全桌面帧）
 - `claim_obligation_done`

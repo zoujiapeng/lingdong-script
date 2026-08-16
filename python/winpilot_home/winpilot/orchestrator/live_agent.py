@@ -1387,6 +1387,11 @@ def _tool_catalog() -> ToolCatalog:
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 512,
+                    "description": (
+                        "Display name, alias, or path as the user mentioned "
+                        "it; resolved against the local app index (desktop "
+                        "shortcuts and Store apps included)."
+                    ),
                 },
                 "arguments": {
                     "type": "string",
