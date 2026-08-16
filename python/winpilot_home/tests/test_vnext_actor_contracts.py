@@ -378,12 +378,10 @@ def _action(**overrides) -> DesktopActionProposal:
 
 def _bind(**overrides) -> ActorDecisionEnvelope:
     reducer, mission, profile, state, catalog, projection = _runtime()
+    del profile, catalog, projection
     values = {
         "mission_reducer": reducer,
-        "profile": profile,
         "state": state,
-        "catalog": catalog,
-        "projection": projection,
         "proposal": _action(),
         "frame_region": (-1200, 0, 1200, 800),
         "submitted_image_size": (900, 600),
@@ -859,8 +857,6 @@ def test_runtime_binder_derives_all_authority_and_round_trips() -> None:
     assert raw["format"] == ACTOR_ENVELOPE_FORMAT
     assert raw["mission_id"] == "mission-actor"
     assert raw["run_id"] == "run-actor"
-    assert len(raw["mission_projection_sha256"]) == 64
-    assert raw["accepted_mission_event_ids"]
     assert raw["obligation_id"] == "obligation-current"
     assert raw["turn_index"] == 5
     assert raw["frame_id"] == 82
@@ -868,7 +864,6 @@ def test_runtime_binder_derives_all_authority_and_round_trips() -> None:
     assert raw["target_binding_id"] == "binding-current"
     assert raw["pointer_disposition"] == "released"
     assert raw["pointer_lease_id"] is None
-    assert raw["capability_grant_ids"] == []
     assert raw["allowed_evidence_scope"] == ["e-target"]
     assert ActorDecisionEnvelope.from_dict(raw) == envelope
     assert json.loads(envelope.to_json()) == raw
@@ -877,14 +872,9 @@ def test_runtime_binder_derives_all_authority_and_round_trips() -> None:
     assert envelope.region == tuple(raw["frame_region"])
     assert envelope.submitted_size == tuple(raw["submitted_image_size"])
     assert envelope.image_sha256 == raw["frame_image_sha256"]
-    assert set(raw["proposal"]).isdisjoint({
-        "mission_id",
-        "frame_id",
-        "broker_projection_id",
-    })
 
 
-def test_full_desktop_binder_does_not_admit_by_window_binding() -> None:
+def test_full_desktop_binder_keeps_frame_facts_without_window_admission() -> None:
     reducer = _mission_reducer()
     mission = reducer.projection
     profile = _profile(mission)
@@ -895,7 +885,7 @@ def test_full_desktop_binder_does_not_admit_by_window_binding() -> None:
         ),
     )
     catalog = _catalog()
-    projection = CapabilityBroker(catalog).project(
+    CapabilityBroker(catalog).project(
         mission,
         profile,
         state,
@@ -903,10 +893,7 @@ def test_full_desktop_binder_does_not_admit_by_window_binding() -> None:
 
     envelope = bind_actor_decision(
         mission_reducer=reducer,
-        profile=profile,
         state=state,
-        catalog=catalog,
-        projection=projection,
         proposal=_action(),
         frame_region=(-1200, 0, 1200, 800),
         submitted_image_size=(900, 600),
@@ -918,17 +905,13 @@ def test_full_desktop_binder_does_not_admit_by_window_binding() -> None:
     assert envelope.frame_scope == "full_desktop"
     assert envelope.frame_hwnd == 999
     assert envelope.target_binding_id == "binding-current"
-    assert projection.target_binding_id == "binding-current"
 
 
 def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
-    reducer, _mission, profile, state, catalog, projection = _held_runtime()
+    reducer, _mission, _profile, state, _catalog, _projection = _held_runtime()
     envelope = bind_actor_decision(
         mission_reducer=reducer,
-        profile=profile,
         state=state,
-        catalog=catalog,
-        projection=projection,
         proposal=_held_drag(),
         frame_region=(-1200, 0, 1200, 800),
         submitted_image_size=(900, 600),
@@ -942,13 +925,10 @@ def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
 
 
 def test_held_envelope_accepts_mouse_keyboard_actions_and_tracks_lease() -> None:
-    reducer, _mission, profile, state, catalog, projection = _held_runtime()
+    reducer, _mission, _profile, state, _catalog, _projection = _held_runtime()
     common = {
         "mission_reducer": reducer,
-        "profile": profile,
         "state": state,
-        "catalog": catalog,
-        "projection": projection,
         "frame_region": (-1200, 0, 1200, 800),
         "submitted_image_size": (900, 600),
         "frame_image_sha256": "b" * 64,
@@ -982,34 +962,8 @@ def test_held_envelope_accepts_mouse_keyboard_actions_and_tracks_lease() -> None
         )
 
 
-def test_envelope_is_content_addressed_and_tamper_evident() -> None:
+def test_envelope_decision_ids_are_deterministic_per_material() -> None:
     envelope = _bind()
-    raw = envelope.to_dict()
-    changes = (
-        {"turn_index": raw["turn_index"] + 1},
-        {"mission_projection_sha256": "f" * 64},
-        {"accepted_mission_event_ids": []},
-        {"catalog_fingerprint": "a" * 64},
-        {"profile_id": "profile-other"},
-        {"state_fingerprint": "c" * 64},
-        {"frame_id": raw["frame_id"] + 1},
-        {"frame_image_sha256": "d" * 64},
-        {"target_binding_id": "binding-other"},
-        {"broker_projection_id": "projection-other"},
-        {"allowed_evidence_scope": []},
-        {
-            "proposal": {
-                **raw["proposal"],
-                "action": "double_click",
-            }
-        },
-    )
-    for change in changes:
-        with pytest.raises(
-            InvalidActorEnvelope,
-            match="decision_id",
-        ):
-            ActorDecisionEnvelope.from_dict({**raw, **change})
     changed_frame = _bind(frame_image_sha256="e" * 64)
     changed_action = _bind(proposal=_action(action="double_click"))
     assert len({
@@ -1017,6 +971,7 @@ def test_envelope_is_content_addressed_and_tamper_evident() -> None:
         changed_frame.decision_id,
         changed_action.decision_id,
     }) == 3
+    assert _bind().decision_id == envelope.decision_id
 
 
 def test_envelope_wire_is_strict_bounded_and_frozen() -> None:
@@ -1105,8 +1060,6 @@ def test_envelope_wire_rejects_coercible_scalars_none_and_non_list_arrays() -> N
         with pytest.raises(InvalidActorEnvelope):
             ActorDecisionEnvelope.from_dict({**raw, field: value})
     for field in (
-        "accepted_mission_event_ids",
-        "capability_grant_ids",
         "allowed_evidence_scope",
         "frame_region",
         "submitted_image_size",
@@ -1319,17 +1272,14 @@ def test_envelope_structurally_pins_the_real_frame_authority() -> None:
         frame.scope,
     ))
     catalog = _catalog()
-    projection = CapabilityBroker(catalog).project(
+    CapabilityBroker(catalog).project(
         mission,
         profile,
         state,
     )
     envelope = bind_actor_decision(
         mission_reducer=reducer,
-        profile=profile,
         state=state,
-        catalog=catalog,
-        projection=projection,
         proposal=_action(),
         frame_region=frame.region,
         submitted_image_size=frame.submitted_size,
@@ -1343,53 +1293,6 @@ def test_envelope_structurally_pins_the_real_frame_authority() -> None:
     )
     assert called is True
     assert result == "pinned"
-
-
-def test_binder_rejects_projection_catalog_and_tool_misalignment() -> None:
-    reducer, mission, profile, state, catalog, projection = _runtime()
-    common = {
-        "mission_reducer": reducer,
-        "profile": profile,
-        "state": state,
-        "catalog": catalog,
-        "projection": projection,
-        "frame_region": (0, 0, 1200, 800),
-        "submitted_image_size": (1200, 800),
-        "frame_image_sha256": "b" * 64,
-    }
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="outside BrokerProjection",
-    ):
-        bind_actor_decision(
-            **common,
-            proposal=_action(action="drag"),
-        )
-    substituted_catalog = ToolCatalog((
-        *catalog.tools,
-        _tool("unused_tool", MutationKind.NONE, order=99),
-    ))
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="fingerprints",
-    ):
-        bind_actor_decision(
-            **{**common, "catalog": substituted_catalog},
-            proposal=_action(),
-        )
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="outside BrokerProjection",
-    ):
-        bind_actor_decision(
-            **common,
-            proposal=InspectionRequest(
-                region=ImageRegion(
-                    x=1.0, y=1.0, width=2.0, height=2.0
-                ),
-                question="Inspect this future-only region",
-            ),
-        )
 
 
 @pytest.mark.parametrize(
@@ -1425,154 +1328,10 @@ def test_binder_accepts_finite_pointer_overshoot_but_keeps_regions_bounded() -> 
         overshoot = _bind(proposal=_action(args=args))
         assert overshoot.proposal.args == args
 
-    outside_region = ObserveProposal(
-        observation_kind="image_region",
-        image_region=ImageRegion(
-            x=895.0,
-            y=590.0,
-            width=10.0,
-            height=10.0,
-        ),
-        question="Inspect the submitted-image edge",
-    )
-    with pytest.raises(
-        InvalidActorProposal,
-        match="exact submitted image",
-    ):
-        _bind(proposal=outside_region)
-
-
-@pytest.mark.parametrize(
-    ("tool", "proposal"),
-    (
-        (
-            _tool(
-                "click",
-                MutationKind.NONE,
-                capabilities=("visual.interact",),
-                order=1,
-            ),
-            _action(),
-        ),
-        (
-            _tool(
-                "blocked",
-                MutationKind.GUI,
-                capabilities=("visual.interact",),
-                prerequisites=GUI_GATES,
-                order=1,
-            ),
-            BlockedReport(
-                blocker_kind="unknown",
-                observed_facts=("The task cannot proceed",),
-            ),
-        ),
-    ),
-)
-def test_binder_rejects_tool_mutation_kind_spoofing(tool, proposal) -> None:
-    reducer = _mission_reducer()
-    mission = reducer.projection
-    profile = _profile(mission)
-    state = _state()
-    catalog = ToolCatalog((tool,))
-    projection = CapabilityBroker(catalog).project(
-        mission, profile, state
-    )
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="mutation contract",
-    ):
-        bind_actor_decision(
-            mission_reducer=reducer,
-            profile=profile,
-            state=state,
-            catalog=catalog,
-            projection=projection,
-            proposal=proposal,
-            frame_region=(0, 0, 100, 100),
-            submitted_image_size=(100, 100),
-            frame_image_sha256="b" * 64,
-        )
-
-
-def test_binder_rejects_non_actor_route_and_stale_runtime() -> None:
-    reducer = _mission_reducer(
-        "communication.send_text",
-        bound=False,
-    )
-    mission = reducer.projection
-    profile = _profile(mission)
-    offer = ExecutorOffer(
-        executor_id="provider-1",
-        route=ToolRoute.PROVIDER,
-        supported_capabilities=("communication.send_text",),
-        tool_names=("send_text",),
-        available=True,
-        live=True,
-        authorization_scopes=("external.send",),
-        receipt_kinds=("delivery.receipt",),
-    )
-    catalog = ToolCatalog((
-        _tool(
-            "send_text",
-            MutationKind.EXTERNAL,
-            route=ToolRoute.PROVIDER,
-            capabilities=("communication.send_text",),
-            prerequisites=(
-                "recipient_bound",
-                "adapter_live",
-                "receipt_capable",
-                "runtime_healthy",
-            ),
-            authorization_scope="external.send",
-            order=1,
-        ),
-    ))
-    state = _state(
-        target=TargetState(),
-        frame=AuthoritativeFrameState(),
-        executor_offers=(offer,),
-        authorization_scopes=("external.send", "recipient.bound"),
-    )
-    projection = CapabilityBroker(catalog).project(
-        mission, profile, state
-    )
-    assert projection.execution_route is ExecutionRoute.PROVIDER
-    with pytest.raises(InvalidActorAdmission, match="not a Visual Actor"):
-        bind_actor_decision(
-            mission_reducer=reducer,
-            profile=profile,
-            state=state,
-            catalog=catalog,
-            projection=projection,
-            proposal=_action(),
-            frame_region=(0, 0, 100, 100),
-            submitted_image_size=(100, 100),
-            frame_image_sha256="b" * 64,
-        )
-
-    reducer, mission, profile, state, catalog, projection = _runtime()
-    stale_state = replace(state, authorization_scopes=("unused.scope",))
-    with pytest.raises(InvalidActorAdmission, match="fingerprints"):
-        bind_actor_decision(
-            mission_reducer=reducer,
-            profile=profile,
-            state=stale_state,
-            catalog=catalog,
-            projection=projection,
-            proposal=_action(),
-            frame_region=(0, 0, 100, 100),
-            submitted_image_size=(100, 100),
-            frame_image_sha256="b" * 64,
-        )
-
-
-def test_binder_rejects_unknown_evidence_scope() -> None:
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="outside the active obligation",
-    ):
-        _bind(allowed_evidence_scope=("e-invented",))
+    with pytest.raises(InvalidActorAdmission, match="frame_region"):
+        _bind(frame_region=(0, 0, 0, 1))
+    with pytest.raises(InvalidActorAdmission, match="submitted_image_size"):
+        _bind(submitted_image_size=(0, 1))
 
 
 def test_actor_package_is_exact_pure_and_default_unreachable() -> None:

@@ -595,13 +595,8 @@ def _envelope(state, binding: TargetBinding, action: str):
         "mission_id": MISSION_ID,
         "run_id": RUN_ID,
         "mission_revision": 0,
-        "mission_projection_sha256": "1" * 64,
-        "accepted_mission_event_ids": ["event-target-bound"],
         "obligation_id": OBLIGATION_ID,
         "turn_index": 0,
-        "catalog_fingerprint": "2" * 64,
-        "profile_id": "fixed-standard",
-        "state_fingerprint": "3" * 64,
         "frame_id": state.frame_id,
         "frame_epoch": state.epoch,
         "frame_hwnd": state.hwnd,
@@ -612,8 +607,6 @@ def _envelope(state, binding: TargetBinding, action: str):
         "target_binding_id": binding.binding_id,
         "pointer_disposition": "released",
         "pointer_lease_id": None,
-        "broker_projection_id": _projection_id(state, binding, action),
-        "capability_grant_ids": [],
         "allowed_evidence_scope": [CURRENT_EVIDENCE_ID],
         "proposal": _proposal(action),
     }
@@ -651,12 +644,12 @@ def _broker_projection(
 ) -> dict[str, Any]:
     return {
         "format": "broker-projection/1",
-        "projection_id": envelope.broker_projection_id,
+        "projection_id": "projection-adapter-test",
         "mission_id": envelope.mission_id,
         "run_id": envelope.run_id,
-        "catalog_fingerprint": envelope.catalog_fingerprint,
-        "profile_id": envelope.profile_id,
-        "state_fingerprint": envelope.state_fingerprint,
+        "catalog_fingerprint": "2" * 64,
+        "profile_id": "fixed-standard",
+        "state_fingerprint": "3" * 64,
         "mission_revision": envelope.mission_revision,
         "obligation_id": envelope.obligation_id,
         "turn_index": envelope.turn_index,
@@ -667,10 +660,7 @@ def _broker_projection(
         "frame_scope": envelope.frame_scope,
         "pointer_lease_id": envelope.pointer_lease_id,
         "tool_names": [envelope.proposal.action],
-        "active_grants": [
-            {"grant_id": grant_id}
-            for grant_id in envelope.capability_grant_ids
-        ],
+        "active_grants": [],
         "missing_capabilities": [],
         "projection_reasons": [],
     }

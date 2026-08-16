@@ -1,10 +1,11 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-15。当前唯一产品分支是 `master`。本文件不再把某个提交写成
-> “当前 HEAD”；接手时必须现场运行 `git rev-parse HEAD`、`git rev-parse origin/master`
-> 并查询该精确 SHA 的 Actions。13.20–13.28 已进入或正在进入主线；不要用更早的提交说明覆盖
-> Thread/Turn、按需桌面租约、通用 connector、history-depth 证据或 provisional
-> native-provider 边界。
+> 最后核对：2026-08-16。唯一长期产品分支是 `master`；本分支
+> `codex/model-directed-orchestration` 的 2026-08-14/08-15 两节已在本分支提交、尚未合入
+> `master`。本文件不再把某个提交写成“当前 HEAD”；接手时必须现场运行
+> `git rev-parse HEAD`、`git rev-parse origin/master` 并查询该精确 SHA 的 Actions。
+> 13.20–13.28 已进入或正在进入主线；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、
+> 通用 connector、history-depth 证据或 provisional native-provider 边界。
 
 本文件是换 Codex 窗口后的第一入口。它保存当前决策和继续工作的边界，不替代
 长期架构与测试规范。依次阅读：
@@ -176,7 +177,7 @@ Electron「智能代理」
   -> 原始 goal + 最多 12 条、16 KiB 的成功 Turn 原生历史
   -> 同一模型直接 reply，或搜索/调用显式只读 connector，或申请 observe_desktop
   -> 只有 observe_desktop 才建立 run-bound lease，Electron 随后让出前台并冻结 target
-  -> 同一 Actor 继续读取权威 JPEG + 有界 task state + 最近三笔原生 tool exchange
+  -> 同一 Actor 继续读取权威 JPEG + 有界 task state + 紧邻一笔 provider 原生 tool exchange
   -> 模型选择一笔通用 GUI 工具调用
   -> CapabilityBroker 只投影机械可用工具
   -> AtomicDesktopAdapter 唯一一次坐标映射
@@ -289,7 +290,7 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 
 ## 动作面与上下文
 
-2026-08-03 整改后，初始文本轮带一个 68 词的通用角色说明
+2026-08-03 整改后，初始文本轮带一个短通用角色说明
 `INITIAL_ACTOR_SYSTEM_CONTRACT`（回答聊天、混合目标先做任务、不编造结果），不包含
 应用配方、关键词 router 或坐标教学；模型仍自由选择直接回复、connector 或桌面。入口：
 
@@ -331,7 +332,7 @@ schema 删除，不再要求模型为机械动作另写一份意图。连续 INV
 `max_turns`/`max_model_calls` 预算作为机械停止，模型可以在预算内持续自我纠正。
 
 视觉系统提示词保持短小（含聊天/任务混合目标与 `blocked` 停止判断）；
-初始文本轮只带上述短角色合同（68 词），不增加应用或界面教学。Thread
+初始文本轮只带上述短角色合同，不增加应用或界面教学。Thread
 只保留最多 12 条、16 KiB 的成功用户/模型原生消息；失败 Turn 不进入历史。现有
 `AgentThreadStore` 还把最多 100 个 Thread 的这个有界成功投影原子写入私有 checkpoint，
 服务重启后恢复同一 `thread_id`、可见成功结果与原生消息；它不保存 trace 正文、失败 Turn、
@@ -361,8 +362,9 @@ Actor 上下文目前还保留最多 64 项安全动作摘要；删除 A/B 未�
 当前可复现基线：
 
 - MiMo `mimo-v2.5` 原生接收 JPEG；
-- `api.thinking=false`；
-- Visual Actor `temperature=0.3`；
+- Visual Actor 请求 `temperature=0.0`；`api.thinking=false` 不再强行发送
+  `thinking: disabled`（MiMo 默认 thinking 模式下 provider 会固定 sampling 参数，
+  见 2026-08-14 节）；
 - 最大提交边 1120；
 - 每个 vNext Visual Actor 决策最多一次 provider attempt。
 
@@ -412,178 +414,29 @@ adapter 尚无真实 provider credential 联机与跨任务族 Electron E2E，�
 只有当未来 Pi 能整体替换并删除 Python 模型循环 owner，且跨任务 E2E 明显提高时才
 考虑引入。不能把 Pi 再包一层后与现有 loop 长期双写。
 
-## 当前精确源码证据
+## 13.16–13.24 实验链摘要（详细 run 证据见架构重置文档同名节）
 
-屏幕优先帧（full_desktop）落地后的最新可见 Electron 受控 smoke 为 `3/4`：
-drag-fit、slider、dynamic-hold 通过，game-drag-v2（corridor）失败属模型轨迹
-几何（输入执行正常、外部事件 trusted）。此前的 `6/10` 矩阵（含 4 个 corridor
-全失败）是 target-window 裁剪帧时代的旧基线，不再代表当前源码。
+以下结论保留因为它们是当前设计的来源；run 级明细不再重复，见
+`docs/GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md` 13.16–13.24。
 
-通过条件包括用操作系统键盘向可见 Electron 输入原始目标、用鼠标点击发送、空
-session、准确 run/trace 绑定与 RawDevice 物理回执；UIA 只负责定位与读回。
-同一工作树的完整回归为 WinPilot `3627 passed, 13 skipped`；typecheck 与
-renderer/Electron build 通过。它们证明回归合同；任务完成由模型在真实屏幕上
-自行判断，本仓库不再建设独立结果证据装置。
-
-新增的原生 Explorer 长任务也使用同一真实前端输入口径。生产对照
-`arp-20260731-072140-0f4b81` 和三字段去重臂
-`arp-20260731-073504-a24efb` 均绑定正确 Explorer HWND，分别有 29 次真实输入
-全部 applied；外部文件系统 oracle 均失败。去重臂完成了前两个正确重命名，但
-最终仍为 `center-7Q4M.txt.txt / north-7Q4M.txt / south-7Q4M.txt`，没有目录。
-因此生产候选已回退，当前精确源码仍是矩阵全量回归时的 Runtime。
-该历史 run 重启后曾显示“已中断”，是当时独立的持久化缺口，不解释任务外部失败。
-13.26 已用有界私有 Thread checkpoint 修复并通过正常关闭/全新服务进程的两族复验；
-公共 trace 仍保持脱敏，不能用恢复投影冒充任务成功。
-
-随后完成的严格交叉配对共有 8 个有效 run：A 的 Explorer 两次均失败、Notepad
-两次精确落盘；B 的 Explorer 两次均失败，Notepad 一次精确落盘，另一次 Runtime
-提交和回执均为 14 字符 `E2E-ALPHA-N1X7`，但可见窗口与磁盘只有
-`E2-ALPHA-N1X7`。因此该缺字首先属于输入交付/应用边界，具体根因待跨族复现；
-删除臂仍未达到保留门。
-长 goal 的 UIA `ValuePattern` 只返回首个视觉行时，runner 现在用只读
-`TextPattern` 核对完整文档；无效的提交前样本被排除，8 个有效 run 均从前台
-Electron 用操作系统键盘输入并以真实鼠标发送。
-
-13.18 的新交付复验进一步得到 `type_text` delivery `8/8`、外部任务 `7/8`；
-13.17 的缺字没有跨族复现，当前输入实现不变。P4 Notepad 的小窗口失败发生在首次
-精确写入内存后：水平视口只露出后缀，模型连续重输而没有保存。相同 token 的最大化
-探索对照四个动作即精确落盘，但保存后的 provider `APITimeoutError` 和
-`APIConnectionError` 阻止了 Runtime 正常结束。另有 P3 Notepad 首次 `Ctrl+A`
-和 P4 Explorer 首次 `Enter` 回执完整但稳定外部状态未生效，可进入下一轮通用按键
-消费边界的测试型 A/B；不得添加重复按键规则。
-
-13.20 已把 13.19 的失败候选落成当前产品合同。主入口现在只提交 `goal` 与可选
-`thread_id`；同一个 `LiveVisualActor` 在短角色合同首轮直接 `reply` 或调用唯一
-`observe_desktop`（2026-08-03 前为零系统提示，见"动作面与上下文"）。只有后者才发布
-run-bound lease，Electron 此时才隐藏并交付精确 target，matching terminal 自行恢复。
-没有 router、第二角色、旧 `/api/chat`
-或应用 prompt。服务端 Thread/Turn 只保存最近 12 条、16 KiB 的成功用户可见原生
-交换；失败 Turn 不进入历史。13.20 当时仍是进程内存状态，13.26 已增加同一 owner 的
-有界私有 continuation checkpoint。
-
-当前源码的真实可见 Electron 验收在同一 Thread 连续完成 7 个 direct reply 和一个
-Notepad 桌面 Turn：能跨轮回答 `95-B`，桌面轮在租约后用
-`Ctrl+A → type_text → Ctrl+S` 把外部文件精确保存为 `DESKTOP-c419bb42`，产品自行
-恢复；恢复后的下一轮又只凭历史精确回复该 token，lease idle、零物理动作。两次
-模型 transport `Connection error` 经普通用户原样重发恢复，失败 Turn 未污染历史，
-归为 provider/基础设施干扰，不增加 Runtime 自动重试。桌面结果通过，但其完成文本
-比“只回复已完成”更长，是模型格式偏差。生产切片实际为 `+1372/-155`、净增 1217
-行；成本显著高于 13.19 估计，主要来自 Thread/Turn、租约竞态与跨进程生命周期。
-最终 Python 全量 `3388 passed, 13 skipped`，renderer `234 passed` 且 typecheck
-通过。完整合同、证据、保留/回退和下一实验见架构重置文档 13.20。
-
-13.21 在同一 Actor 上加入两个短 generic connector 工具和显式 native-provider wire
-边界，没有增加 router、第二角色或服务专属 prompt。只读 `ConnectorGateway` 的通用
-fixture exact-read 与 connector→Notepad 外部结果为 `2/2`；20 个同 Thread 聊天 Turn
-为 `20/20`，第 20 轮精确回忆第 18 轮随机 marker。官方 GitHub Gateway 物理
-`get_commit(master)` 返回独立 `gh api` 核对的同一 SHA；中文可见 run 因 goal 在提交前
-变成大量 `?` 只算测试干扰。完整 ASCII run 则在 5 次模型响应后返回未批准工具并
-`state_rejected`，是模型工具选择/停止失败，不增加 formatter 或 Runtime 修正。
-
-冻结 Legacy 确有 32 KiB 前 append-only 的 DeepSeek stable-prefix 布局，当前 vNext 不走
-它，也不发送 `prompt_cache_key`、`cache_control` 或 `cachedContent`。真实 20-turn usage
-为 `21626` prompt、`13248` cache hit、`8378` miss，证明上游自动命中与 telemetry 生效，
-不证明项目主动创建缓存。Responses、Anthropic、Gemini wire 仅显式启用且仍 provisional；
-审计发现的 provider 误切 wire 与 Anthropic `strict:true` 丢失已修复，但三家没有真实
-credential E2E。Operit 只做 LGPL-3.0 源码审计和 clean-room 设计参考，没有逐字搬运或
-引入 Android runtime；Pi 计划不变。
-
-13.21 生产切片为 `+2207/-114`；连同 13.20，当前完整生产工作树相对 HEAD 为
-`+3579/-269`。最终验证为 Python `3458 passed, 13 skipped, 1 warning`、renderer
-`234 passed`、TypeScript typecheck 通过。完整外部证据、失败分层和唯一下一实验见
-重置文档 13.21。
-
-13.22 已执行 strict history-depth pilot，生产代码 `+0/-0`。相同 fixture/token/task/path
-的 fresh 第 1 轮与前端 20 Turn 后第 21 轮都失败，但首个分歧不同：fresh 样本在 Save
-动作前出现未复现的 `target_identity_changed`；history 样本 connector 链正确执行两次
-后零 GUI 动作，以两次非法 visual proposal 结束。因此单对不能归因 history。新鲜诊断
-`arp-20260731-232655-3f7c7a` 又证明 connector/raw/canonical/physical 一致、13 笔 GUI
-动作 applied；Windows 文件名编辑框最终显示 `*.txtC:\Users\...`，模型两次看到“文件名
-无效”仍重复策略，故不改 Runtime、不加 Windows/Save As 规则。
-
-paired runner 已在测试侧继续收紧：随机 AB/BA 顺序、实测 task/config/source/path hash、
-实际 provider history message count/chars/roles/hash、20 个 history chat 的零 connector/
-零 lease/零 GUI oracle、严格文件与产品恢复判定。旧完整 report 的 `separate_threads=false`
-是失败 target Thread ID 投影错误，实际两 Thread 不同；它和更早的 Vite/Runtime-ready/
-sidecar import 失败均属测试干扰。一次性 target-identity probe 已删除；通用参数链与实际
-history probe 保留。聚焦测试 `34 passed`，单轮可见 Electron 预检
-`arp-20260731-235249-105256` 观察到首轮 history=0 且三类副作用全为 0。完整证据与下一
-实验见重置文档 13.22。两轮负向预检的第二轮 `arp-20260731-235909-f4d259` 虽精确回忆
-marker，实际 history=2 条/48 字符，却不必要地申请 desktop lease 并观察一次 GUI；新
-text-only gate 正确拒绝它。反查旧正式 B 的 20 个聊天 run，则全部为零 connector、lease、
-observation、tool attempt 和 GUI action，因此旧 prefill 未实际污染桌面。
-发布前完整回归为 Python `3462 passed, 13 skipped, 1 warning`、renderer `234 passed`，
-TypeScript typecheck 通过。
-
-13.23 已把 history-depth target 改成 runner 临时目录内预先打开的已有随机文件，任务
-不再包含路径或经过 Save As。每臂重新写同一初值，并以 fresh HWND、标题文件名和
-提交前磁盘 SHA 证明目标；
-cleanup 作为独立测试有效性，不能覆盖用户外部终态或被误报成模型退化。稳定复用现有
-Vite 后，fresh target 连续 `3/3` 完整通过：每次 connector raw→canonical→fixture 为
-`1/1`，文件精确等于随机值，GUI 均为 `hotkey → type_text → hotkey`，自主 done、窗口
-恢复和清理均通过。
-
-四个 20-Turn ABBA 尝试没有形成一个完整 pair：history 路径分别在第 12 轮误用桌面
-（模型）、第 11/第 1 轮模型 provider/API `Connection error`（基础设施）、第 6 轮 UIA
-`COMError`（测试干扰）中止；另一次 fresh 被 Vite 探活干扰挡住。controls 未齐时报告
-现在只写 `pair_incomplete_before_paired_target`，不能归因 history。生产代码仍为 `+0/-0`，
-不加重试、摘要、router、提示或 Windows 快捷键规则。完整报告、旧 comparison 字段债务
-和冻结分支审计见 13.23。最终回归为 Python `3464 passed, 13 skipped, 1 warning`、
-renderer `234 passed`、TypeScript typecheck 通过；renderer 与 typecheck 并行时的一次
-5 秒超时经串行原样重跑消失，属于测试调度干扰。
-
-13.24 首次得到两个有效的 6-Turn history pair。`92002`（F→H）与 `92003`（H→F）中，
-每臂的六个聊天 Turn 均为真实前端提交、非空成功回复、零 connector、零 lease、零观察、
-零 GUI；target 前实际 history 均精确为 12 条 `user/assistant` 交替消息。两个 pair 的
-fresh/history target 共 `4/4` 外部通过，因此当前没有 history-depth 负信号。`92001`
-和 `92004` 无效：两次 fresh 首轮都提交多个 desktop observation；一个普通寒暄和一个
-“陪我聊两句”样本不必要地申请 lease/观察桌面，均是模型模态选择，不准许用关键词
-router、提示教学或客户端意图分类修正。
-
-本轮只改现有 Electron 聊天 owner：中文 IME 组合输入 Enter 不再误发送；成功提交和
-“新建对话”清除旧 `arp-last-goal`，避免重启后把已发送任务伪装成草稿；失败卡与任务栏
-复用同一通用 outcome classifier，并显示原始失败结果；“再次编辑”只把原目标放回输入框，
-不自动重试或产生外部副作用。只有明确的 vnext/no-legacy 直接聊天正文不按 JSON 结果协议
-猜测，原有 legacy 安全停止分类保持不变；过渡状态也不再误画成失败。失败草稿可跨旧 run
-水合恢复，提交期间不能再切换 Thread 或覆盖草稿。可见失败截图证明当前源码显示精确模型
-合同错误、再次编辑与详情入口。生产切片为 `+70/-26`，没有 Runtime、系统提示、模型角色、
-工具面或窗口 lease 变化；
-history A/B 默认缩到 6 Turn，并要求精确 12 条实际 provider history。最终回归为 Python
-`3464 passed, 13 skipped, 1 warning`、renderer `243 passed`、TypeScript typecheck 通过。
-
-关键归因：
-
-- `ordered-clicks` 在加入最近一笔原生交换前会重复第一个目标；现在三次真实点击按
-  `[1,2,3]` 通过。这是结构性上下文修复，应保留。
-- 本次试卷只有 4/6；前次同源码曾取得 6/6，也曾两次提交 `81`。Runtime 未变化，
-  因此当前证据是模型样本波动，不是算术修复。
-- 四个 corridor 中，模型提交折线与 `physical_attempt` 逐点一致；真实浏览器记录
-  可信 pointermove，但模型路径切角或穿出通道，最小余量为
-  `-24/-69/-12/-9`。这是视觉几何问题。
-- Explorer 对照与去重臂的模型参数、canonical 参数和物理回执也一致；失败分别是
-  重命名时扩展名保留状态理解、自我纠错耗散和最终参数类型错误，属于模型层。对照首轮
-  的连接错误已恢复，只少一个可用动作，不足以解释两次完整任务失败。
-
-五项原始长任务在当前精确源码上没有 5/5：
-
-1. Krita 手机探针只完成 1080×1920 画布和粉红矩形轮廓；完整绘画、保存和 QQ
-   发送未完成，外部发送还需动作时确认。
-2. 当前受控试卷样本只有 4/6。
-3. 井字棋 30 次真实输入后没有红 X；模型停留在颜色控件。
-4. 网易云梁静茹歌曲已播放，但应用可见音量约 2%，CoreAudio 主音量为 0% 且静音，
-   均不是 5%。
-5. QQ 群摘要已进入至少一个群，但没有跨群覆盖或可信汇总，30 turn 耗尽；oracle
-   同时存在把已进入群误报为 0 的测试债务。
-
-不得把历史人工确认、部分动作成功或受控靶场通过写成这五项已完成。
-
-本轮另外得到四项当前源码人工外部核对通过：Notepad 文件精确落盘、网易云搜索
-周杰伦并播放第一首、抖音搜索 `kimi k3`、Wireshark 打开最近捕获并交付协议摘要。
-Paint 画花、能力演示和 OneNote→Word 失败；“那你干嘛”虽然被识别为非任务，
-模型仍做了一次无意义画布点击。完整明细见架构重置文档 13.16。
-QQ 空间点赞从 QQ 主窗口成功接管浏览窗口，30 次物理动作全部 applied；至少三处
-灰色赞变为蓝色，但终态仍至少有两条当前可见说说未赞，属于模型覆盖、自纠错和
-停止失败，不是窗口或输入基础设施失败。
+- 13.20 落成当前产品合同：入口只提交 `goal` + 可选 `thread_id`，同一
+  `LiveVisualActor` 首轮直接 reply/connector/`observe_desktop`；失败 Turn 不进历史；
+  13.26 补有界私有 Thread checkpoint。
+- 屏幕优先帧（full_desktop）落地后的旧受控基线为 smoke `3/4`、矩阵 `6/10`；这些数字
+  是 target-window 时代或早期 full-desktop 的旧基线，已被 2026-08-14/08-15 的
+  `17/18 strict / 按用户实际需求 18/18` 取代，不要再引用旧基线代表当前源码。
+- corridor 失败首次分歧始终在模型原始几何参数（提交折线与 `physical_attempt` 逐点
+  一致）；试卷分数波动是模型样本波动，不是算术修复。
+- Explorer 重命名与 Notepad 缺字样本：canonical 与物理回执一致，缺字属输入交付/应用
+  边界，后来 08-05 已定位为中文 IME 吞字符的机械 bug 并修复（见该节）。
+- history-depth pilot（13.22–13.24）最终得到有效的 6-Turn pair `4/4` 外部通过，当前
+  没有 history 负信号；结论不支持为 history 加任何机制。
+- 五项原始长任务（Krita 手机、受控试卷、井字棋、网易云音量、QQ 群摘要）当时没有
+  `5/5`，不得把历史人工确认、部分动作成功或受控靶场通过写成已完成；同期另有四项
+  人工外部核对通过（Notepad 精确落盘、网易云周杰伦播放、抖音搜索、Wireshark 摘要），
+  QQ 空间点赞属部分完成（模型覆盖/停止失败，非输入基础设施失败）。
+- 13.21 的 provider cache/wire 审计结论（vNext 不主动建缓存、三家 native wire 仍
+  provisional、不引入 Pi/Operit 代码）见 `docs/vnext-migration.md`。
 
 ## 2026-08-02 旧架构物理解耦第一批
 
@@ -1278,7 +1131,7 @@ renderer `318 passed`、TypeScript typecheck 通过。`CON` 未触碰。
 
 `CON` 未触碰。
 
-## 2026-08-14：拖拽机械层删减、MiMo 原生思考与逐层坐标审计（当前分支未提交）
+## 2026-08-14：拖拽机械层删减、MiMo 原生思考与逐层坐标审计（本分支已提交，未合入 master）
 
 本轮按 `模型原始参数 -> canonical 参数 -> physical_attempt -> 浏览器 trusted
 事件` 逐层复核。结论不是全局坐标偏移：当前 full-desktop 帧为 `1120x630`，
@@ -1322,7 +1175,98 @@ renderer `318 passed`、TypeScript typecheck 通过。`CON` 未触碰。
 `--collect-only` 也停在收集阶段；没有把超时记作通过。`CON` 与三个既有未跟踪文件
 均未触碰。
 
-## 2026-08-15：视觉上下文收口与人类结果验收（当前分支未提交）
+## 2026-08-16：删掉三条假失败路径（本分支已提交，未合入 master）
+
+按“假失败才是最大问题”审查生产执行链，删掉三个能把已完成任务翻成失败的机械层：
+
+1. **claim 不再被预算/取消否决**（`mission_runtime.py`）：`_claim_and_complete` 不再检查
+   stop_event；删除“Actor 决定期间被取消”的整段否决。完成判断是模型在当前真实屏幕上的
+   语义结论、没有物理动作可守，任何机械门都不能把它变成 CANCELED/STATE_REJECTED。
+   物理动作仍保留机械护栏（`_run_action` 在输入执行前仍检查 stop）。
+2. **trace 记账失败不再改写 run 状态**（`server.py` / `runtime.py`）：`_finalize_vnext_trace`
+   只记录 `trace_status`/`trace_error`，不再把 `execution.status` 设为 FAILED；
+   `run_prepared` 的 on_finish 异常也只在 run 未到达终态（queued/running/paused）时才
+   fail closed。trace 是诊断旁路，不参与 pass。
+3. **取消竞态不再丢弃已完成结果**（`runtime.py`）：节点线程已在 join 窗口内完成时优先
+   返回其 boxed 结果；vNext 已验证的上一节点结果在 stop 后仍让 END 节点落 DONE 与
+   `user_result`，只有未完成节点才诚实取消。
+
+另外修复 E2E harness 的过期按钮名：分支 UI（4c5e997）把资料抽屉改名为“工作台”，
+`scripts/client_e2e_run.py` 的 `CLOSE_RESOURCES` 仍是“关闭资料”，会话重置必然失败；
+已改为“关闭工作台”。
+
+回归：全量 Python `3610 passed, 13 skipped, 1 warning`（mss deprecation），
+`git diff --check` 通过。新增测试：claim 在 Actor 决定期间收到 stop 仍 MISSION_VERIFIED、
+动作同场景仍 CANCELED、已验证 vNext 结果在节点间 stop 后仍 DONE、trace stop 失败不改写
+已完成 run 的状态。
+
+真实 Electron 全量视觉矩阵 `17/18 strict`（`--suite all --timeout 600`，报告
+`output/playwright/client-visual-e2e/20260816-154131-suite/suite-report.json`）。唯一
+strict fail 是 ordered-clicks：外部状态 `succeeded=true`、最终 `click_sequence=[1,2,3]`
+与要求完全一致，但模型先点过一次错误顺序再自我纠正，harness 按中间误点反判。物理队列
+`57 submitted / 0 failed`，run `done`，无 runner/机械错误。按人类可见结果属于成功；
+不为此加机械机制。
+
+### 同日第二轮：删除 sol 时代的过度设计与防御层
+
+按“只保留模型守不住的机械边界”继续删除，本轮净删约 1900 行（含 3 个测试文件）：
+
+- **P0 假失败风险**：`_snapshot_matches_mission` 整段删除；post-decision 身份重查删除；
+  `bind_actor_decision` 不再重放 Mission/Broker/schema 校验、不再做 JSON 往返重解析，
+  envelope 只附加当前 mission/frame/pointer 身份；controller 异常不再终态 BLOCKED，改为
+  回喂同一模型重决策（只有 `release_cleanup_incomplete` 保留 BLOCKED 物理边界）；
+  `RuntimeFrame` 不再校验 image_sha256 与 image_b64 自洽（同源生成不可能分叉）。
+- **P1 死代码**：删除 `vnext/verification/` 整包（约 1340 行：action_effect 像素比较器、
+  deterministic mission completion verifier、dispatcher/ports）及三个专属测试文件；
+  删除 `_public_runtime_evidence_summary` 死函数；vNext 图改为
+  `require_evidence_on_done=False`，handler 不再合成自喂的 verified evidence 记录。
+- **P2 仪式哈希**：删除 `mission_projection_sha256`、`catalog_fingerprint`、
+  `profile_id`、`state_fingerprint`、`capability_grant_ids`、
+  `accepted_mission_event_ids` 等 envelope 身份行李；envelope 的 decision_id 内容自校
+  （tamper-evident 校验）删除，保留 decision_id 作为 trace 关联 id。
+- **遗留债务（已评估，未删）**：reducer 的 `obligation_claimed`/`verification_recorded`/
+  `mission_verified` 事件分支（生产不发出，但 wire 测试与 canary 阅读器仍 pin）；
+  Broker 内部 fingerprint 自校（构造期自洽，无跨层 gating）；trace 日志哈希链。
+
+回归：全量 Python `3499 passed, 13 skipped, 1 warning`（mss deprecation，测试数下降
+来自删除的验证包测试），`git diff --check` 通过。真实 Electron 全量视觉矩阵
+**`18/18`**（`output/playwright/client-visual-e2e/20260816-175515-suite/suite-report.json`）——
+比删除前基线 `17/18 strict` 还多过一个（上轮唯一 strict fail 的 ordered-clicks 本轮
+外部状态精确 `[1,2,3]` 一次通过）。删除这些层没有使完成任务的能力变差。
+
+### 同日第三轮：真实软件实测（非受控网页）
+
+同一源码跑 `scripts/client_random_tasks_e2e_run.py` 全部五个真实软件家族，每个家族
+6 例、独立外部 oracle：
+
+- **notepad-edit-save `5/6`**：真实 notepad.exe 全选替换 + Ctrl+S，磁盘文件逐字节等于
+  随机 token。唯一 fail 是 random-01 的 runner 会话冲突（上一轮被我中断的 run 仍在
+  active，session reset 前被 harness 拒绝；文件从未写入，非模型/机械失败）。
+- **calculator-arithmetic `6/6`**：真实 CalculatorApp，UIA 读回显示结果精确等于
+  `a+b`。
+- **chat-then-task `6/6`**：同一 Thread 先聊天回答再完成 Notepad 替换保存，磁盘 token
+  精确落盘。
+- **impossible-open-missing-file `6/6`**：打开不存在的文件的任务全部优雅终止
+  （done/blocked 终态），零伪造内容、零假成功，`target_absent_after=true`。
+- **paint-stroke `6/6`**：真实 mspaint.exe 画布中央画水平直线，paint oracle 验证
+  笔迹存在且窗口聚焦正确。
+
+合计 **29/30**，物理队列累计 200+ 动作 `0 failed`、清理收尾正常。报告
+`output/random-tasks/20260816-*`。结论：删除过度设计后，受控矩阵 18/18、真实软件
+29/30，能力未退化；真实软件缺口仍在多应用长程任务（Krita→QQ、OneNote→Word 等
+模型层规划/几何瓶颈，本次未复测，见 08-15 记录）。
+
+**机械层剩余真实缺口（不等于"机械层已到极限"）**：删减已完成的只是防御性机械层；
+机械层本身仍有可做的实事，且都符合 model-first（给模型真实信息，不替模型判断）：
+1. 空按无反馈：corridor-v0 实测模型在空白处按了 13 次（470 秒中的 430 秒），回执
+   `applied`、截图无光标，模型无法区分"抓住了目标"和"按在空气上"。候选：回执附
+   按下点命中的窗口/进程事实，或恢复轻量指针事实（非全帧合成图）。
+2. 提交帧压缩率：1120×630 全桌面帧把 44px 通道压成 22 图像 px，模型肘部定位差
+   27-50px 必出界；提交分辨率/裁剪策略只做过一次 1600 实验，未充分探索。
+3. 目标移动/窗口漂移：拖拽期间窗口被移动时旧帧像素直接打在新位置，无任何提示。
+4. 混合 DPI 多显示器从未真实验证，坐标链依赖单次 DPI 初始化。
+
+## 2026-08-15：视觉上下文收口与人类结果验收（本分支已提交，未合入 master）
 
 继续按 `模型参数 -> canonical 参数 -> physical_attempt -> 外部状态` 审计后，
 确认长按不是根因并保留：`dynamic-hold` 通过；对 drag schema 是否同时暴露 click

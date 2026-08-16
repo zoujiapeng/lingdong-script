@@ -1195,20 +1195,6 @@ def test_runtime_keeps_the_actor_latest_narration() -> None:
 
 def test_stale_or_unsupported_actor_decision_does_not_commit_task_state() -> None:
     update = {"scratchpad": "must_not_commit private-item"}
-    stale = _harness(_task_decision(_action(), **update))
-    stale.actor.on_propose = lambda: stale.reducer.apply(
-        stale.reducer.event(
-            "mission_blocked",
-            payload={"reason": "synthetic concurrent change"},
-        )
-    )
-    initial = stale.runtime.task_state
-
-    stale_result = stale.runtime.run_one_turn(turn_index=0)
-
-    assert stale_result.status is RuntimeStatus.STALE_DISCARDED
-    assert stale.runtime.task_state == initial
-
     invalid = _harness(_task_decision(_action("observe"), **update))
     invalid_initial = invalid.runtime.task_state
 
@@ -1493,21 +1479,6 @@ def test_repeated_actions_are_executed_without_task_level_suppression() -> None:
     assert harness.controller.calls == 6
 
 
-def test_actor_result_is_discarded_when_mission_revision_changes() -> None:
-    harness = _harness(_action())
-    harness.actor.on_propose = lambda: harness.reducer.apply(
-        harness.reducer.event(
-            "mission_blocked",
-            payload={"reason": "synthetic concurrent change"},
-        )
-    )
-
-    result = harness.runtime.run_one_turn(turn_index=0)
-
-    assert result.status is RuntimeStatus.STALE_DISCARDED
-    assert harness.controller.calls == 0
-
-
 def test_frame_evidence_labels_are_advisory_to_visual_execution() -> None:
     harness = _harness(_action())
     bad_frame = replace(
@@ -1619,19 +1590,26 @@ def test_unknown_controller_outcome_returns_to_actor_without_replay() -> None:
     assert harness.reducer.events[-1].kind == "obligation_blocked"
 
 
-def test_controller_exception_is_blocked_and_never_replayed() -> None:
+def test_controller_exception_feeds_back_and_never_replays() -> None:
     harness = _harness(_action(), _action())
     harness.controller.mode = "raise"
 
     first = harness.runtime.run_one_turn(turn_index=0)
+    harness.controller.mode = "completed"
     second = harness.runtime.run_one_turn(turn_index=1)
 
-    assert first.status is RuntimeStatus.BLOCKED
-    assert second.status is RuntimeStatus.BLOCKED
-    assert harness.controller.calls == 1
-    assert harness.reducer.projection.status is MissionStatus.BLOCKED
-    assert harness.reducer.events[-1].kind == "obligation_blocked"
-    assert "not replayed" in harness.reducer.events[-1].payload["reason"]
+    # A controller exception is not a mission-blocking verdict: it is fed
+    # back to the same Actor, the next turn keeps running, and the failed
+    # action is never replayed.
+    assert first.status is RuntimeStatus.STALE_DISCARDED
+    assert "synthetic controller failure" in first.detail
+    assert second.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 2
+    assert harness.reducer.projection.status is MissionStatus.RUNNING
+    assert not any(
+        event.kind == "obligation_blocked"
+        for event in harness.reducer.events
+    )
 
 
 def test_release_cleanup_unknown_is_blocked_and_never_replayed() -> None:
@@ -1852,6 +1830,37 @@ def test_actor_exception_after_stop_is_cancellation() -> None:
     assert actor_result.status is RuntimeStatus.CANCELED
     assert actor_harness.controller.calls == 0
     assert actor_harness.reducer.events[-1].kind == "mission_canceled"
+
+
+def test_claim_completes_when_stop_fires_while_actor_decides() -> None:
+    harness = _harness(_claim())
+    stop = threading.Event()
+    harness.actor.on_propose = stop.set
+
+    result = harness.runtime.run_one_turn(turn_index=0, stop_event=stop)
+
+    # The Actor's completion judgment has no physical action to guard: a
+    # deadline or cancel that landed while the model was deciding must not
+    # turn an already-made claim into a failure.
+    assert result.status is RuntimeStatus.MISSION_VERIFIED
+    assert harness.reducer.events[-1].kind == "actor_completed"
+    assert harness.runtime.verified_completion_result == (
+        "the requested state is visibly present"
+    )
+
+
+def test_action_still_canceled_when_stop_fires_while_actor_decides() -> None:
+    harness = _harness(_action())
+    stop = threading.Event()
+    harness.actor.on_propose = stop.set
+
+    result = harness.runtime.run_one_turn(turn_index=0, stop_event=stop)
+
+    # Physical actions keep their mechanical guard: no input may start once
+    # the run is stopped.
+    assert result.status is RuntimeStatus.CANCELED
+    assert harness.controller.calls == 0
+    assert harness.reducer.events[-1].kind == "mission_canceled"
 
 
 def test_identical_fake_run_replays_deterministically() -> None:

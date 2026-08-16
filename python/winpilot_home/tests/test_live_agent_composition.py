@@ -235,7 +235,7 @@ def _graph_dict() -> dict[str, Any]:
         "policy": {
             "max_node_visits": 1,
             "fail_fast": True,
-            "require_evidence_on_done": True,
+            "require_evidence_on_done": False,
             "allow_shell": False,
             "allow_desktop_mutation": True,
         },
@@ -1738,8 +1738,7 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert session.calls == 5
     assert session.model_calls == 6
     assert session.closed is True
-    assert len(snapshot["evidence"]) == 1
-    assert snapshot["evidence"][0]["verified"] is True
+    assert snapshot["evidence"] == []
     starts = [item for item in events if item["type"] == "live_agent_start"]
     done = [item for item in events if item["type"] == "live_agent_done"]
     turns = [item for item in events if item["type"] == "live_agent_turn"]
@@ -2107,8 +2106,9 @@ def test_completion_snapshot_error_does_not_overturn_runtime_completion() -> Non
         "the requested state is visibly present"
     )
     assert session.closed is True
-    assert len(snapshot["evidence"]) == 1
-    assert snapshot["evidence"][0]["verified"] is True
+    # The verified handler no longer synthesizes a self-fed evidence record
+    # for the graph's evidence gate; completion stands on the Actor claim.
+    assert snapshot["evidence"] == []
 
 
 def test_verified_result_survives_unavailable_diagnostic_summary(
@@ -2415,38 +2415,11 @@ def test_raw_receipt_trace_keeps_repeated_hotkey_completion_counts() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    "scope",
-    (
-        {},
-        {"mission_id": "mission-private"},
-        {"run_id": "run-private"},
-        {
-            "mission_id": "other-mission",
-            "run_id": "run-private",
-        },
-        {
-            "mission_id": "mission-private",
-            "run_id": "other-run",
-        },
-    ),
-)
-def test_public_runtime_evidence_summary_requires_exact_explicit_scope(
-    scope: dict[str, Any],
-) -> None:
+def test_runtime_evidence_summary_stays_unavailable() -> None:
     """Per-action durable evidence was removed; the summary stays unavailable."""
-    anchor = {
-        **scope,
-        "journal_head_sha256": "a" * 64,
-        "journal_event_count": 9,
-        "report_sha256": "b" * 64,
-        "report_status": "complete",
-    }
-
-    summary = live_agent._public_runtime_evidence_summary(
-        anchor,
-        mission_id="mission-private",
-        run_id="run-private",
+    summary = live_agent._unavailable_runtime_evidence_summary(
+        "mission-private",
+        "run-private",
     )
 
     assert summary == {

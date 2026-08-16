@@ -1260,13 +1260,16 @@ def test_vnext_trace_finalization_is_frozen_into_job_run_and_done_event(
     assert final_snapshot["runtime_lifecycle"]["terminal"] is True
     assert final_snapshot["no_legacy_fallback"] is True
     if stop_fails:
-        assert job.status == "failed"
-        assert job.result["ok"] is False
-        assert job.result["run"]["status"] == "failed"
+        # Trace finalization is diagnostic: the run keeps its own status and
+        # its own error. A failed trace stop must not rewrite either, only the
+        # trace_status/trace_error side channel.
+        assert job.status == "done"
+        assert job.result["ok"] is True
+        assert job.result["run"]["status"] == "done"
         assert job.result["run"]["trace_status"] == "stop_failed"
-        assert "trace flush failed" in job.error
-        assert done_events[0]["status"] == "failed"
-        assert final_snapshot["runtime_lifecycle"]["status"] == "failed"
+        assert "trace flush failed" not in job.error
+        assert done_events[0]["status"] == "done"
+        assert final_snapshot["runtime_lifecycle"]["status"] == "done"
         assert final_snapshot["trace_error"] == "trace flush failed"
     else:
         assert job.status == "done"

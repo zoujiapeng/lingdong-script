@@ -321,8 +321,8 @@ run_one_turn(turn_index):
   raw_decision = actor.propose(turn, current JPEG, exact submitted_size):
     同时暴露本轮 Broker action/terminal tools 与两个 connector 元工具
     若选择 connector -> Gateway 执行只读调用并把 tool result 交回同一 Actor
-    在剩余 model-call budget 内最多 4 次 connector call
-    最后一轮移除 connector tools，强制返回一笔 action / claim / blocked
+    本地只读工具链（status/shell/connector/window_text）只受剩余 model-call budget 约束
+    模型可调用 refresh_desktop 主动结束局部工具链换取新整屏，最终提交一笔 action / claim / blocked
   尝试应用有界 task_state_update（它不是权威 Mission 状态；格式错误只忽略该更新）
   在 MissionRuntime 入口把 raw proposal 做唯一一次 typed parse
 
@@ -340,7 +340,7 @@ run_one_turn(turn_index):
   如果是 blocked -> 写 obligation_blocked
 ```
 
-Actor 每次都收到原始 goal，而不是仅收到局部计划。Connector 不只存在于初始分流：每个视觉 Turn 的 `propose` 也可在当前 JPEG 和 Broker 工具旁进行最多 4 次有界 connector 往返，但仍由同一个 Actor 在同一 Turn 最终提交恰好一笔 Runtime action、claim 或 blocked。`task_state` 与紧邻一笔 provider 原生 exchange 只帮助短期连续性；它们不是 Runtime 计划或完成判据。
+Actor 每次都收到原始 goal，而不是仅收到局部计划。Connector 不只存在于初始分流：每个视觉 Turn 的 `propose` 也可在当前 JPEG 和 Broker 工具旁调用 connector，只受剩余 model-call 预算约束；同一个 Actor 在同一 Turn 最终提交恰好一笔 Runtime action、claim 或 blocked。`task_state` 与紧邻一笔 provider 原生 exchange 只帮助短期连续性；它们不是 Runtime 计划或完成判据。
 
 ## 10. 模型响应的单次边界解析
 

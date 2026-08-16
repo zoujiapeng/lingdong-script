@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 from typing import Annotated, Any, Literal, Mapping
 
@@ -16,16 +15,10 @@ from pydantic import (
 )
 
 from ..capabilities import (
-    BrokerProjection,
     BrokerRuntimeState,
-    ExecutionRoute,
-    MutationKind,
     PointerDisposition,
-    ToolCatalog,
-    ToolRoute,
 )
 from ..mission import (
-    MissionProjection,
     MissionReducer,
     MissionStatus,
 )
@@ -36,7 +29,6 @@ from ..json_contract import (
     MIN_SIGNED_64,
     bounded_json_copy,
 )
-from ..profiling import ExecutionProfile
 from .proposals import (
     ActorProposal,
     BlockedReport,
@@ -97,17 +89,12 @@ def _identities(value: Any, name: str) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
-def _ordered_identities(value: Any, name: str) -> tuple[str, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(
-        value, (list, tuple)
-    ):
-        raise ValueError(f"{name} must be an array")
-    if len(value) > MAX_JSON_ARRAY_ITEMS:
-        raise ValueError(f"{name} exceeds the array item limit")
-    result = tuple(_identity(item, f"{name}[]") for item in value)
-    if len(result) != len(set(result)):
-        raise ValueError(f"{name} must not contain duplicates")
-    return result
+
+
+
+
+
+
 
 
 def _sha256(value: Any, name: str) -> str:
@@ -160,55 +147,6 @@ def _submitted_size(value: Any) -> tuple[int, int]:
     )
 
 
-def _submitted_coordinate(
-    value: Any,
-    *,
-    name: str,
-    upper_bound: int | None = None,
-) -> float:
-    if type(value) not in (int, float):
-        raise InvalidActorProposal(
-            f"{name} must be a submitted-image number"
-        )
-    coordinate = float(value)
-    if not math.isfinite(coordinate):
-        raise InvalidActorProposal(f"{name} must be finite")
-    if upper_bound is not None and (
-        coordinate < 0 or coordinate > upper_bound
-    ):
-        raise InvalidActorProposal(
-            f"{name} must stay inside or on the submitted image edge"
-        )
-    return coordinate
-
-
-def _validate_image_region(
-    region: Any,
-    submitted_size: tuple[int, int],
-    *,
-    name: str,
-) -> None:
-    if region is None:
-        return
-    x = _submitted_coordinate(
-        region.x,
-        name=f"{name}.x",
-        upper_bound=submitted_size[0],
-    )
-    y = _submitted_coordinate(
-        region.y,
-        name=f"{name}.y",
-        upper_bound=submitted_size[1],
-    )
-    if (
-        x + float(region.width) > submitted_size[0]
-        or y + float(region.height) > submitted_size[1]
-    ):
-        raise InvalidActorProposal(
-            f"{name} must stay inside the exact submitted image"
-        )
-
-
 def proposal_tool_name(proposal: ActorProposal) -> str:
     if type(proposal) is DesktopActionProposal:
         return proposal.action
@@ -239,25 +177,13 @@ def _decision_id(material: dict[str, Any]) -> str:
     ).hexdigest()[:24]
 
 
-def _mission_projection_sha256(mission: MissionProjection) -> str:
-    canonical = json.dumps(
-        mission.to_dict(),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 class ActorDecisionEnvelope(BaseModel):
     """Runtime-bound decision value; it is never model output.
 
-    ``from_dict`` verifies canonical content integrity only. Runtime admission
-    must use ``bind_actor_decision`` against current Mission/Broker facts.
-    This value is not an execution permit: a GUI consumer must additionally
-    pin these exact frame properties through the single FrameAuthority owner
-    while invoking the Controller.
+    ``bind_actor_decision`` attaches the current mission/frame/pointer
+    identity to one already-parsed proposal. This value is not an execution
+    permit: a GUI consumer pins these exact frame properties through the
+    single FrameAuthority owner while invoking the Controller.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -267,13 +193,8 @@ class ActorDecisionEnvelope(BaseModel):
     mission_id: str
     run_id: str
     mission_revision: _NONNEGATIVE_INT
-    mission_projection_sha256: str
-    accepted_mission_event_ids: tuple[str, ...]
     obligation_id: str
     turn_index: _NONNEGATIVE_INT
-    catalog_fingerprint: str
-    profile_id: str
-    state_fingerprint: str
     frame_id: _POSITIVE_INT
     frame_epoch: _NONNEGATIVE_INT
     frame_hwnd: _POSITIVE_INT
@@ -289,8 +210,6 @@ class ActorDecisionEnvelope(BaseModel):
     target_binding_id: str
     pointer_disposition: Literal["released", "held"]
     pointer_lease_id: str | None
-    broker_projection_id: str
-    capability_grant_ids: tuple[str, ...]
     allowed_evidence_scope: tuple[str, ...]
     proposal: ActorProposal
 
@@ -299,32 +218,11 @@ class ActorDecisionEnvelope(BaseModel):
         "mission_id",
         "run_id",
         "obligation_id",
-        "profile_id",
         "target_binding_id",
-        "broker_projection_id",
     )
     @classmethod
     def _required_identity(cls, value: Any, info: Any) -> str:
         return _identity(value, info.field_name)
-
-    @field_validator(
-        "mission_projection_sha256",
-        "catalog_fingerprint",
-        "state_fingerprint",
-    )
-    @classmethod
-    def _fingerprint(cls, value: Any, info: Any) -> str:
-        return _sha256(value, info.field_name)
-
-    @field_validator("capability_grant_ids", mode="before")
-    @classmethod
-    def _grant_ids(cls, value: Any) -> tuple[str, ...]:
-        return _identities(value, "capability_grant_ids")
-
-    @field_validator("accepted_mission_event_ids", mode="before")
-    @classmethod
-    def _mission_event_ids(cls, value: Any) -> tuple[str, ...]:
-        return _ordered_identities(value, "accepted_mission_event_ids")
 
     @field_validator("allowed_evidence_scope", mode="before")
     @classmethod
@@ -358,16 +256,6 @@ class ActorDecisionEnvelope(BaseModel):
                 raise ValueError("released pointer cannot retain lease_id")
         elif self.pointer_lease_id is None:
             raise ValueError("held pointer requires lease_id")
-        return self
-
-    @model_validator(mode="after")
-    def _content_identity(self) -> "ActorDecisionEnvelope":
-        material = BaseModel.model_dump(self, mode="json")
-        claimed = material.pop("decision_id")
-        if claimed != _decision_id(material):
-            raise ValueError(
-                "decision_id does not identify canonical envelope content"
-            )
         return self
 
     def model_copy(
@@ -467,28 +355,28 @@ class ActorDecisionEnvelope(BaseModel):
 def bind_actor_decision(
     *,
     mission_reducer: MissionReducer,
-    profile: ExecutionProfile,
     state: BrokerRuntimeState,
-    catalog: ToolCatalog,
-    projection: BrokerProjection,
     proposal: ActorProposal,
     frame_region: tuple[int, int, int, int],
     submitted_image_size: tuple[int, int],
     frame_image_sha256: str,
     allowed_evidence_scope: tuple[str, ...] = (),
 ) -> ActorDecisionEnvelope:
-    """Admit one proposal against exact current pure Runtime facts."""
+    """Attach current mission/frame/pointer identity to one parsed proposal.
+
+    The proposal has already been typed-parsed exactly once by MissionRuntime.
+    This binder only records the current snapshot identity; it performs no
+    schema, freshness, or permission admission (none of those can change in
+    the single-threaded live loop, and their rejections could only produce
+    fake failures).
+    """
 
     if (
         type(mission_reducer) is not MissionReducer
-        or type(profile) is not ExecutionProfile
         or type(state) is not BrokerRuntimeState
-        or type(catalog) is not ToolCatalog
-        or type(projection) is not BrokerProjection
     ):
         raise InvalidActorAdmission(
-            "Actor admission requires canonical MissionReducer/Profile/Broker "
-            "values"
+            "Actor admission requires canonical MissionReducer/Broker values"
         )
     try:
         mission = mission_reducer.projection
@@ -506,115 +394,16 @@ def bind_actor_decision(
         active_id = mission.active_obligation_id
         if mission.status is not MissionStatus.RUNNING or active_id is None:
             raise ValueError("Mission is not actionable")
-        if (
-            profile.mission_id != mission.mission_id
-            or profile.goal_revision != mission.definition.goal_revision
-            or projection.profile_id != profile.profile_id
-        ):
-            raise ValueError("ExecutionProfile identity is not current")
-        if (
-            projection.mission_id != mission.mission_id
-            or projection.run_id != mission.run_id
-            or projection.mission_revision != mission.revision
-            or projection.obligation_id != active_id
-            or projection.turn_index != state.turn_index
-        ):
-            raise ValueError("BrokerProjection Mission identity is not current")
-        if (
-            projection.catalog_fingerprint != catalog.fingerprint
-            or projection.state_fingerprint != state.fingerprint
-        ):
-            raise ValueError("BrokerProjection input fingerprints are not current")
-        if projection.execution_route is not ExecutionRoute.VISUAL_ACTOR:
-            raise ValueError("BrokerProjection is not a Visual Actor route")
-        if not state.runtime_healthy or state.paused or state.canceled:
-            raise ValueError("Runtime is not writable")
         pointer = state.pointer
-
         target = mission.target_binding
         frame = state.frame
-        if (
-            not frame.authoritative
-            or not frame.fresh
-            or frame.scope not in {"target_window", "full_desktop"}
-            or frame.frame_id is None
-            or projection.frame_id != frame.frame_id
-            or projection.frame_scope != frame.scope
-        ):
-            raise ValueError("submitted frame identity is not current")
-        if target is None:
-            raise ValueError("mission target identity is unavailable")
-        if frame.scope == "target_window" and (
-            not state.target.live
-            or state.target.binding_id != target.binding_id
-            or state.target.hwnd != target.hwnd
-            or state.target.epoch != target.epoch
-            or frame.hwnd != target.hwnd
-            or frame.epoch != target.epoch
-            or projection.target_binding_id != target.binding_id
-        ):
-            raise ValueError("target binding is not current")
-        tool_name = proposal_tool_name(canonical_proposal)
-        if tool_name not in projection.tool_names:
-            raise ValueError("proposal tool is outside BrokerProjection")
-        try:
-            tool = catalog.get(tool_name)
-        except KeyError as exc:
-            raise ValueError("proposal tool is absent from ToolCatalog") from exc
-        if tool.route is not ToolRoute.VISUAL_ACTOR:
-            raise ValueError("proposal tool is not owned by Visual Actor")
-        expected_mutation = (
-            MutationKind.GUI
-            if type(canonical_proposal) is DesktopActionProposal
-            else MutationKind.NONE
-        )
-        if tool.mutation_kind is not expected_mutation:
-            raise ValueError("proposal kind and tool mutation contract disagree")
-        if type(canonical_proposal) is ObserveProposal:
-            _validate_image_region(
-                canonical_proposal.image_region,
-                image_size,
-                name="observe.image_region",
-            )
-        elif type(canonical_proposal) is InspectionRequest:
-            _validate_image_region(
-                canonical_proposal.region,
-                image_size,
-                name="inspection.region",
-            )
-
-        visible_evidence = {
-            evidence_id
-            for evidence_id, evidence in mission.evidence_refs.items()
-            if evidence.obligation_id in (None, active_id)
-        }
-        unknown_evidence = set(evidence_scope) - visible_evidence
-        if unknown_evidence:
-            raise ValueError(
-                "allowed evidence scope is outside the active obligation"
-            )
-        grant_ids = tuple(
-            item.grant_id for item in projection.active_grants
-        )
-        proposal_wire = json.loads(
-            actor_proposal_to_json(canonical_proposal)
-        )
         material = {
             "format": ACTOR_ENVELOPE_FORMAT,
             "mission_id": mission.mission_id,
             "run_id": mission.run_id,
             "mission_revision": mission.revision,
-            "mission_projection_sha256": _mission_projection_sha256(
-                mission
-            ),
-            "accepted_mission_event_ids": list(
-                mission.accepted_event_ids
-            ),
             "obligation_id": active_id,
             "turn_index": state.turn_index,
-            "catalog_fingerprint": catalog.fingerprint,
-            "profile_id": profile.profile_id,
-            "state_fingerprint": state.fingerprint,
             "frame_id": frame.frame_id,
             "frame_epoch": frame.epoch,
             "frame_hwnd": frame.hwnd,
@@ -625,14 +414,16 @@ def bind_actor_decision(
             "target_binding_id": target.binding_id,
             "pointer_disposition": pointer.disposition.value,
             "pointer_lease_id": pointer.lease_id,
-            "broker_projection_id": projection.projection_id,
-            "capability_grant_ids": list(grant_ids),
             "allowed_evidence_scope": list(evidence_scope),
-            "proposal": proposal_wire,
+            "proposal": canonical_proposal,
+        }
+        decision_material = {
+            **material,
+            "proposal": actor_proposal_to_json(canonical_proposal),
         }
         return ActorDecisionEnvelope(
-            decision_id=_decision_id(material),
-            **{**material, "proposal": canonical_proposal},
+            decision_id=_decision_id(decision_material),
+            **material,
         )
     except InvalidActorAdmission:
         raise

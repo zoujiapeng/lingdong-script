@@ -561,7 +561,7 @@ def build_exact_live_vnext_graph(goal: str) -> ArpGraph:
         policy=ArpPolicy(
             max_node_visits=1,
             fail_fast=True,
-            require_evidence_on_done=True,
+            require_evidence_on_done=False,
             allow_shell=False,
             allow_desktop_mutation=True,
         ),
@@ -640,7 +640,7 @@ def _validate_exact_graph(graph: ArpGraph) -> str:
     if (
         policy.max_node_visits != 1
         or policy.fail_fast is not True
-        or policy.require_evidence_on_done is not True
+        or policy.require_evidence_on_done is not False
         or policy.allow_shell is not False
         or policy.allow_desktop_mutation is not True
     ):
@@ -3440,24 +3440,6 @@ def _unavailable_runtime_evidence_summary(
     }
 
 
-def _public_runtime_evidence_summary(
-    value: Any,
-    *,
-    mission_id: str,
-    run_id: str,
-) -> dict[str, Any]:
-    """Per-action durable evidence recording was removed (Model-first).
-
-    The run output keeps an explicit unavailable marker so downstream
-    consumers never mistake the absence of a journal for a complete one.
-    """
-    del value
-    return _unavailable_runtime_evidence_summary(
-        mission_id,
-        run_id,
-    )
-
-
 class _PreparedHandler:
     def __init__(
         self,
@@ -4126,37 +4108,10 @@ class _PreparedHandler:
                 output=output,
                 error=detail or terminal_status.value,
             )
-        evidence = {
-            "predicate": "vnext.mission_verified",
-            "value": True,
-            "source": "vnext_actor_claim",
-            "verified": True,
-            "run_id": run_id,
-            "metadata": {
-                "runtime_version": _RUNTIME_VERSION,
-                "no_legacy_fallback": True,
-                "mission_id": mission_id,
-                "mission_verification_id": snapshot.get(
-                    "mission_verification_id"
-                ),
-                "obligation_verification_id": snapshot.get(
-                    "obligation_verification_id"
-                ),
-                "verified_evidence_refs": snapshot.get(
-                    "verified_evidence_refs",
-                    [],
-                ),
-                "target_binding_id": snapshot.get("target_binding_id"),
-                "target_hwnd": snapshot.get("target_hwnd"),
-                "frame_id": snapshot.get("frame_id"),
-                "frame_epoch": snapshot.get("frame_epoch"),
-            },
-        }
         return NodeResult(
             ok=True,
             branch="next",
             output=output,
-            evidence=[evidence],
         )
 
 

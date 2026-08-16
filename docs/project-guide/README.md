@@ -1,6 +1,8 @@
 # 灵动脚本全项目精确讲解
 
-> 源码快照：`master` / `e54d0a97f6cf332daf012c98bf3b8947f8ed9714`，2026-08-02。
+> 主链说明最后同步：2026-08-15（分支 `codex/model-directed-orchestration`）。文件数量、SHA
+> 与完整符号仍以 [`generated-file-inventory.md`](generated-file-inventory.md) 为机械索引，
+> 由 `python scripts/generate_project_guide.py` 按当前工作树现场生成。
 > 本套文档面向第一次接手仓库的开发者，也面向需要从“用户点发送”一路追到 Windows 物理输入和外部结果的人。
 > 它不把历史设计、测试名字或模型自述当成当前实现；每个结论都应能回到真实文件、符号、合同或测试。
 
@@ -69,7 +71,7 @@ flowchart LR
 | `src/renderer/` | 智能代理、Studio、运行记录、资产、设置、Flow 编辑器 | `ControlPlaneClient` 只消费 Python API；浏览器状态不是服务端权威 |
 | `src/cli/` | 旧命令行入口 | 是开发/兼容面，不是 GUI E2E 入口 |
 | `src/ai-interface/` | HTTP/MCP 形式的旧 AI 工具面 | 与当前同一 Actor 的 connector gateway 不是同一个概念 |
-| `python/winpilot_home/winpilot/vnext/` | Mission/Obligation 合同、Actor、Broker、Runtime、桌面 adapter、证据平面 | 当前最小 live 执行内核；不要与 Legacy `tasking/TaskContract` 混淆 |
+| `python/winpilot_home/winpilot/vnext/` | Mission/Obligation 合同、Actor、Broker、Runtime、桌面 adapter | 当前最小 live 执行内核；不要与 Legacy `tasking/TaskContract` 混淆 |
 | `python/winpilot_home/winpilot/orchestrator/` | ARP 图/执行、goal admission、Thread、live 组合根 | `live_agent.py` 是产品主链的 canonical composition owner |
 | `python/winpilot_home/winpilot/action/` | RawDevice、队列、安全、执行与验证基础 | 物理动作层不解释应用语义 |
 | `python/winpilot_home/winpilot/visual_runtime/` | 帧权威、观察、坐标与视觉状态 | 当前 JPEG 和窗口身份的机械真相 |
@@ -89,13 +91,21 @@ flowchart LR
 
 ## 6. 当前可信快照
 
-以下是 `CLAUDE.md` 最新章节与当前 HEAD 对齐的状态，不应被同文件更早的历史段落覆盖：
+以下是 `CLAUDE.md` 最新章节与当前分支 HEAD 对齐的状态，不应被同文件更早的历史段落覆盖：
 
-- 当前配置是 MiMo `mimo-v2.5`；屏幕优先帧（full_desktop）落地后的受控 smoke 为 `3/4`（drag-fit、slider、dynamic-hold 通过，corridor 属模型几何族），更早的 `6/10` 矩阵是 target-window 裁剪帧时代的旧基线；
-- corridor 的 raw model points、canonical points 和 `physical_attempt` 一致，首个分歧在模型参数层；
-- 原生 Notepad 精确替换通过；Calculator `43×17` 两次均未形成正确结果，首个分歧同样在模型识别/选择；
-- `LEGACY_FLOW` 执行路径删除后，Studio 的 `input_text` + `screenshot` 外部 oracle 通过；严格离线节点独立矩阵升至 `3/19`；
-- `CLAUDE.md` 最新章节记录的回归为 WinPilot `3613 passed, 13 skipped, 1 warning`、renderer `317 passed`、TypeScript typecheck 通过；它没有在同一快照重报根测试套件或完整 build，不能与较早发布门数字拼成一次“完整回归”；
+- 当前配置是 MiMo `mimo-v2.5`；默认 screen-first 全桌面帧；预算为
+  `200 turns / 7200s / 400 model calls`；
+- 全量视觉矩阵严格报告为 `17/18`（唯一 strict fail 是 calibration-feedback 三次
+  miss 后自行纠正、最终三点全绿且外部 `scenario_success=true`）；按用户实际需求
+  计为 `18/18`。井字棋按人类可见结果判定，不因像素级美观阈值反判失败；
+- corridor 的 raw model points、canonical points 和 `physical_attempt` 一致，首个
+  分歧在模型参数层（视觉几何），不是坐标映射或输入层；
+- 视觉上下文只保留紧邻一笔 provider 原生 `user image → assistant tool call →
+  tool result`；任务完成由同一 `LiveVisualActor` 在当前真实屏幕上自验并 claim，
+  trace/运行详情/memory 只定位首分歧，不参与 task pass，也不能把已完成任务反判失败；
+- `LEGACY_FLOW` 执行路径已删除；严格离线节点独立矩阵升至 `3/19`；
+- 本快照记录的回归为全量 Python `3593 passed, 13 skipped, 1 warning`、renderer
+  `320 passed`、四套 TypeScript typecheck 通过；
 - 这些数字是该快照的工程证据，不是跨机器、跨应用的成功率。
 
 较早文档中出现的 `2/19` 是加入 `input_text` 独立 oracle 之前的历史状态。保留它有助于追踪证据演进，但不能再称“当前”。
@@ -162,8 +172,8 @@ python scripts/generate_project_guide.py --check
 | canonical arguments | 模型参数经过严格 schema 解析后的运行时参数；其中坐标型动作的坐标仍处于模型实际收到的 submitted-image 像素空间 |
 | physical attempt | 映射到物理桌面并准备交给 RawDevice/SendInput 的实际参数记录 |
 | receipt | 物理输入是否开始/完成、失败种类和机制等回执 |
-| action effect | 前后可比帧上的局部视觉变化摘要；不是用户语义完成证明 |
-| external oracle | 独立于被测 Runtime 的文件、应用状态、可信事件、像素或 UI 读回；用户任务是否通过的最终测试依据 |
+| action effect | 动作后下一张权威屏幕交给同一个 Actor 观察；runtime 不生成局部像素判定 |
+| E2E report | 独立于被测 Runtime 的文件、应用状态、可信事件、像素或 UI 读回；只报告测试样本真实终态，不反馈进生产执行线，也不替代 Actor 的完成判断 |
 | fail closed | 身份、帧、权限、证据或结果无法证明时停止并明确失败，而不是猜测或静默降级 |
 
 ## 10. 阅读代码时最重要的判断法

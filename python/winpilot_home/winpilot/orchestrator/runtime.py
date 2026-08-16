@@ -650,16 +650,27 @@ class ArpExecution:
                     error=f"node {node.id!r} timed out after {timeout_s:g}s",
                 )
             thread.join(timeout=min(0.05, remaining))
+        if "error" in box:
+            raise box["error"]
+        if "result" in box:
+            # The node already completed: its result is the truth. A stop that
+            # arrived in the join window must not discard a finished result
+            # (especially a verified vNext mission).
+            result = box["result"]
+            return (
+                result
+                if isinstance(result, NodeResult)
+                else NodeResult(
+                    ok=False,
+                    error=(
+                        "node handler returned invalid result: "
+                        f"{type(result).__name__}"
+                    ),
+                )
+            )
         if self.stop_event.is_set():
             local_stop.set()
             return NodeResult(ok=False, branch="canceled", error="run canceled")
-        if "error" in box:
-            raise box["error"]
-        result = box.get("result")
-        return result if isinstance(result, NodeResult) else NodeResult(
-            ok=False,
-            error=f"node handler returned invalid result: {type(result).__name__}",
-        )
 
     def _next_node(self, node_id: str, branch: str, *, ok: bool) -> str | None:
         outgoing = [edge for edge in self.graph.edges if edge.source == node_id]
@@ -751,13 +762,29 @@ class ArpExecution:
         try:
             while current:
                 if self.stop_event.is_set():
-                    self.status = ArpRunStatus.CANCELED
-                    self.error = "run canceled"
-                    break
+                    # A stop that arrives after the vNext mission already
+                    # verified must not discard the completed result; let the
+                    # END node record DONE with the user result. Anything else
+                    # is an honest cancel.
+                    if not (
+                        last is not None
+                        and last.ok
+                        and self.runtime_state.get("runtime_version")
+                        == "vnext"
+                    ):
+                        self.status = ArpRunStatus.CANCELED
+                        self.error = "run canceled"
+                        break
                 if not self._wait_if_paused():
-                    self.status = ArpRunStatus.CANCELED
-                    self.error = "run canceled"
-                    break
+                    if not (
+                        last is not None
+                        and last.ok
+                        and self.runtime_state.get("runtime_version")
+                        == "vnext"
+                    ):
+                        self.status = ArpRunStatus.CANCELED
+                        self.error = "run canceled"
+                        break
                 node = node_map[current]
                 self.current_node_id = current
                 visits[current] = visits.get(current, 0) + 1
@@ -984,16 +1011,25 @@ class ArpRunManager:
                     logger.exception("ARP on_finish callback failed")
                     if finalize_before_done:
                         with execution._lock:
-                            detail = str(
-                                execution.runtime_state.get("trace_error")
-                                or exc
-                            )
-                            execution.status = ArpRunStatus.FAILED
-                            execution.error = (
-                                "vNext runtime finalization failed: "
-                                f"{detail}"
-                            )
-                            execution.finished_at = time.time()
+                            # Finalization is diagnostic: it must never turn
+                            # an already-finished run into a failure. Only a
+                            # run that never reached a terminal state can be
+                            # failed by a broken finalizer.
+                            if execution.status in {
+                                ArpRunStatus.QUEUED,
+                                ArpRunStatus.RUNNING,
+                                ArpRunStatus.PAUSED,
+                            }:
+                                detail = str(
+                                    execution.runtime_state.get("trace_error")
+                                    or exc
+                                )
+                                execution.status = ArpRunStatus.FAILED
+                                execution.error = (
+                                    "vNext runtime finalization failed: "
+                                    f"{detail}"
+                                )
+                                execution.finished_at = time.time()
                             execution.runtime_state["no_legacy_fallback"] = True
                             if str(
                                 execution.runtime_state.get("trace_status")
@@ -1005,7 +1041,7 @@ class ArpRunManager:
                             execution.runtime_state["runtime_lifecycle"] = {
                                 "phase": "finalization",
                                 "terminal": True,
-                                "status": ArpRunStatus.FAILED.value,
+                                "status": execution.status.value,
                                 "detail": execution.error,
                                 "trace_status": str(
                                     execution.runtime_state.get("trace_status")
