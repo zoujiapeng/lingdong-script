@@ -1182,6 +1182,72 @@ def test_arp_pause_resume_from_manager():
     assert execution.status.value == "canceled"
 
 
+def test_vnext_verified_result_survives_stop_between_nodes():
+    from winpilot.orchestrator.contracts import (
+        ArpEdge,
+        ArpNode,
+        ArpNodeKind,
+        ArpPolicy,
+    )
+    from winpilot.orchestrator.runtime import (
+        ArpExecution,
+        ArpRunStatus,
+        NodeResult,
+    )
+
+    holder: dict[str, ArpExecution] = {}
+
+    def verified_handler(_node, _context, _stop_event):
+        # A cancel lands exactly after the mission verified but before the
+        # END node runs: the completed result must survive.
+        holder["execution"].stop_event.set()
+        return NodeResult(
+            ok=True,
+            branch="next",
+            output={"status": "mission_verified", "user_result": "finished"},
+            evidence=[
+                {
+                    "predicate": "vnext.mission_verified",
+                    "value": True,
+                    "source": "vnext_actor_claim",
+                    "verified": True,
+                }
+            ],
+        )
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="full-goal",
+                kind=ArpNodeKind.AGENT_GOAL,
+                config={"goal": "finish immediately"},
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="a", source="start", target="full-goal"),
+            ArpEdge(id="b", source="full-goal", target="end"),
+        ],
+        policy=ArpPolicy(require_evidence_on_done=True),
+    )
+    execution = ArpExecution(
+        graph,
+        {ArpNodeKind.AGENT_GOAL: verified_handler},
+    )
+    execution.runtime_state["runtime_version"] = "vnext"
+    holder["execution"] = execution
+
+    result = execution.run()
+
+    assert execution.status is ArpRunStatus.DONE
+    assert execution.result == {
+        "status": "mission_verified",
+        "user_result": "finished",
+    }
+    assert result["status"] == "done"
+
+
 def test_run_projection_unifies_agent_metrics_and_done_evidence():
     from winpilot.orchestrator.projection import RunProjectionStore
 

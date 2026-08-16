@@ -185,7 +185,6 @@ StageRuntime 是旧 Task Contract/TASK_STAGE 链的阶段生命周期 owner：�
 | `FrameAuthority` / workspace | 发布当前 frame、epoch、hwnd、region、图像身份 | 理解画面或选择目标 |
 | `CapabilityBroker` | 投影 schema、当前可写性、窗口/指针所有权 | 根据任务类型预选路线 |
 | `AtomicDesktopAdapter` / `RawDevice` | 唯一坐标映射、真实输入和机械回执 | snap、offset、语义成功 |
-| `RuntimeEvidencePlane` | 绑定 actor、canonical、physical 和 frame 证据 | 充当第二个语义 verifier |
 
 这些 owner 不应形成多个 planner。Legacy `AgentRunner`、FastGuiController、
 RunStateMachine 和 FailureRecoveryLayer 中可复用的基础能力，只能逐项迁移或删除，
@@ -198,14 +197,17 @@ RunStateMachine 和 FailureRecoveryLayer 中可复用的基础能力，只能逐
 
 当同一 Actor 申请桌面后，首个 GUI 回合保留初始有界文本消息及其原生
 `assistant observe_desktop → tool result`，再附加当前权威 JPEG、完整原始目标和
-有界 task state。后续 GUI 回合还保留最多最近三笔 provider 原生
-`user image → assistant tool call → tool result`。模型从画面理解语义并提出一笔
-typed transaction；动作后重新捕获权威帧，下一回合追加新视觉 exchange 并丢弃最旧。
+有界 task state。后续 GUI 回合只保留紧邻的一笔 provider 原生
+`user image → assistant tool call → tool result`，新动作替换上一笔；同一回合内的
+本地只读工具链（status/shell/connector/window_text）只受剩余模型调用预算约束。
+模型从画面理解语义并提出一笔
+typed transaction；动作后重新捕获权威帧，下一回合以新 exchange 替换上一笔。
 这里没有无界聊天历史、第二 planner 或独立 Grounder/Verifier。
 
-当前已复验基线固定 `api.thinking=false`、Visual Actor
-`temperature=0.3`、最大提交图片边 1120，并且每个决策最多一次 provider attempt。
-临时打开 thinking、把图片边提高到 1600、移除 temperature zero 均没有提高 E2E，
+当前基线固定最大提交图片边 1120、每个决策最多一次 provider attempt、Visual Actor
+请求 `temperature=0.0` 且不强制发送 `thinking: disabled`（MiMo 默认 thinking 模式下
+由 provider 固定 sampling 参数）。
+临时打开 thinking、把图片边提高到 1600 均没有提高 E2E，
 已经回退。Runtime 不根据任务词、失败类型或当前 benchmark 自动切换推理模式；未来
 更换模型时用同一外部-oracle 矩阵 A/B，不随模型升级添加补偿规则。
 

@@ -320,31 +320,6 @@ class MissionRuntime:
             detail=detail,
         )
 
-    def _snapshot_matches_mission(
-        self,
-        snapshot: RuntimeSnapshot,
-        *,
-        turn_index: int,
-    ) -> bool:
-        projection = self._reducer.projection
-        binding = projection.target_binding
-        if binding is None:
-            return False
-        if snapshot.broker_state.turn_index != turn_index:
-            return False
-        if snapshot.frame.scope not in {"target_window", "full_desktop"}:
-            return False
-        if snapshot.frame.scope == "target_window" and (
-            snapshot.target != RuntimeTargetIdentity.from_binding(binding)
-            or snapshot.frame.hwnd != binding.hwnd
-            or snapshot.frame.epoch != binding.epoch
-        ):
-            return False
-        # Freshness is projected once by the Broker so it can simply withhold
-        # GUI tools.  This check only keeps the image geometry internally
-        # coherent; evidence registration is never execution authority.
-        return True
-
     def _project(self, snapshot: RuntimeSnapshot) -> BrokerProjection:
         return self._broker.project(
             self._reducer.projection,
@@ -472,14 +447,14 @@ class MissionRuntime:
         envelope: ActorDecisionEnvelope,
         *,
         route: ExecutionRoute,
-        stop_event: threading.Event | None,
     ) -> MissionRuntimeResult:
+        # The Actor's completion judgment on the current real screen is the
+        # semantic truth. No mechanical gate may veto it: neither the deadline
+        # nor a cancel that arrived while the model was deciding may turn an
+        # already-made claim into a failure. Cache the claim and narration
+        # before any auxiliary bookkeeping so later failures cannot lose them.
         obligation_id = envelope.obligation_id
         proposal_kind = "claim_obligation_done"
-        if self._stopped(stop_event):
-            return self._cancel(
-                detail="run was canceled before claim completion",
-            )
         self._verified_completion_result = proposal.concise_claim
         self._latest_narration = proposal.concise_claim
         event_ids: tuple[str, ...] = ()
@@ -550,23 +525,31 @@ class MissionRuntime:
                 stop_event=stop_event,
             )
         except Exception as exc:
-            return self._block_unknown(
-                obligation_id=obligation_id,
+            # A mechanical exception is fed back to the same Actor with the
+            # real reason; the next fresh frame shows whether anything
+            # actually happened. Nothing is replayed either way. Only a
+            # confirmed release-cleanup failure is a physical boundary.
+            return self._result(
+                RuntimeStatus.STALE_DISCARDED,
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 detail=(
                     "Controller raised during execution: "
-                    f"{type(exc).__name__}: {exc}"
+                    f"{type(exc).__name__}: {exc}; no replay occurred; "
+                    "inspect the next fresh screen"
                 ),
             )
         if type(transition) is not ControllerTransition:
-            return self._block_unknown(
-                obligation_id=obligation_id,
+            return self._result(
+                RuntimeStatus.STALE_DISCARDED,
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
-                detail="Controller returned an invalid typed transition",
+                detail=(
+                    "Controller returned an invalid typed transition; "
+                    "no replay occurred; inspect the next fresh screen"
+                ),
             )
         identity_matches = bool(
             transition.action_id == envelope.decision_id
@@ -582,12 +565,15 @@ class MissionRuntime:
                 detail="run was canceled before input executed"
             )
         if not identity_matches:
-            return self._block_unknown(
-                obligation_id=obligation_id,
+            return self._result(
+                RuntimeStatus.STALE_DISCARDED,
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
-                detail="Controller could not prove the mutation outcome",
+                detail=(
+                    "Controller could not prove the mutation outcome; "
+                    "no replay occurred; inspect the next fresh screen"
+                ),
             )
         if transition.outcome is ControllerOutcome.UNKNOWN:
             if transition.error_kind == "release_cleanup_incomplete":
@@ -808,13 +794,6 @@ class MissionRuntime:
                 projection,
                 turn_index=turn_index,
             )
-            if not self._snapshot_matches_mission(
-                initial,
-                turn_index=turn_index,
-            ):
-                raise ValueError(
-                    "Runtime snapshot does not match accepted target/evidence"
-                )
             broker_projection = self._project(initial)
         except Exception as exc:
             return self._result(
@@ -881,10 +860,6 @@ class MissionRuntime:
                 route=route,
                 detail=str(exc),
             )
-        if self._stopped(stop_event):
-            return self._cancel(
-                detail="run was canceled while Actor was deciding"
-            )
         raw = actor_decision
         pending_task_state = self._task_state
         if type(actor_decision) is ActorTurnDecision:
@@ -905,22 +880,6 @@ class MissionRuntime:
             )
         proposal_kind = proposal.kind
         try:
-            current_projection = self._reducer.projection
-            if (
-                current_projection.mission_id
-                != broker_projection.mission_id
-                or current_projection.run_id != broker_projection.run_id
-                or current_projection.revision
-                != broker_projection.mission_revision
-                or current_projection.active_obligation_id
-                != broker_projection.obligation_id
-            ):
-                return self._result(
-                    RuntimeStatus.STALE_DISCARDED,
-                    route=route,
-                    proposal_kind=proposal_kind,
-                    detail="mission changed while the Actor was deciding",
-                )
             tool_name = proposal_tool_name(proposal)
             if (
                 tool_name not in APPROVED_RUNTIME_TOOLS
@@ -948,10 +907,7 @@ class MissionRuntime:
             )
             envelope = bind_actor_decision(
                 mission_reducer=self._reducer,
-                profile=self._profile,
                 state=initial.broker_state,
-                catalog=self._catalog,
-                projection=broker_projection,
                 proposal=proposal,
                 frame_region=initial.frame.region,
                 submitted_image_size=initial.frame.submitted_size,
@@ -1004,7 +960,6 @@ class MissionRuntime:
                 proposal,
                 envelope,
                 route=route,
-                stop_event=stop_event,
             )
         if type(proposal) is BlockedReport:
             reason = "; ".join(proposal.observed_facts)

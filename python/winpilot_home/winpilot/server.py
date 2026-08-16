@@ -1107,26 +1107,18 @@ def _finalize_vnext_trace(
     *,
     trace_status: str,
     detail: str = "",
-    failed: bool = False,
 ) -> None:
-    """Freeze the trace outcome into the vNext execution before its done event."""
+    """Freeze the trace outcome into the vNext execution before its done event.
+
+    Trace recording is a diagnostic side channel: it records ``trace_status``
+    and ``trace_error`` but never rewrites the run status. A completed mission
+    must not become FAILED because the recorder stopped late or lost ownership.
+    """
 
     with execution._lock:
         execution.runtime_state["no_legacy_fallback"] = True
         execution.runtime_state["trace_status"] = str(trace_status)
         execution.runtime_state["trace_error"] = str(detail)
-        if failed:
-            failure = (
-                "vNext trace finalization failed"
-                f" ({trace_status}): {detail or 'unknown trace error'}"
-            )
-            previous = str(execution.error or "").strip()
-            execution.status = ArpRunStatus.FAILED
-            execution.error = (
-                f"{previous}; {failure}"
-                if previous and failure not in previous
-                else failure
-            )
         execution.finished_at = time.time()
         execution.runtime_state["runtime_lifecycle"] = {
             "phase": "finalized",
@@ -1215,7 +1207,6 @@ def _start_arp_execution(
                     finished,
                     trace_status="stop_failed",
                     detail=str(exc),
-                    failed=True,
                 )
                 return
             if not recorder_owns_run:
@@ -1223,7 +1214,6 @@ def _start_arp_execution(
                     finished,
                     trace_status="ownership_lost",
                     detail="vNext trace recorder no longer owns this run",
-                    failed=True,
                 )
                 return
             try:
@@ -1233,7 +1223,6 @@ def _start_arp_execution(
                     finished,
                     trace_status="stop_failed",
                     detail=str(exc),
-                    failed=True,
                 )
                 return
             _finalize_vnext_trace(

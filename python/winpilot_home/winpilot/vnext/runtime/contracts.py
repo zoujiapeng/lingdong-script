@@ -374,16 +374,6 @@ class RuntimeFrame:
         )
         if type(self.image_b64) is not str or not self.image_b64:
             raise RuntimeContractError("image_b64 must be non-empty")
-        try:
-            digest = hashlib.sha256(
-                self.image_b64.encode("ascii")
-            ).hexdigest()
-        except UnicodeEncodeError as exc:
-            raise RuntimeContractError("image_b64 must be ASCII") from exc
-        if digest != identity.image_sha256:
-            raise RuntimeContractError(
-                "image_sha256 does not identify image_b64"
-            )
         refs = _ordered_identities(self.evidence_refs, "evidence_refs")
         if tuple(sorted(refs)) != refs:
             raise RuntimeContractError(
