@@ -3,7 +3,7 @@ import type { NodeType } from '../../../types';
 import { registerEditorDraftCommitter } from '../../../utils/editorDrafts';
 
 interface Props {
-  type: Extract<NodeType, 'agent_goal' | 'action_batch' | 'replay_step' | 'skill_replay' | 'evidence_gate' | 'human_gate'>;
+  type: Extract<NodeType, 'action_batch' | 'replay_step' | 'skill_replay' | 'evidence_gate' | 'human_gate'>;
   params: Record<string, any>;
   onChange: (params: Record<string, any>) => void;
 }
@@ -93,20 +93,6 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
 
   return (
     <div className="arp-param-editor">
-      {type === 'agent_goal' && (
-        <>
-          <Field label="目标" hint="描述期望结果。智能代理决定做什么，控制器决定如何交互。">
-            <textarea className="form-input arp-textarea" value={params.goal || ''} onChange={(event) => patch({ goal: event.target.value })} />
-          </Field>
-          <Field label="成功标准" hint="填写可见、可测试且能证明任务完成的证据。">
-            <textarea className="form-input arp-textarea arp-textarea-compact" value={params.success_criteria || ''} onChange={(event) => patch({ success_criteria: event.target.value })} />
-          </Field>
-          <Field label="控制器最大步数">
-            <input className="form-input" type="number" min={1} max={200} value={params.max_steps ?? 30} onChange={(event) => patch({ max_steps: Number(event.target.value) || 30 })} />
-          </Field>
-        </>
-      )}
-
       {type === 'action_batch' && (
         <>
           <Field label="子目标" hint="填写一段连贯、可快速本地验证的交互序列。">

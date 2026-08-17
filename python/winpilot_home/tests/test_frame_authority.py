@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from winpilot.visual_runtime.frame_authority import FrameAuthority
-from winpilot.agent.loop import AgentRunner
 
 
 def _commit(authority: FrameAuthority, *, epoch: int = 3, payload: str = "jpeg"):
@@ -228,37 +227,3 @@ def test_run_if_current_fails_fast_on_same_thread_nested_pin():
         True,
         "pin released",
     )
-
-
-def test_runner_and_session_share_the_same_frame_authority():
-    runner = AgentRunner("perform the visible task")
-
-    assert runner.session._frame_authority is runner._frame_authority
-    assert runner._structured_grounding_is_current() is False
-
-
-def test_spatial_grounding_rejects_a_superseded_frame_in_the_same_epoch(
-    monkeypatch,
-):
-    runner = AgentRunner("perform the visible task")
-    runner.session.hwnd = 41
-    runner.session._screen_epoch = 3
-    region = SimpleNamespace(left=10, top=20, width=800, height=600)
-    monkeypatch.setattr(
-        "winpilot.agent.loop.select_visual_capture_scope",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            region=region,
-            scope="target_window",
-        ),
-    )
-
-    submitted = _commit(runner._frame_authority)
-    runner._mirror_authoritative_frame(submitted)
-    assert runner._has_fresh_visual_grounding() is True
-
-    # A newer capture can be committed within the same screen epoch.  Until
-    # its pixels are mirrored/submitted to the model, the older frame must no
-    # longer authorize a spatial action.
-    _commit(runner._frame_authority, payload="newer-jpeg")
-
-    assert runner._has_fresh_visual_grounding() is False

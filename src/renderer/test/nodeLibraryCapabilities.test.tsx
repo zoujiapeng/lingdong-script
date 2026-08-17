@@ -60,9 +60,10 @@ describe('NodeLibrary capability gating', () => {
     expect(isRunnableFlowNodeType(nodes.at(-1)!.type)).toBe(true);
   });
 
-  it('uses the runtime contract to identify nodes that need a model', () => {
+  it('no longer offers the removed agent_goal node even with a model capability', () => {
     render(<NodeLibrary capabilities={[modelCapability(['agent_goal'])]} />);
 
-    expect(screen.getAllByText('当前可执行 · 需要模型').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/代理任务/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/需要模型/)).not.toBeInTheDocument();
   });
 });

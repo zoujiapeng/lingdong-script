@@ -1,19 +1,11 @@
-"""Typed task contracts and the deterministic stage runtime.
+"""Kept shared modules of the legacy tasking package.
 
-This package is deliberately independent from ``AgentRunner``.  The runner is
-one possible stage executor; it is no longer the place where task routing,
-artifact identity, communication policy, and completion semantics are invented.
+The task-contract compiler, StageRuntime and interaction chains were removed
+with the legacy Agent line.  Only the modules still owned by vNext/Studio
+remain here: run artifact storage, typed evidence records, and the desktop
+workspace context captured for the vNext lease handoff.
 """
 
-from .compiler import TaskContractCompiler
-from .contracts import StageType, TaskContract, TaskIntent, TaskStage
-from .intent import TaskIntentParser
+from . import artifacts, evidence, execution_context  # noqa: F401
 
-__all__ = (
-    "StageType",
-    "TaskContract",
-    "TaskContractCompiler",
-    "TaskIntent",
-    "TaskIntentParser",
-    "TaskStage",
-)
+__all__ = ("artifacts", "evidence", "execution_context")

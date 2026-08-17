@@ -2,7 +2,8 @@
 
 > 审计基线：当前 `master` 的 tracked 文件；清单由 `git ls-files -z` 生成，避免空格、中文或特殊文件名遗漏。
 > 本卷范围：`src/**`、`package.json`、`vite.config.mts`、`tsconfig*.json`，以及直接服务 Node/Electron 的 `scripts/clean-artifacts.cjs`、`scripts/setup-claude-code.js`。
-> 覆盖：141/141 个文件。其中根配置 6、根 Node 脚本 2、`src/ai-interface` 11、`src/cli` 7、`src/main` 12、`src/renderer` 102、`src/shared` 1。
+> 覆盖：130/130 个文件（`src/ai-interface` 11 文件与 `tsconfig.ai.json` 已删除）。
+> 其中根配置 5、根 Node 脚本 2、`src/cli` 7、`src/main` 12、`src/renderer` 102、`src/shared` 1。
 > 定位：本卷解释 TypeScript/Electron 源码，不改产品代码。它以当前源码为准；历史设计只在解释兼容面时出现。
 
 ## 1. 先说结论：代码里同时存在三条线
@@ -11,7 +12,7 @@
 | --- | --- | --- | --- |
 | 产品主链 | Electron `main.ts` 启动托管 WinPilot；Renderer `AgentCockpit` 调用 `POST /api/v2/goals/runs` | Python vNext 的单一 `LiveVisualActor`；TS 只负责客户端、前台交接和展示 | 当前默认产品路径 |
 | Studio 确定性链 | `Studio` 把 `FlowScript` 编译成 `AutomationIR`，本地与后端验证后调用 `POST /api/v2/automation-ir/runs` | Python ARP/Replayer；不需要模型的节点应为零模型调用 | 当前正式编辑、验证、离线重放路径 |
-| 兼容/开发链 | `src/cli`、`src/ai-interface`、`:7880` API、`engine:start`、Renderer `store/executor.ts` | 旧 `python/engine/engine.py`、feature 子进程或浏览器预览执行器 | 仍有消费者或诊断价值，但不得回落成产品 vNext |
+| 兼容/开发链 | `src/cli`、`:7880` API、`engine:start`、Renderer `store/executor.ts` | 旧 `python/engine/engine.py`、feature 子进程或浏览器预览执行器 | 仍有消费者或诊断价值，但不得回落成产品 vNext（`src/ai-interface` 已删除） |
 
 关键事实：TS 代码不实现 `/api/v2/*` 服务端路由。`ControlPlaneClient` 是这些路由的消费者；真正服务端位于 Python。另一方面，Electron 主进程的 `startApiServer()` 在本机 `127.0.0.1:7880` 暴露的是另一套旧编辑器/宏/feature/MCP 兼容 API，不能把两者混成同一服务。
 
@@ -22,7 +23,6 @@ flowchart TD
   package["package.json scripts"] --> vite["Vite :5200\nRenderer dev/build"]
   package --> tscMain["tsc -p tsconfig.main.json"]
   package --> tscCli["tsc -p tsconfig.cli.json"]
-  package --> tscAi["tsc -p tsconfig.ai.json"]
   tscMain --> electronMain["dist/main/main.js"]
   vite --> renderer["dist/renderer/index.html"]
   electronMain --> window["BrowserWindow + preload.js"]
@@ -229,19 +229,17 @@ WebSocket：ws/events?token=...，承载 run 生命周期、node 事件、deskto
 
 `src/main/api.ts` 绑定 `127.0.0.1`，除 `/api/ping` 外需要 constant-time token 校验，并限制 Origin。它可转发图编辑命令、读 Renderer 缓存状态、管理宏/feature/模板/marks、截图/OCR，并在 `/mcp` 代理旧 Python `@feature` 注册表。旧 DSL/旧 engine 直接写图或执行端点返回 HTTP 410；开发态 JS eval 还需 `LINGDONG_ENABLE_UNSAFE_EVAL=1`。
 
-## 7. CLI 与 `src/ai-interface` 兼容链
+## 7. CLI 兼容链
 
 ```mermaid
 flowchart TD
-  Caller["CLI / external MCP / external HTTP"] --> Entry["src/cli/index.ts or src/ai-interface/index.ts"]
+  Caller["CLI"] --> Entry["src/cli/index.ts"]
   Entry --> Parser["renderer/utils/pseudoParser.ts"]
   Entry --> OldModel["DeepSeek-compatible prompt generator"]
   Parser --> LegacyEngine["python/engine/engine.py"]
-  Entry --> Registry["ToolRegistry: run/list/create/ask/screen_capture"]
-  Registry --> LegacyEngine
 ```
 
-这条链包含独立长系统提示、自然语言→伪代码→旧 engine、stdio MCP、单独 HTTP 服务和截图 overlay。源码仍能单独构建/调用，但它不是 `AgentCockpit` 的一个 `LiveVisualActor` 主链，也不应作为 vNext 失败时的 fallback。
+这条链包含独立长系统提示、自然语言→伪代码→旧 engine。源码仍能单独构建/调用，但它不是 `AgentCockpit` 的一个 `LiveVisualActor` 主链，也不应作为 vNext 失败时的 fallback。原 `src/ai-interface`（stdio MCP + HTTP 工具面）已删除。
 
 兼容链伪代码：
 
@@ -250,11 +248,6 @@ lingdong ask "目标":
   用独立 DeepSeek 风格 system prompt 生成中文伪代码 JSON
   若 --dry 只打印
   否则 pseudoParser -> FlowScript -> python/engine/engine.py
-
-ai-interface:
-  注册 run_flow/list_flows/create_flow/ask_ai/screen_capture
-  用 stdio JSON-RPC 或带 token 的 HTTP 暴露 ToolRegistry
-  run_flow 与 ask_ai 最终同样启动旧 engine.py
 ```
 
 ## 8. 数据转换关系
@@ -288,25 +281,15 @@ flowchart LR
 | `tsconfig.json` | Renderer 严格类型检查：ES2021/DOM、bundler resolution、React JSX、`noEmit`、unused/fallthrough 检查。 | `npm run typecheck` 第一段；范围 `src/renderer`。 | 静态检查。 |
 | `tsconfig.main.json` | Electron 主进程 CommonJS 编译到 `dist`，范围 `src/main` 与 `src/shared`，生成 source map。 | `dev:electron`、`build:electron`、`typecheck`。 | 主进程/preload 构建。 |
 | `tsconfig.cli.json` | CLI CommonJS 编译到 `dist/cli`；额外纳入 Renderer types/utils，因为 CLI 复用 `pseudoParser`。 | `build:cli`、`typecheck`。 | 兼容 CLI 构建。 |
-| `tsconfig.ai.json` | AI interface CommonJS 编译到 `dist`；同样纳入 Renderer utils/types 供旧工具复用伪代码解析。 | `build:ai`、`typecheck`。 | 兼容 AI/MCP/HTTP 构建。 |
 | `scripts/clean-artifacts.cjs` | 安全清理已知生成目录并递归清 Python `__pycache__`；`insideRoot()` 拒绝工作区外目标，`--runtime` 才删除 ignored `python-runtime`，统计释放字节。 | `npm run clean`、`clean:runtime`。 | 手工维护/构建前清理；不参与应用运行。 |
-| `scripts/setup-claude-code.js` | 打印 AI interface MCP 配置；`--apply` 合并写用户 `claude_desktop_config.json`，`--project` 合并写 `.claude/settings.json`，目标是 `dist/ai-interface/index.js`。 | 用户手工运行；对接旧 `src/ai-interface`。 | 外部 Claude/MCP 兼容配置，不是产品主链启动。 |
+| `scripts/setup-claude-code.js` | 旧 AI interface MCP 配置助手；`src/ai-interface` 已删除，该脚本目标 `dist/ai-interface/index.js` 不再可构建，属待清理的兼容脚本。 | 用户手工运行。 | 外部 Claude/MCP 兼容配置，不是产品主链启动。 |
 
-### 9.2 `src/ai-interface`（11/11，独立兼容面）
+### 9.2 `src/ai-interface`（已删除）
 
-| 文件 | 职责与关键符号 | 直接依赖 / 调用者 | 运行阶段 |
-| --- | --- | --- | --- |
-| `src/ai-interface/index.ts` | AI interface 可执行入口；注册 `runFlowTool/listFlowsTool/createFlowTool/askAITool/screenCaptureTool`，`parseArgs()` 选择 `mcp/http/both`，`main()` 启动对应服务。 | package 的 `ai`/`ai:mcp`/`ai:http` 命令；依赖 ToolRegistry 和两个 server。 | 外部兼容服务进程启动。 |
-| `src/ai-interface/prompt/index.ts` | 生成 strong/medium/light 三档旧工具提示；`getSystemPrompt` 拼 ToolRegistry 描述，另导出 JSON/MCP 工具列表和 MCP 配置。 | `server/http.ts` 读取 prompt；外部调用方可直接导入辅助函数。 | 兼容 HTTP prompt 查询；不进入当前 `LiveVisualActor`。 |
-| `src/ai-interface/server/http.ts` | 带随机/环境 token、Origin 限制的 `127.0.0.1` HTTP 工具服务；`/health` 免认证，其余列工具、调用工具、读/切 prompt 等；响应统一为 `APIResponse`。 | `ai-interface/index.ts`；依赖 registry、prompt、types。 | 独立兼容 HTTP 服务。 |
-| `src/ai-interface/server/mcp.ts` | `startMCPServer()` 实现 JSON-RPC 2.0 over stdio：`initialize`、`tools/list`、`tools/call` 与 initialized notification；结果包装为 MCP text content。 | `ai-interface/index.ts`；依赖 ToolRegistry 与 MCP types。 | 独立 MCP 子进程会话。 |
-| `src/ai-interface/tools/ask-ai.ts` | `askAITool` 使用独立长 `SYSTEM_PROMPT` 调 OpenAI-compatible `/chat/completions` 生成中文伪代码；非 dry-run 再调用 `runFlowTool`。 | `ai-interface/index.ts` 注册；运行时动态依赖 `run-flow.ts`。 | 旧“第二模型→伪代码→旧引擎”兼容链。 |
-| `src/ai-interface/tools/create-flow.ts` | `createFlowTool` 校验名称/伪代码，用 `pseudoParser` 确认至少一个动作节点，再写 `.flow`；可显式 overwrite。 | `ai-interface/index.ts` 注册；依赖 registry、fs/path、Renderer parser。 | 外部工具创建旧伪代码文件。 |
-| `src/ai-interface/tools/list-flows.ts` | `listFlowsTool` 扫单层目录，解析 `.flow/.pseudo` 或识别 FlowScript JSON，跳过目录和无效文件，返回节点数/说明。 | `ai-interface/index.ts` 注册；依赖 registry 与 `pseudoParser`。 | 外部工具发现旧脚本。 |
-| `src/ai-interface/tools/registry.ts` | `ToolRegistry` 单例维护 name→definition/handler，提供 call 异常归一化、MCP schema、prompt 描述；`createTool()` 组合定义和 handler。 | 所有 AI tools 与 server。 | 模块加载注册、每次兼容工具调用。 |
-| `src/ai-interface/tools/run-flow.ts` | `runFlowTool` 从文件或伪代码构造 FlowScript，`executeScript()` 启动 `python/engine/engine.py`，stdin 发 `execute`，收集 stdout/stderr；检测 `execution_done` 后关闭 stdin。 | `ai-interface/index.ts` 注册，`ask-ai.ts` 复用；依赖 `pseudoParser`。 | 旧 Flow engine 执行兼容面。 |
-| `src/ai-interface/tools/screen-capture.ts` | `screenCaptureTool`：full 模式用 PowerShell/System.Drawing；select 模式动态生成临时 Electron 入口和全屏 canvas overlay，临时 JSON 回传区域/PNG base64，并在 60 秒超时清理。 | `ai-interface/index.ts` 注册；依赖 Electron 安装、fs/path/child_process。 | 外部兼容截图工具；不同于正式 ARP managed screenshot。 |
-| `src/ai-interface/tools/types.ts` | 定义 Tool schema/result/handler、MCP request/response、HTTP `APIResponse`、`ServerMode`。 | registry、servers、index 与全部 tools。 | 编译期合同，运行时无独立逻辑。 |
+`src/ai-interface/`（11 文件：index、prompt、http/mcp server、run/list/create/ask/screen-capture
+工具、registry、types）与 `tsconfig.ai.json`、npm `ai`/`ai:mcp`/`ai:http`/`build:ai`
+scripts 已随旧 Agent 线删除。该目录是旧"第二模型→伪代码→旧 engine"兼容链，
+CLAUDE.md 明令不得接回。
 
 ### 9.3 `src/cli`（7/7，独立兼容面）
 
@@ -414,7 +397,7 @@ flowchart LR
 | `src/renderer/utils/macroConverter.ts` | `macroEventsToFlow()` 把 recorder click/key 序列转成 start→动作→end；≥300ms gap 插 wait，特殊键变 keyboard，普通字符变 input_text。 | store `convertMacroToFlow`；macroConverter tests。 | 用户把旧录制宏导入编辑器时。 |
 | `src/renderer/utils/nodeDefinitions.ts` | `NODE_DEFINITIONS` 为全部 60 个 NodeType 提供 label/description/icon/category/defaultParams/ports；`Record<NodeType, NodeDefinition>` 在类型层要求穷尽；另导出分类、按类型与分类查询。 | Canvas、Library、Property、store、compiler/fragment/parser 等。 | Renderer 模块加载与所有节点创建/渲染。 |
 | `src/renderer/utils/nodeIconMap.ts` | 静态 icon name→LucideIcon 映射，未知图标回退 `Circle`。 | FlowNode、NodeLibrary、PropertyPanel。 | 节点 UI 渲染。 |
-| `src/renderer/utils/pseudoParser.ts` | 1179 行旧中英伪代码 parser：缩进 AST、指令/条件解析、默认 params、构造含分支/循环的 FlowScript/edges；入口 `parsePseudoToFlow()`。 | CLI 与 `src/ai-interface`；只被测试覆盖，当前 Renderer 产品 UI 不直接调用。 | 兼容脚本创建/执行。 |
+| `src/renderer/utils/pseudoParser.ts` | 1179 行旧中英伪代码 parser：缩进 AST、指令/条件解析、默认 params、构造含分支/循环的 FlowScript/edges；入口 `parsePseudoToFlow()`。 | CLI；只被测试覆盖，当前 Renderer 产品 UI 不直接调用。 | 兼容脚本创建/执行。 |
 | `src/renderer/utils/templateMatcher.ts` | `matchExact()` 去常见中文动词前缀，依次 exact name/alias/keyword 与 fuzzy 查 templateRegistry，返回命中方式。 | store `loadTemplateByExactMatch`；templateMatcher tests。 | 旧模板快捷加载。 |
 | `src/renderer/utils/templateRegistry.ts` | 内存 `TemplateRegistry`：register/unregister/clear/get、exact/fuzzy/scored search、AI context；单例由 store 在模块加载时填 preset/custom。 | store、ScriptBrowser、unifiedSearch、template tests。 | Renderer 模块初始化与模板查询。 |
 | `src/renderer/utils/textGenerator.ts` | 从 FlowScript 图遍历并生成旧 DSL 或中文伪代码；处理 convergence、条件/循环、disabled/unknown 与大量节点 generator；`_setFeatureKeywordMap` 为 feature 名称映射。 | 当前无生产 import，只有 textGenerator tests；保留作兼容导出能力。 | 休眠/库式兼容转换。 |
@@ -470,7 +453,7 @@ flowchart LR
 | Studio IR/compiler/store | `automationIR`、`platformContracts`、`store`、`canvasControlsNodeBoundary`、`flowFragment*`、`propertyPanelHistory` | 每个参数表单的视觉布局与所有 20 节点在真实桌面上的物理效果未逐个由 Vitest 证明。 |
 | 主进程托管与安全边界 | `winpilotServer`、`macroPaths`、`executionContext`、`platformContracts` | `main.ts` 的完整 IPC 生命周期、窗口/托盘/快捷键、真实 PowerShell 截图没有独立细粒度单测。 |
 | 旧 Flow 兼容层 | `executor`、`pseudoParser`、`textGenerator`、`macroConverter`、template 两组测试 | 这些通过不表示它们属于当前产品 fallback；它们仍是显式兼容/开发能力。 |
-| AI interface 与 CLI | 主要由 TypeScript 构建以及 parser/compiler 的间接测试约束 | `src/ai-interface/**`、`src/cli/**` 没有同目录直接测试；真实 socket/API 交互需单独集成验证。 |
+| CLI | 主要由 TypeScript 构建以及 parser/compiler 的间接测试约束 | `src/cli/**` 没有同目录直接测试；真实 socket/API 交互需单独集成验证。 |
 | 视觉与响应式 | `appErrorBoundary`、`studioResponsive`、`visualInteractionTarget` 及 React 测试 | CSS 像素级结果、透明窗口、焦点让渡、OS 层通知只能靠可见 Electron E2E/人工外部 oracle。 |
 
 明确的覆盖空洞：`src/main/cronMatcher.ts` 当前无生产调用者或直接测试；`utils/textGenerator.ts` 当前仅由自身测试导入；历史 PropertyPanel editors 多数能被类型检查但不在正式 20 节点 runtime 目录中。它们都不应被误写成当前产品执行链。

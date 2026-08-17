@@ -801,47 +801,9 @@ export interface PlatformOverview {
   contracts: Record<string, string>;
 }
 
-export interface ChatGPTDesktopIntegration {
-  ok: boolean;
-  integration: 'chatgpt_desktop';
-  transport: 'mcp_streamable_http';
-  planner: string;
-  requires_openai_api_key: boolean;
-  enabled: boolean;
-  server_ready: boolean;
-  client_active: boolean;
-  connection_status: 'active' | 'ready' | 'disabled' | 'error';
-  last_client_seen_at: number | null;
-  request_count: number;
-  last_client: string;
-  security_mode: 'loopback_only';
-  proxy_bypass: string;
-  allow_desktop_mutation: boolean;
-  endpoint: string;
-  tool_count: number;
-  tools: string[];
-  error?: string;
-  registration?: { client: string; command: string; environment?: string };
-}
-
 export interface RuntimeEvent {
   type: string;
   ts?: number;
   run_id?: string;
   [key: string]: unknown;
-}
-
-export interface AgentSchedule {
-  id: string;
-  name: string;
-  task: string;
-  enabled: boolean;
-  running: boolean;
-  next_run_at?: string | null;
-  interval_seconds?: number | null;
-  max_steps?: number;
-  last_run_at?: string | null;
-  last_run_id?: string | null;
-  last_status?: string | null;
-  run_count: number;
 }

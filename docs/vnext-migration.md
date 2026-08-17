@@ -127,11 +127,15 @@ Pi 只有在能整体替换并删除 Python 模型循环 owner、且跨任务 E2
 
 | 兼容面 | 暂留用途 | 禁止事项 |
 | --- | --- | --- |
-| `POST /api/v2/task-contracts/compile` | Studio、合同/图编辑和旧调用方 | 不得替主 Agent 识别 intent 或选择 runtime |
 | `POST /api/v2/arp/runs` | Studio、显式图执行和兼容测试 | 不得接回智能代理页；不得作为 vNext 失败 fallback |
-| Task Contract/TASK_STAGE | 旧图和工件合同 | 不得承载新 GUI 能力的第二份实现 |
-| `StageRuntime` / `AgentRunner` | Legacy run | 不得成为 vNext 的隐式恢复路径 |
+| `agent/` 剩余 ToolSession/mixins | Studio ACTION_BATCH 的确定性执行器 | 不得重新成为模型循环或产品 fallback |
 | legacy IPC、FlowScript、旧 feature system | 仍有明确消费者的兼容功能 | 不得决定主 Agent 行为 |
+
+2026-08-17 删除批次（分支 `analysis/new-vs-old-architecture`）已移除：
+`/api/v2/task-contracts/compile`、Task Contract/TASK_STAGE 执行与校验、
+`StageRuntime`/`InteractionStageEngine`、AgentRunner 半边、`/api/chat`、`/api/stop`、
+`/api/agent-schedules`、`/api/session`、webui、ChatGPT MCP、`eval/`、
+`src/ai-interface`、`gui_eval_run.py`。`tasking/` 只剩 artifacts/execution_context/evidence。
 
 服务端内部仍可复用 ArpExecution 的 run 生命周期；这不等于允许主 Agent 客户端通过 `/api/v2/arp/runs` 提交 graph 或选择 runtime。
 

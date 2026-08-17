@@ -46,7 +46,6 @@ function createPlane(currentRun: Record<string, unknown> | null = null) {
     traces: vi.fn(async () => []),
     scripts: vi.fn(async () => []),
     memories: vi.fn(async () => []),
-    sessions: vi.fn(async () => []),
   };
   const startGoal = vi.fn(async (goal: string, threadId: string) => ({
     ok: true,

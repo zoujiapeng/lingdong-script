@@ -2,7 +2,7 @@ import type { FlowNode, FlowScript, NodeType } from '../types';
 import type { ArpEdge, ArpGraph, ArpNode, ArpNodeKind } from './contracts';
 
 const NATIVE_KINDS = new Set<ArpNodeKind>([
-  'start', 'end', 'agent_goal', 'action_batch', 'replay_step', 'skill_replay', 'evidence_gate', 'human_gate',
+  'start', 'end', 'action_batch', 'replay_step', 'skill_replay', 'evidence_gate', 'human_gate',
 ]);
 
 /**
@@ -12,7 +12,6 @@ const NATIVE_KINDS = new Set<ArpNodeKind>([
  * currently exposes the corresponding capability.
  */
 export const RUNNABLE_FLOW_NODE_TYPES = new Set<NodeType>([
-  'agent_goal',
   'action_batch',
   'replay_step',
   'skill_replay',
@@ -251,9 +250,6 @@ function nodeToArp(node: FlowNode): ArpNode {
   } else if (NATIVE_KINDS.has(node.type as ArpNodeKind)) {
     kind = node.type as ArpNodeKind;
     config = withoutPolicyFields(params);
-    if (kind === 'agent_goal' && params.success_criteria) {
-      config.goal = `${String(params.goal || '').trim()}\n\nCompletion evidence: ${String(params.success_criteria).trim()}`;
-    }
     if (kind === 'human_gate') timeout_s = Number(params.timeout_s) || 3600;
   } else if (node.type === 'wait' && params.wait_type === 'time') {
     kind = 'delay';

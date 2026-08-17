@@ -98,7 +98,7 @@ _CAPABILITIES = {
     "runtime_profile": _AGENT_RUNTIME_PROFILE_FILE.is_file(),
     "automation_ir": _has_module("winpilot.automation_ir"),
     "replay_jobs": True,
-    "scheduler": _has_module("winpilot.scheduler"),
+    "scheduler": False,
     "desktop_action_queue": _has_module("winpilot.action.desktop_queue"),
 }
 

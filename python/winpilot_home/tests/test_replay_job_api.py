@@ -13,8 +13,6 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server, "SCRIPTS_DIR", tmp_path)
     with server.STATE.lock:
-        server.STATE.runner = None
-        server.STATE.runners.clear()
         server.STATE.run_jobs.clear()
     server.RUNTIME_JOBS.clear_finished()
     return TestClient(server.app)

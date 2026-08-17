@@ -1156,39 +1156,6 @@ def test_fast_controller_executes_type_text_and_hotkey_without_semantic_rewrite(
     ]
     assert [item["action"] for item in out["results"]] == ["type_text", "hotkey"]
     assert all("upgraded_from" not in item for item in out["results"])
-
-
-def test_runner_file_dialog_type_text_remains_one_explicit_action():
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner(r"Save As C:\Users\zou\Desktop\report.docx")
-    calls = []
-
-    def dispatch(name, args):
-        calls.append((name, args))
-        return ToolResult(json.dumps({
-            "ok": True,
-            "verified": False,
-            "results": [{
-                "action": "type_text",
-                "ok": True,
-                "data": {"ok": True, "verified": False},
-            }],
-        }))
-
-    runner.session.dispatch = dispatch
-    submitted = {
-        "text": r"C:\Users\zou\Desktop\report.docx",
-        "clear": False,
-    }
-    runner._dispatch_with_fast_visual_wrap("type_text", submitted)
-
-    assert calls == [("run_action_batch", {
-        "actions": [{"action": "type_text", **submitted}],
-    })]
-
-
 def test_controller_canonicalizes_each_declared_action_once(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast import action_contract
@@ -3690,6 +3657,7 @@ def test_initial_task_app_target_extracts_first_explicit_app_without_workflow_ru
 
 
 def test_execute_subgoal_launches_initial_task_app_before_first_in_app_action():
+    from winpilot.agent.fast_tools import FastToolMixin
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor
@@ -3752,89 +3720,6 @@ def test_execute_subgoal_launches_initial_task_app_before_first_in_app_action():
     assert payload["ok"] is True
     assert payload["evidence_packet"]["prelude"][0]["action"] == "open_app"
     assert payload["actions_executed"][0]["action"] == "click_element"
-
-
-def test_runner_prebinds_leading_implicit_gui_application(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tools import ToolResult
-
-    runner = AgentRunner("在画板上画一只五颜六色的猫")
-    runner.messages = [{"role": "system", "content": "system"}]
-    calls = []
-
-    def dispatch(tool, args):
-        calls.append((tool, args))
-        return ToolResult('{"ok": true, "verified": true, "target_hwnd": 42}')
-
-    monkeypatch.setattr(runner.session, "dispatch", dispatch)
-
-    runner._prebind_initial_gui_target()
-
-    assert calls == [("open_app", {"name": "画板"})]
-    assert "controller target prebind" in runner.messages[-1]["content"]
-
-
-def test_native_prebind_hides_text_controller_observe_request(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tools import ToolResult
-
-    runner = AgentRunner("open Paint and operate the visible canvas")
-    runner.messages = [{"role": "system", "content": "system"}]
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
-    monkeypatch.setattr(
-        runner.session,
-        "dispatch",
-        lambda _tool, _args: ToolResult(json.dumps({
-            "ok": True,
-            "verified": True,
-            "route": "existing_visible_window",
-            "target_hwnd": 42,
-            "needs_observe": True,
-            "fast_path_advice": "Observe it once, then continue.",
-        })),
-    )
-
-    runner._prebind_initial_gui_target()
-
-    model_message = runner.messages[-1]["content"]
-    history_result = runner._tool_history[-1][2]
-    assert "fresh_authoritative_frame_pending" in model_message
-    assert "needs_observe" not in model_message
-    assert "Observe it once" not in model_message
-    assert "needs_observe" not in history_result
-    assert "Observe it once" not in history_result
-    assert "do not call observe merely to reconfirm" in model_message
-
-
-def test_native_prebind_reuses_verified_app_hint_after_window_replacement(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tools import ToolResult
-
-    runner = AgentRunner("打开QQ去QQ空间里面点赞看到的所有说说")
-    runner.messages = [{"role": "system", "content": "system"}]
-    runner.session.hwnd = 41
-    runner.session.target_hint = "QQ"
-    runner.session._target_binding_verified = True
-    calls = []
-
-    monkeypatch.setattr(runner.session, "_window_alive", lambda _hwnd: False)
-    monkeypatch.setattr(runner.session, "_recover_bound_target_window", lambda: None)
-
-    def dispatch(tool, args):
-        calls.append((tool, args))
-        return ToolResult('{"ok": true, "verified": true, "target_hwnd": 42}')
-
-    monkeypatch.setattr(runner.session, "dispatch", dispatch)
-
-    runner._prebind_initial_gui_target()
-
-    assert calls == [("open_app", {"name": "QQ"})]
-
-
-def test_run_action_batch_open_app_recovers_hallucinated_preobserve_element_id():
-    from winpilot.agent.fast_tools import FastToolMixin
-    from winpilot.agent.tool_result import ToolResult
-
     calls = []
 
     class Session(FastToolMixin):
@@ -4135,50 +4020,29 @@ def test_input_locator_infers_custom_chat_composer_after_target_conversation_ope
 def test_legacy_controller_communication_context_comes_from_typed_intent():
     from winpilot.agent.tools import ToolSession
 
-    first = ToolSession(task="\u53d1\u7ed9\u6d4b\u8bd5\u8054\u7cfb\u4eba")
-    second = ToolSession(task="\u53d1\u9001\u7ed9\u6d4b\u8bd5\u8054\u7cfb\u4eba")
-    non_communication = ToolSession(task="\u6253\u5f00\u8bb0\u4e8b\u672c")
-    try:
-        assert first.communication_context == second.communication_context
-        assert first.communication_context["active"] is True
-        assert first.communication_context["recipient"] == "\u6d4b\u8bd5\u8054\u7cfb\u4eba"
-        assert non_communication.communication_context["active"] is False
-    finally:
-        first.close()
-        second.close()
-        non_communication.close()
-
-
-def test_tool_session_consumes_injected_contract_intent_without_reparsing(monkeypatch):
-    from winpilot.agent.runtime_profile import RuntimeProfile
-    from winpilot.agent.tools import ToolSession
-    from winpilot.tasking.intent import TaskIntentParser
-
-    monkeypatch.setattr(
-        TaskIntentParser,
-        "parse",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("typed ToolSession must not reparse raw task text")
-        ),
-    )
-    session = ToolSession(
-        task="this contradictory raw text says send to somebody else",
-        runtime_profile=RuntimeProfile(desktop=True, coding=False),
+    first = ToolSession(task="发给测试联系人")
+    second = ToolSession(task="发送给测试联系人")
+    typed = ToolSession(
+        task="发给测试联系人",
         task_intent={
-            "original_text": "compiler-owned intent",
-            "operation": ["open"],
-            "channel": "",
-            "recipient": "",
+            "original_text": "发给测试联系人",
+            "operation": ["send"],
+            "channel": "chat",
+            "recipient": "测试联系人",
             "send_mode": "send",
         },
     )
     try:
-        assert session.task_intent["original_text"] == "compiler-owned intent"
-        assert session.communication_context["active"] is False
+        # The raw-task intent parser was removed with the tasking chain;
+        # only typed/compiler-owned intent derives communication context.
+        assert first.communication_context["active"] is False
+        assert second.communication_context == first.communication_context
+        assert typed.communication_context["active"] is True
+        assert typed.communication_context["recipient"] == "测试联系人"
     finally:
-        session.close()
-
-
+        first.close()
+        second.close()
+        typed.close()
 def test_chat_composer_beats_old_message_text_that_says_input_box():
     from winpilot.fast.input_locator import locate_input
     from winpilot.perception.fusion import Snapshot
@@ -6698,43 +6562,6 @@ def test_file_dialog_enter_submit_verifies_current_dialog_title(monkeypatch):
 
     enter = next(action for action in actions if action.get("action") == "hotkey")
     assert enter["expect"] == {"file_exists": r"C:\Users\zou\Desktop\demo.txt", "timeout_s": 8.0}
-
-
-def test_agent_tool_message_compacts_execute_subgoal_result():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a blue triangle")
-    raw = json.dumps({
-        "ok": True,
-        "verified": True,
-        "subgoal": "draw",
-        "subgoal_route": "controller_first",
-        "controller_state": {"phase": "verified"},
-        "actions_executed": [
-            {
-                "action": "draw_strokes",
-                "requested_color": "blue",
-                "shape": "triangle",
-                "strokes": [[[1, 2], [3, 4], [5, 6], [1, 2]]] * 80,
-                "canvas_region": {"x": 10, "y": 20, "width": 300, "height": 200},
-            }
-        ],
-        "evidence_packet": {
-            "matched_visual_colors": ["blue"],
-            "missing_visual_colors": [],
-            "visible_colors": {"blue": {"pixels": 123, "ratio": 0.02}},
-        },
-    }, ensure_ascii=False)
-
-    runner._append_tool_result("call-1", raw, tool_name="execute_subgoal")
-    content = runner.messages[-1]["content"]
-
-    assert len(content) < 2000
-    assert '"matched_visual_colors": ["blue"]' in content
-    assert '"stroke_count": 80' in content
-    assert "[[1, 2], [3, 4]" not in content
-
-
 def test_fast_controller_select_color_clicks_visible_palette_swatch(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.agent import scope_guard

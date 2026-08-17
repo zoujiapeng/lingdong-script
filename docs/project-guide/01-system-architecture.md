@@ -357,14 +357,17 @@ flowchart TB
 
   Studio["Studio 运行按钮\narp_graph Automation IR"] --> ARP["ARP legacy runtime\nACTION_BATCH 才复用 ToolSession"]
   WPS["Automation IR wps_replay API /\n资料页旧 /api/replay"] --> Replay["RuntimeJob + Replayer"]
-  LegacyAPI["/api/chat"] --> AgentRunner["agent/loop.py 等"]
-  Local7880["Electron :7880 / MCP"] --> OldBridges["engine/features/macros"]
-  CLI["src/cli + ai-interface"] --> OldBridges
+  Local7880["Electron :7880"] --> OldBridges["engine/features/macros"]
+  CLI["src/cli"] --> OldBridges
 
   AgentRunner -. "不得 fallback" .-> Live
   OldBridges -. "不得注入工具" .-> VNext
   Studio -. "共享基础设施必须显式证明" .-> VNext
 ```
+
+`/api/chat`、`webui/**`、`src/ai-interface/**`、`winpilot/eval/**`、
+`integrations/chatgpt_mcp.py` 与 `/mcp` 旧 ChatGPT desktop MCP mount 已随旧 Agent 线
+删除；图中 `agent/loop.py` 现只由 scheduler 与 Studio TASK_STAGE 兼容链可达。
 
 依赖方向上，current live 路径应能在阻断 `winpilot.agent` 包时完成 import/admission。Legacy 可以依赖通用基础设施；vNext 不应为了复用方便重新 import 整个 Legacy owner。
 

@@ -87,12 +87,10 @@ def test_grounded_explicit_send_observe_returns_proposal_without_mutation():
     from winpilot.agent.tool_result import ToolResult
 
     calls = []
-    from winpilot.tasking.intent import TaskIntentParser
-
     task = 'send "AUTO_SEND_0712" and confirm it in chat history'
     session = SimpleNamespace(
         task=task,
-        task_intent=TaskIntentParser().parse(task).model_dump(mode="json"),
+        task_intent={"original_text": task, "operation": ["send"], "send_mode": "send"},
         hwnd=9,
         run_id="test-auto-send",
         _auto_communication_attempted=False,
@@ -130,12 +128,10 @@ def test_grounded_explicit_send_observe_returns_proposal_without_mutation():
 
 def test_grounded_chat_does_not_autogenerate_content_for_open_ended_chat():
     from winpilot.agent.perception_tools import PerceptionToolMixin
-    from winpilot.tasking.intent import TaskIntentParser
-
     task = "use chat to talk with My Phone"
     session = SimpleNamespace(
         task=task,
-        task_intent=TaskIntentParser().parse(task).model_dump(mode="json"),
+        task_intent={"original_text": task, "operation": ["send"], "send_mode": "send"},
         hwnd=9,
         run_id="test-open-chat",
         _auto_communication_attempted=False,

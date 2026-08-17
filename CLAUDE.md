@@ -7,6 +7,54 @@
 > 13.20–13.28 已进入或正在进入主线；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、
 > 通用 connector、history-depth 证据或 provisional native-provider 边界。
 
+## 2026-08-17 旧架构删除批次（分支 `analysis/new-vs-old-architecture`，未提交）
+
+分析报告：`docs/legacy-vs-vnext-analysis.md`。本批已实际删除并在该分支通过全量回归：
+
+第一批（旧 Agent 产品线）：
+- `src/ai-interface/`（11 文件）+ `tsconfig.ai.json` + npm `ai`/`ai:mcp`/`ai:http`/`build:ai`。
+- `python/lobster_mcp/`（旧 feature-registry MCP spike）。
+- server：`POST /api/chat`、`POST /api/stop`、`GET /`、`/static/*` 与 `python/winpilot_home/webui/`
+  （旧兼容 Web UI）、`/mcp` ChatGPT desktop MCP mount、`_install_chatgpt_mcp` 及桥函数；
+  `/api/v2/integrations/chatgpt` 改为恒 `removed` 状态。
+- `winpilot/integrations/chatgpt_mcp.py`、`winpilot/eval/`（6 文件）、
+  `/api/trace/{run_id}/summary`、`scripts/eval_summary.py`、npm `eval:summary`。
+- `/api/v2/arp/runs` 的 `legacy_goal_graph_task` goal 编译分支、
+  `orchestrator/graph_compiler.py`、`orchestrator/adapters.py` 的 `_agent_handler`。
+- `orchestrator/live_agent.py` 状态工具不再 import `winpilot.memory`。
+- `scripts/gui_eval_run.py` 删除 `--entrypoint chat` 模式。
+
+第二批（方案 B：删除旧消费者功能后删旧包）：
+- **服务端定时任务整功能**：`/api/agent-schedules` 三条路由、`winpilot/scheduler.py`、
+  `_run_agent_job`/`_try_start_scheduled`/调度线程、Renderer 设置页“代理计划”面板与
+  client 方法；`runtime_info` 的 `scheduler` capability 恒 False。
+- **Studio agent_goal 节点**：nodeDefinitions 标记“已移除”并从可运行目录/节点库摘除，
+  flowToArpGraph 把历史 agent_goal 编译为 `legacy_flow` fail closed；`有证据的智能任务`
+  预设模板删除；ArpNodeParams/PropertyPanel 移除对应编辑器。
+- **任务契约编译链**：`/api/v2/task-contracts/compile`、`scripts/gui_eval_run.py`（整文件）、
+  npm `eval:*`、`tasking/` 从 22 文件缩到 3 文件（`artifacts.py`/`execution_context.py`/
+  `evidence.py`，vNext 工件、桌面上下文与 Studio 技能证据仍在用），
+  `orchestrator/contracts.py` 的 TaskStage pin 改为内联 fail-closed 校验，
+  adapters 的 TASK_STAGE handler 删除。
+- **AgentRunner 半边**：`agent/` 从 35 文件缩到 21 文件——删除
+  `loop/router/session/done_verifier/failure_classifier/failure_recovery/scene_coverage/
+  run_state/reflection/playbooks/prompts/context_guidance/graphical_affordances/
+  gui_plan_helpers/coding`；`/api/session` 路由与 Renderer 会话记忆视图删除。
+- `playbooks/*.json` 数据与 `playbooks_enabled` 配置键删除。
+- 关联 47 个旧包测试文件删除，5 个共享件测试修正。
+
+**仍然保留（有真实消费者，未动）**：`agent/` 剩余 21 文件 = Studio 确定性执行器
+（`ToolSession` + mixins + `scope_guard`/`planner`/`runtime_profile`/`task_rules`），
+`fast/`（FastGuiController/subgoal/controller 是 Studio ACTION_BATCH 的实际引擎），
+`memory/`（`/api/memory*` 与 `finalize_memory_feedback`）、`recorder/`（vNext trace 写入
++ 离线 replay）、`/api/v2/arp/*`、`automation-ir`、`python/engine|features|tools` 与
+Electron 7880/F9/feature 桥（含 main.ts 的 scheduler_daemon 提醒桥）。下一批要删
+`agent/` 余下部分，必须先把 Studio ACTION_BATCH 从 ToolSession 迁到
+`fast.controller` 直连（方案 A 迁移）。
+
+回归：WinPilot `2377 passed, 13 skipped`、根 `tests/` `2508 passed`、
+renderer `325 passed`、TypeScript typecheck 通过。
+
 本文件是换 Codex 窗口后的第一入口。它保存当前决策和继续工作的边界，不替代
 长期架构与测试规范。依次阅读：
 

@@ -3,9 +3,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from ..agent.router import build_runner
 from ..agent.runtime_profile import build_runtime_profile
 from ..agent.tools import ToolSession
 from ..config import SCRIPTS_DIR
@@ -14,9 +13,6 @@ from ..recorder import trace as trace_mod
 from ..utils.log import BUS
 from .contracts import ArpNode, ArpNodeKind
 from .runtime import NodeHandler, NodeResult
-
-
-RunnerCallback = Callable[[Any], None]
 
 _REPLAY_SHELL_TOOLS = {"run_shell", "ext.run_shell", "run_detached"}
 _REPLAY_DESKTOP_TOOLS = {
@@ -44,79 +40,6 @@ def _json_result(text: str) -> dict[str, Any]:
     except (TypeError, json.JSONDecodeError):
         return {"ok": False, "text": text}
     return value if isinstance(value, dict) else {"ok": False, "value": value}
-
-
-def _agent_handler(on_runner: RunnerCallback | None = None) -> NodeHandler:
-    def run(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
-        goal = str(node.config.get("goal") or node.config.get("task") or node.name or "").strip()
-        if not goal:
-            return NodeResult(ok=False, error="agent_goal requires config.goal")
-        max_steps = node.config.get("max_steps")
-        try:
-            max_steps_override = int(max_steps) if max_steps else None
-        except (TypeError, ValueError):
-            max_steps_override = None
-        graph = context.get("graph") if isinstance(context.get("graph"), dict) else {}
-        policy = graph.get("policy") if isinstance(graph.get("policy"), dict) else {}
-        profile = build_runtime_profile(goal)
-        runner = build_runner(
-            goal,
-            stop_event=stop_event,
-            pause_controller=context.get("pause_controller"),
-            max_steps_override=max_steps_override,
-            # ARP's allow_shell flag is a replay safety boundary. It must not
-            # silently remove the Coding Runtime's own deterministic shell
-            # capability from a mixed coding+desktop goal created by the Agent
-            # frontend. Desktop-only goals still keep the conservative policy.
-            allow_shell_tools=bool(policy.get("allow_shell", False) or profile.coding),
-        )
-        if on_runner:
-            on_runner(runner)
-        BUS.publish(
-            "arp_child_run",
-            run_id=context["run_id"],
-            node_id=node.id,
-            child_run_id=runner.run_id,
-            child_kind="agent",
-            task=goal,
-        )
-        result = runner.run()
-        ok = runner.status == "done"
-        evidence: list[dict[str, Any]] = []
-        if ok and bool(getattr(runner, "_done_verified", False)):
-            evidence.append({
-                "predicate": "agent.done",
-                "value": goal,
-                "source": "done_gate",
-                "verified": True,
-                "action_id": runner.run_id,
-            })
-            for item in (getattr(runner, "_visible_evidence_ledger", []) or [])[-20:]:
-                target = str(item.get("target") or "").strip()
-                if not target:
-                    continue
-                evidence.append({
-                    "predicate": "visible.text",
-                    "value": target,
-                    "source": str(item.get("source") or "agent_observe"),
-                    "verified": True,
-                    "text": str(item.get("snippet") or "")[:500],
-                    "action_id": runner.run_id,
-                })
-        return NodeResult(
-            ok=ok,
-            branch="next" if ok else "fail",
-            output={
-                "child_run_id": runner.run_id,
-                "status": runner.status,
-                "result": result,
-                "usage": dict(runner.usage_total),
-            },
-            evidence=evidence,
-            error="" if ok else runner.result_text or f"agent ended with {runner.status}",
-        )
-
-    return run
 
 
 def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
@@ -496,20 +419,11 @@ def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
     )
 
 
-def default_handlers(on_runner: RunnerCallback | None = None) -> dict[ArpNodeKind, NodeHandler]:
-    from ..tasking.stage_runtime import task_stage_handler
-
-    def run_task_stage(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
-        stage_context = dict(context)
-        stage_context["on_runner"] = on_runner
-        return task_stage_handler(node, stage_context, stop_event)
-
+def default_handlers() -> dict[ArpNodeKind, NodeHandler]:
     return {
-        ArpNodeKind.AGENT_GOAL: _agent_handler(on_runner),
         ArpNodeKind.ACTION_BATCH: _batch_handler,
         ArpNodeKind.REPLAY_STEP: _replay_step_handler,
         ArpNodeKind.SKILL_REPLAY: _skill_handler,
-        ArpNodeKind.TASK_STAGE: run_task_stage,
     }
 
 

@@ -11,10 +11,10 @@
 | 线 | 当前地位 | 真实入口 | 本章涉及的支撑文件 |
 | --- | --- | --- | --- |
 | 产品 vNext | 当前唯一用户任务主链：一个 goal、一个 `LiveVisualActor`、一条视觉执行线 | Electron 托管 `python/winpilot_home/serve.py` | `serve.py`、`config.example.json`、可见客户端 E2E、独立 oracle |
-| Studio/Flow/兼容线 | 仍有真实消费者，用于流程编辑、确定性 replay、CLI 和本地 feature API；不得冒充产品 vNext | Electron 的 feature/DSL/scheduler bridge、CLI/AI 兼容入口 | `python/engine/**`、`python/features/**`、`python/tools/**`、Flow/DSL 模板 |
+| Studio/Flow/兼容线 | 仍有真实消费者，用于流程编辑、确定性 replay、CLI 和本地 feature API；不得冒充产品 vNext | Electron 的 feature/DSL/scheduler bridge、CLI 兼容入口 | `python/engine/**`、`python/features/**`、`python/tools/**`、Flow/DSL 模板 |
 | 测试与历史材料 | 验证合同、重现旧行为或提供独立靶场；不是生产推理策略 | pytest、Vitest、E2E runner、静态 HTML/Tk/Java 靶场 | `tests/**`、`python/winpilot_home/tests/**`、`scripts/**`、`eval_targets/**`、`examples/**` |
 
-关键判断：`python/winpilot_home/playbooks/*.json` 虽然被代码读取，但默认 `playbooks_enabled=false`；其中的应用配方不是当前 vNext 行为。根 `demo_complex.flow` 等文件是旧 DSL 示例；`python/server.py` 是旧 Flask/Socket.IO 后端；`python/winpilot_home/webui/**` 是 FastAPI 根路径下的兼容/诊断 UI。它们都不能写成 Electron“智能代理”的主链。
+关键判断：`python/winpilot_home/playbooks/*.json` 虽然被代码读取，但默认 `playbooks_enabled=false`；其中的应用配方不是当前 vNext 行为。根 `demo_complex.flow` 等文件是旧 DSL 示例；`python/server.py` 是旧 Flask/Socket.IO 后端；`python/winpilot_home/webui/**`（旧 FastAPI 根路径兼容/诊断 UI）已删除。它们都不能写成 Electron“智能代理”的主链。
 
 ## 2. 启动、执行、测试与发布全景
 
@@ -207,7 +207,7 @@ flowchart LR
 | 文件 | 用途、入口/依赖、产物与地位 |
 | --- | --- |
 | `.gitattributes` | Git 文本自动识别，仅有 `* text=auto`；影响换行归一化，不是运行时输入。 |
-| `.gitignore` | 排除 `node_modules/dist/release/output/python-runtime`、本地密钥配置、trace、缓存和生成 Flow；显式重新纳入 webui JS、图标和 `es.exe`/许可证。 |
+| `.gitignore` | 排除 `node_modules/dist/release/output/python-runtime`、本地密钥配置、trace、缓存和生成 Flow；显式重新纳入图标和 `es.exe`/许可证。 |
 | `.mcp.example.json` | 只读 GitHub MCP 示例，凭据引用 `${env:GITHUB_PAT_TOKEN}`；复制为本地配置后才生效，不含真实 token。 |
 | `.rgignore` | 为 `rg` 排除依赖、构建、Runtime 数据和大二进制目录；只影响开发检索。 |
 | `.github/workflows/ci.yml` | `master` push/所有 PR 触发。Windows Node 20 跑 `npm ci -> npm test -> npm run build`；Python 3.11 跑依赖安装及两套 pytest。concurrency 会取消同 ref 的旧 run。 |
@@ -394,8 +394,6 @@ flowchart LR
 | `python/providers/deepseek.py` | `requests` 调 DeepSeek chat completions，失败时最多 3 次退避重试；只剥 Markdown JSON code fence，返回 `content/raw_response/model`，不做显式 reasoning 清洗或 usage/latency 聚合。它不是 vNext 的统一 ProviderProtocolAdapter。 |
 | `python/providers/openai.py` | OpenAI SDK provider，读取 API key/model，支持 chat completion；旧 planner/flow 生成消费。 |
 | `python/providers/vlm.py` | VLM ABC、GPT-4o-mini compatible 与 local endpoint；把 screenshot 编成 base64，支持 analyze/grounding、cost estimate。 |
-| `python/lobster_mcp/__init__.py` | 标记“旧 feature-registry MCP”，区别于官方 SDK connector。 |
-| `python/lobster_mcp/server.py` | 自给 stdio JSON-RPC MCP server：列出 registry 工具，执行 DSL/转换/feature，发通知；是旧外部兼容面，不是 vNext `ConnectorGateway`。 |
 | `python/rpa_keywords/__init__.py` | Robot Framework 关键字包说明。 |
 | `python/rpa_keywords/desktop_actions.py` | `@library` 类包装 RPA.Windows/pywinauto 的 open/click/type/key/screenshot/window 等关键字；供 robot_converter 产物调用。 |
 | `python/server.py` | 旧 Flask+CORS+Socket.IO 后端 v2，暴露 health/registry/feature/DSL/log/pause/resume/stop WebSocket；不是 `serve.py` 启动的 FastAPI WinPilot server。 |
@@ -418,30 +416,23 @@ flowchart LR
 
 共同入口为 `python -m pytest python/winpilot_home/tests -q`。`conftest.py` 在相关模块缺失时为 Win32/mss 等提供最小 import stub（常见于非 Windows CI，但判断条件是依赖缺失），并提供隔离配置 fixture；绝大多数测试用 `monkeypatch`/`tmp_path`，正常不产生持久产物。带真实 Windows/浏览器的测试会显式 skip/marker。下表“数量”是源码中 `test_*` 函数定义数，参数化后的 pytest case 数可能更多。
 
-### 7.1 测试文件 1–48
+### 7.1 测试文件 1–48（部分已删除）
 
 | 文件 | 数量 | 被测合同/主要 fixture |
 | --- | ---: | --- |
 | `python/winpilot_home/tests/conftest.py` | fixture | 构造 WinDLL/Win32/mss no-op stub；`isolated_config` 把配置路径与 singleton 隔离到临时目录。 |
 | `python/winpilot_home/tests/test_admitted_public_action_telemetry.py` | 10 | admitted action 公共摘要字段组合、未知字段拒绝、真实 scroll 只发布固定脱敏摘要；mock RawDevice/trace。 |
-| `python/winpilot_home/tests/test_agent_scheduler.py` | 11 | Agent scheduler 的 create/due/finish/cancel、ISO 时间、去重、持久恢复；临时 schedule store。 |
 | `python/winpilot_home/tests/test_agent_threads.py` | 9 | Thread 只收成功用户可见 turn、active turn 不被容量淘汰、continuation checkpoint 精确往返/并发。 |
 | `python/winpilot_home/tests/test_app_resolution.py` | 14 | app alias 只做字面归一化、通用发现源、虚构 display name 解析、缓存/路径；mock Windows registry/process。 |
-| `python/winpilot_home/tests/test_application_launch_intent.py` | 2 | 完整“启动应用”编译成 typed open_application；媒体/URL 不误归类。 |
 | `python/winpilot_home/tests/test_apprentice_mode.py` | 8 | 人类 lesson→可编辑 script/provisional skill、必须命名任务、拒绝不安全 macro name、反馈晋级。 |
 | `python/winpilot_home/tests/test_automation_ir.py` | 11 | WPS→Automation IR metadata、双向往返、空执行投影拒绝、可执行节点/变量/目标窗口保持。 |
-| `python/winpilot_home/tests/test_aux_model_runtime_migration.py` | 3 | 旧 planner/done verifier 统一通过单次模型调用边界；parse/error fail closed，无隐藏 retry。 |
-| `python/winpilot_home/tests/test_chatgpt_mcp.py` | 22 | 官方 MCP SDK 不被 cwd shadow、catalog annotations、controller-first 工具、graph 拒绝嵌套旧 agent、外部桌面 session。 |
 | `python/winpilot_home/tests/test_client_e2e_harness.py` | 37 | `scripts/client_e2e_run.py` 的固定目标矩阵、无 execution-policy selector、完整文本读取、run/trace/queue 绑定与 pass 规则。 |
 | `python/winpilot_home/tests/test_client_netease_music_e2e_harness.py` | 12 | 原始 goal 不改写、CoreAudio 只读 getter、播放第一结果与 5% 判定、报告脱敏。 |
 | `python/winpilot_home/tests/test_client_paint_game_e2e_harness.py` | 13 | 原始目标、DPI 逻辑棋盘→物理像素、红 X/棋盘基线和窗口身份判定。 |
 | `python/winpilot_home/tests/test_client_qq_groups_e2e_harness.py` | 7 | 原始目标、群列表/active group、跨群滚动覆盖、隐私化报告。 |
 | `python/winpilot_home/tests/test_client_thread_connector_e2e_harness.py` | 16 | 单一 stdio connector fixture、token 不进 goal、预开 Notepad、真实只读 tool、Thread/history/restart 证据。 |
 | `python/winpilot_home/tests/test_client_visual_e2e_harness.py` | 13 | 通用手势矩阵与 spoken GUI requirement、target focus 几何、浏览器事件与 Runtime run 绑定。 |
-| `python/winpilot_home/tests/test_coding_reuse_exclusion.py` | 5 | coding task 不复用动作 recipe；手工 notes 失败后保留，自动 recipe 重复失败后淘汰。 |
-| `python/winpilot_home/tests/test_coding_run_gate.py` | 3 | clone/run 类任务必须有真实 run/runtime check；仅提到 report 文件名不触发 gate。 |
 | `python/winpilot_home/tests/test_coding_tools.py` | 10 | coding tool schema、临时目录 read/write/search/apply_patch 唯一匹配与错误。 |
-| `python/winpilot_home/tests/test_comms_done_gate.py` | 27 | draft-only 不允许 send；typed draft 可完成；发送/回读/收件人证据与 done gate。 |
 | `python/winpilot_home/tests/test_connector_gateway.py` | 12 | 只显式配置才 available、环境引用、配置优先级、延迟发现、read-only annotations、descriptor 指纹重检。 |
 | `python/winpilot_home/tests/test_control_plane_auth.py` | 3 | Bearer auth、Renderer CORS preflight、WebSocket 错 token 拒绝。 |
 | `python/winpilot_home/tests/test_coordinate_diagnostics.py` | 3 | capture 坐标不匹配报告、真实 executor click 与文本验证、cursor offset 拒绝。 |
@@ -449,101 +440,63 @@ flowchart LR
 | `python/winpilot_home/tests/test_desktop_file_tools.py` | 9 | target-window screenshot、managed full/region screenshot artifact、物理坐标与 manifest evidence。 |
 | `python/winpilot_home/tests/test_desktop_geometry.py` | 2 | 虚拟桌面负坐标 clamp、capture 像素→物理屏变换。 |
 | `python/winpilot_home/tests/test_desktop_image_evidence.py` | 7 | base64 折叠、draw/batch 前后图、managed artifact 与 trace 脱敏。 |
-| `python/winpilot_home/tests/test_draw_strokes_feedback.py` | 13 | stroke 参数归一化、真实视觉变化、cursor-only delta 不算成功、loop feedback。 |
-| `python/winpilot_home/tests/test_drawing_closed_loop_recovery.py` | 7 | done rejection 不装绘图特判；模型 batch 原样传递；partial subgoal 不被 progress 分类篡改。 |
-| `python/winpilot_home/tests/test_eval_summary.py` | 40 | eval summary 的工具/usage/耗时、GUI metrics、report aggregation，以及 `gui_eval_run.py` 的 provenance/check/oracle/budget。 |
 | `python/winpilot_home/tests/test_execution_context_handoff.py` | 10 | execution context 仅保留合同字段、control surface 未 yield 时模型前失败、target identity/恢复状态机。 |
 | `python/winpilot_home/tests/test_executor_launch.py` | 3 | URL 走 Windows protocol handler、browser wrapper 提取 URL、普通路径保持 shell launch。 |
-| `python/winpilot_home/tests/test_failure_classifier.py` | 30 | scope/grounding/subgoal 等错误归类为正确层，不把失败工具报 success；恢复类别稳定。 |
-| `python/winpilot_home/tests/test_false_success_guards.py` | 110 | 大型旧线安全合同：视觉 done/boolean/evidence、工具结果、playbook 默认禁用、trace/policy/UIA/CV 等不能形成假成功。 |
 | `python/winpilot_home/tests/test_fast_controller.py` | 237 | 最大旧 fast controller 回归：batch action schema、连续输入、observation/cache、grounding、watcher、subgoal、工具转发和错误边。 |
 | `python/winpilot_home/tests/test_frame_authority.py` | 11 | immutable current frame、lost update、完整 identity pin、epoch/frame commit。 |
 | `python/winpilot_home/tests/test_frame_observer.py` | 7 | provided/cached/new capture 与 region 成对提交，scope 注入不含任务语义。 |
 | `python/winpilot_home/tests/test_fusion_modal_skip.py` | 2 | 前台 owner modal overlay 判定与无 modal 对照。 |
-| `python/winpilot_home/tests/test_general_agent_regressions.py` | 35 | 组合桌面 goal 不拆失、指定应用不替换、不同入口同一 stage、artifact/evidence/connector 等通用回归。 |
-| `python/winpilot_home/tests/test_graphical_affordances.py` | 2 | 重复像素 glyph 形成无标签布局族；平坦像素不虚构控件。 |
 | `python/winpilot_home/tests/test_human_recorder.py` | 25 | printable/space 合并为 type_text、special key flush、mouse/drag/target window/WPS 录制。 |
 | `python/winpilot_home/tests/test_human_replay_integration.py` | 1 | 录制 steps 经 validation 后由真实 replay 路径消费（动作层用 monkeypatch）。 |
 | `python/winpilot_home/tests/test_image_ink_stats.py` | 10 | nonblank/blankish/color 统计与临时图像 fixture。 |
-| `python/winpilot_home/tests/test_interaction_action_grounding.py` | 57 | 视觉 interaction 语义→controller selection/path、颜色/几何/effect binding，避免重复动作。 |
-| `python/winpilot_home/tests/test_interaction_runtime_components.py` | 67 | compiler/graph/stage/runtime 的 interaction 组件、post-action reobserve、预算、旧合同冻结与 artifact。 |
-| `python/winpilot_home/tests/test_interactive_task_contract.py` | 20 | 短视觉命令/同义改写→同一 bounded typed contract；描述文本中的动作词不误路由。 |
 | `python/winpilot_home/tests/test_launch_verification.py` | 24 | 复用已有窗口、process/title identity、启动后验证、重复 open、失败/焦点行为。 |
 | `python/winpilot_home/tests/test_live_agent_composition.py` | 64 | 当前 live agent 的窗口/帧/lease/Actor/Capability/AtomicAdapter/trace 组合；也是旧包静态缺席边界的重要集成合同。 |
 
-### 7.2 测试文件 49–96
+### 7.2 测试文件 49–96（部分已删除）
 
 | 文件 | 数量 | 被测合同/主要 fixture |
 | --- | ---: | --- |
 | `python/winpilot_home/tests/test_local_search.py` | 7 | 优先 bundled Everything `es.exe`、非阻塞启动/查询、indexed result 与 fallback。 |
 | `python/winpilot_home/tests/test_memory_compiler.py` | 3 | run ingestion 的 disabled 开关、幂等 script hash、episode 半写恢复。 |
-| `python/winpilot_home/tests/test_memory_context_compression.py` | 15 | memory hint 条件/evidence/截断、reuse 强匹配、session 不靠关键词分类、playbook 读取渲染。 |
 | `python/winpilot_home/tests/test_memory_graph_compat.py` | 10 | experience recipe 兼容、apprentice provisional→verified、布尔 verified 无 source proof 不晋级。 |
 | `python/winpilot_home/tests/test_memory_graph_feedback.py` | 2 | packed-but-unused 与 replay-failed-done 都不得累计成功分。 |
 | `python/winpilot_home/tests/test_memory_graph_retrieval.py` | 2 | 排除 coding/volatile task，跳过 superseded 并带 warning。 |
 | `python/winpilot_home/tests/test_memory_graph_store.py` | 2 | SQLite schema/CRUD/edges/fallback 与 secret-like value 脱敏。 |
-| `python/winpilot_home/tests/test_model_adapter.py` | 14 | provider/model profile、视觉能力显式/保守判断、protocol 明确选择、聚合端点不猜 wire。 |
 | `python/winpilot_home/tests/test_model_call_runtime.py` | 26 | immutable request envelope、稳定 fingerprint、非 JSON 拒绝、single-attempt/usage/错误合同。 |
-| `python/winpilot_home/tests/test_model_timing_audit.py` | 8 | monotonic 模型耗时累加，成功/失败只记一次，chat/stage/contract metrics。 |
 | `python/winpilot_home/tests/test_model_transport_ownership.py` | 2 | AST/文本扫描限制 chat-completion 与 Responses transport 的 owner 集合，防重复 client。 |
 | `python/winpilot_home/tests/test_multi_input_cooperation.py` | 42 | 协同输入显式 opt-in、隐含 no-mouse-steal、键盘前台 guard、cursor tolerance、queue/trace。 |
-| `python/winpilot_home/tests/test_native_double_click.py` | 5 | double_click 复用 click adapter、强制 double、mutation epoch、canonical action。 |
-| `python/winpilot_home/tests/test_native_intent_freedom.py` | 8 | 模型可直接回答、不预绑 desktop、普通 reply 验证、prompt 无任务特判。 |
 | `python/winpilot_home/tests/test_normalized_frame_coordinates.py` | 6 | 归一化/提交图坐标四角、既有 rounding、数值/finite/bounds 严格拒绝。 |
-| `python/winpilot_home/tests/test_observe_cache.py` | 20 | 同 epoch reuse、structured override、native visual 刷新 pixels 不启 UIA/OCR、失效/并发。 |
 | `python/winpilot_home/tests/test_ocr_warmup.py` | 5 | OCR 异步 warm 只启一次、已有 engine 跳过、前台优先推迟 predictive OCR。 |
-| `python/winpilot_home/tests/test_operator_action_contract.py` | 11 | atomic parser metadata/precedence、controller shorthand、malformed child、batch 复用 canonical action。 |
 | `python/winpilot_home/tests/test_orchestrator.py` | 53 | graph/runtime preview、interaction evidence、trace metrics、handler/capability、`LEGACY_FLOW` 读取但执行 fail closed。 |
 | `python/winpilot_home/tests/test_orchestrator_api.py` | 40 | server import 不加载旧 agent、platform overview/catalog、vNext defaults、run/trace/artifact API 与 auth。 |
 | `python/winpilot_home/tests/test_perception_confidence.py` | 11 | VLM 统一模型边界、JSON parse 不 retry、只保留显式可信 grounding、confidence propagation。 |
 | `python/winpilot_home/tests/test_perception_daemon.py` | 10 | per-HWND watcher/cache、released window 不分析、inflight 结果丢弃、生命周期/线程。 |
 | `python/winpilot_home/tests/test_perception_reducer.py` | 12 | snapshot 候选优先级/compact render、聊天状态与列表、避免 contact 重点击。 |
 | `python/winpilot_home/tests/test_plan_tools.py` | 30 | revise plan 保留模型步骤、不用绘图关键词过滤、公共桌面路径 grounding、plan CRUD。 |
-| `python/winpilot_home/tests/test_planner.py` | 20 | 旧 plan parse/sanitize：去按钮 label echo、保留真实状态文本、中文/绘图/目标窗口。 |
 | `python/winpilot_home/tests/test_provider_protocols.py` | 20 | Responses/Anthropic/Gemini 多模态、tool call/result、system、签名、usage 的显式 wire 翻译。 |
-| `python/winpilot_home/tests/test_qq_chat_component.py` | 15 | MiMo native vision prompt、text-only recovery、compact prompt domain-neutral、runtime profile/图像捕获。 |
 | `python/winpilot_home/tests/test_raw_device_contract.py` | 63 | RawDevice typed backend、坐标/scroll/key/text/held release、DesktopQueue、legacy reflective adapter 标记与 receipts。 |
-| `python/winpilot_home/tests/test_recovery_policy.py` | 4 | pointer ownership loss 只 rebind、不 replay 旧几何；有界恢复；mutation 后语义失败不重放输入。 |
 | `python/winpilot_home/tests/test_replay_anchor_cache.py` | 4 | anchor profile memory roundtrip、本地模板跳 UIA、stale anchor 回退 semantic selector。 |
 | `python/winpilot_home/tests/test_replay_control.py` | 23 | 变量递归插值、条件/循环、pause/stop、evidence 与 replay 控制。 |
 | `python/winpilot_home/tests/test_replay_job_api.py` | 15 | replay job 可查询、失败终态、cancel stop_event、artifact/memory API。 |
-| `python/winpilot_home/tests/test_router_gui_only.py` | 9 | GUI-only/coding 都留在统一 Agent，不生成第二执行线；Runner/ToolSession runtime profile 一致。 |
-| `python/winpilot_home/tests/test_run_state.py` | 17 | 未验证动作触发一次 observe、expected failure recovery、重复 subgoal progress、状态上限。 |
-| `python/winpilot_home/tests/test_runtime_capability_preflight.py` | 8 | visual contract 要求 multimodal provider、static/live capability 分离、语义 verifier 无 VLM fail。 |
 | `python/winpilot_home/tests/test_runtime_info.py` | 4 | 非秘密 runtime fingerprint、短 TTL 独立 cache、source change fail closed。 |
 | `python/winpilot_home/tests/test_runtime_jobs.py` | 5 | 共享资源 job 串行、独立工作并发、cancel/stop、active/finish callback。 |
 | `python/winpilot_home/tests/test_runtime_perception_policy.py` | 4 | native profile 不启后台语义感知；legacy 可显式启；server OCR warm 需 opt-in。 |
-| `python/winpilot_home/tests/test_scene_coverage.py` | 9 | scene revisit/edge coverage，只阻止已探索滚动边；未执行动作不创建边。 |
 | `python/winpilot_home/tests/test_scope_guard.py` | 15 | exact target refocus、owned modal/foreground、键盘/点坐标作用域、失败结构化。 |
 | `python/winpilot_home/tests/test_script_validation.py` | 69 | WPS/canonical script/evidence schema、unknown field、fallback、版本、target/process、动作参数与安全。 |
-| `python/winpilot_home/tests/test_stop_responsiveness.py` | 3 | stop_event 立即中断 wait/check；无 stop 正常 timeout；inflight chat 可放弃。 |
-| `python/winpilot_home/tests/test_submitted_image_coordinates.py` | 14 | submitted-image→physical 纯映射/provenance、原子拒绝非法值、随机尺寸单调性。 |
 | `python/winpilot_home/tests/test_surface_binding.py` | 7 | 外层几何/客户区 authority、detector 碎片不改 envelope、stale/ambiguous pixels 拒绝。 |
 | `python/winpilot_home/tests/test_system_control_features.py` | 2 | 精确音量 backend 缺失 fail closed；mute fallback 不声称未知状态。 |
 | `python/winpilot_home/tests/test_system_tools_undo.py` | 1 | 没有 run-owned undo token 时不得发送 Ctrl+Z。 |
 | `python/winpilot_home/tests/test_target_window_anchor.py` | 12 | live session target 优先、owned dialog、foreground/process/title、stale anchor 处理。 |
-| `python/winpilot_home/tests/test_task_contract_runtime.py` | 52 | task intent/compiler/stage/runtime 大型合同：发送同义词、目标关系、chat mode、capability/evidence/artifact/graph。 |
 
-### 7.3 测试文件 97–140
+### 7.3 测试文件 97–140（部分已删除）
 
 | 文件 | 数量 | 被测合同/主要 fixture |
 | --- | ---: | --- |
-| `python/winpilot_home/tests/test_tasking_aux_model_calls.py` | 3 | conversation/message draft 都只走一次 Runtime-owned model attempt；parse failure 不 transport retry。 |
-| `python/winpilot_home/tests/test_tool_schemas.py` | 40 | 旧工具 schema/优先级、open_app/conversation、runtime profile、prompt 暴露面与 batch action。 |
-| `python/winpilot_home/tests/test_trace_evidence.py` | 4 | LLM trace 不改 request 地脱敏 frame、worker JSONL 脱敏、stop 等待 accepted callback、integrity 计数。 |
 | `python/winpilot_home/tests/test_uia_perception.py` | 2 | Chromium modern tree 存在才跳 legacy root；exact query 拒绝 legacy renderer 直匹配。 |
 | `python/winpilot_home/tests/test_unified_coding_runtime.py` | 2 | 仅 enabled 时加入 coding tools；search_text 限制在指定 path。 |
 | `python/winpilot_home/tests/test_vision_priority.py` | 20 | raw task/window identity 默认 normal；结构化 visual/active interaction 选视觉模式；UIA/OCR/VLM 优先与 skip。 |
-| `python/winpilot_home/tests/test_visual_appearance.py` | 2 | 当前颜色 inventory 不声称 ownership；显式角色色可匹配组件但不推断 actor。 |
-| `python/winpilot_home/tests/test_visual_capture_scope.py` | 17 | work-surface bounds、client authority clipping、physical→window frame、modal/full-desktop capture scope。 |
-| `python/winpilot_home/tests/test_visual_closed_loop.py` | 99 | 旧 native 视觉闭环大型合同：point scope、target rebound/new crop、动作/观察/claim、输入、UIA/CV/VLM、失败恢复。 |
-| `python/winpilot_home/tests/test_visual_effects.py` | 13 | pointer gesture 所有路径 realization、partial 拒绝、freehand turn local completion 与 effect artifact。 |
-| `python/winpilot_home/tests/test_visual_geometry.py` | 30 | 旧本地几何 refine、client chrome offset、颜色/组件/effect binding；属于旧线，不能用于改写 vNext model 坐标。 |
 | `python/winpilot_home/tests/test_visual_interaction_server.py` | 8 | quiz spec seeded 且不泄 answer key、server-owned evaluation、claim 被真实评估替代、事件清洗。 |
-| `python/winpilot_home/tests/test_visual_path.py` | 7 | 旧 guided path centerline/sampling/outlier、无界背景拒绝；历史设施，不是当前 corridor Runtime snapping。 |
-| `python/winpilot_home/tests/test_visual_regions.py` | 21 | repeated pixel cells、轮廓 merge/碎片恢复、region inventory 与 interaction geometry。 |
 | `python/winpilot_home/tests/test_visual_servo.py` | 5 | hover→fresh frame→click、目标消失 fail closed、stale frame 等待、次数上限。 |
-| `python/winpilot_home/tests/test_visual_state_summary.py` | 4 | summary 不注入任务特定像素规则、loop 暴露 advisory、相同 bulletin 去重。 |
 | `python/winpilot_home/tests/test_vlm_guard.py` | 6 | DeepSeek v4/chat 视为 text-only；明确非 DeepSeek multimodal endpoint 才启视觉。 |
 | `python/winpilot_home/tests/test_vnext_action_effect.py` | 18 | authoritative before/after pixels、请求文本不归一化、aligned delta、evidence trust 与 strict wire。 |
 | `python/winpilot_home/tests/test_vnext_actor_contracts.py` | 38 | Actor proposal 各分支 strict/identity-free、model wire 完整字段、canonical roundtrip、context budget。 |
@@ -590,9 +543,10 @@ flowchart LR
 | `python/winpilot_home/playbooks/file-dialog.json` | 旧 Save/Open 完整路径配方；默认禁用，不得作为当前模型的隐藏应用 recipe。 |
 | `python/winpilot_home/playbooks/media-playback.json` | 旧 Windows Media Player/Start-Process 配方和验证建议；默认禁用。 |
 | `python/winpilot_home/playbooks/tray-wakeup.json` | 较通用的 tray identity/evidence playbook；仍因全局开关默认关闭而不注入当前主链。 |
-| `python/winpilot_home/webui/index.html` | FastAPI `/` 下兼容/诊断 UI：旧聊天、日志、plan、config、memory/session/trace/eval/script 面板；不是 Electron 主前端。 |
-| `python/winpilot_home/webui/app.js` | 上项 vanilla JS client：REST helper、WebSocket 事件、chat/localStorage、run metrics、config/memory/session/trace/eval/script CRUD；依赖同源 WinPilot API。 |
-| `python/winpilot_home/webui/style.css` | 上项暗/亮主题、双栏聊天/日志、drawer/plan/badge 响应式样式；纯静态资源。 |
+
+`python/winpilot_home/webui/{index.html,app.js,style.css}`（FastAPI `/` 下的兼容/诊断 Web UI，
+旧聊天/日志/plan/config/memory/session/trace/eval/script 面板）已随旧 Agent 线删除；
+Electron renderer 是唯一前端。
 
 ## 9. 旧宏与图片资产：逐文件
 
@@ -697,7 +651,7 @@ scope = git ls-files -z
 
 ## 13. 接手时最容易误判的事实
 
-1. `python/winpilot_home/serve.py` 是支持入口；`python/server.py` 与 `python/winpilot_home/webui/**` 是不同的兼容面。
+1. `python/winpilot_home/serve.py` 是支持入口；`python/server.py` 是旧 Flask/Socket.IO 后端（不同的兼容面）；`python/winpilot_home/webui/**` 已删除。
 2. `python/features/**` 仍有 Electron feature/DSL/Studio 消费者，不能因为它不是 vNext 主链就整目录删除；应先删除消费者并保持旧数据可读。
 3. `engine.planner`、`flow_features` 和默认关闭的 playbooks 不得接回当前主 Actor；它们恰好是架构规则禁止的第二 planner、长提示教学和应用 recipe。
 4. 根 `tests/test_param_prompt.ts` 不属于当前 Vitest include；`tests/test_init_output.txt` 不是实时测试结果。

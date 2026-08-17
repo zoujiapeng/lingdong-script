@@ -2,7 +2,6 @@ import type {
   AgentThreadSnapshot,
   ArpExecutionSnapshot,
   ArpGraph,
-  ChatGPTDesktopIntegration,
   CurrentRunResponse,
   ClientExecutionContext,
   GraphValidation,
@@ -10,7 +9,6 @@ import type {
   PlatformOverview,
   RunProjection,
   RuntimeEvent,
-  AgentSchedule,
   DesktopTargetContext,
 } from './contracts';
 import type { FlowFragmentProposal, FlowFragmentRequestContext } from '../utils/flowFragmentProposal';
@@ -215,41 +213,6 @@ export class ControlPlaneClient {
     return this.request('api/config', { method: 'PATCH', body: JSON.stringify(patch) });
   }
 
-  async schedules(): Promise<AgentSchedule[]> {
-    const response = await this.request<{ ok: boolean; schedules: AgentSchedule[] }>('api/agent-schedules');
-    return response.schedules;
-  }
-
-  async createSchedule(input: {
-    task: string;
-    name?: string;
-    delay_seconds?: number;
-    interval_seconds?: number | null;
-    max_steps?: number;
-  }): Promise<AgentSchedule> {
-    const response = await this.request<{ ok: boolean; schedule: AgentSchedule }>('api/agent-schedules', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    });
-    return response.schedule;
-  }
-
-  async updateSchedule(id: string, patch: Partial<AgentSchedule> & { delay_seconds?: number }): Promise<AgentSchedule> {
-    const response = await this.request<{ ok: boolean; schedule: AgentSchedule }>(`api/agent-schedules/${encodeURIComponent(id)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(patch),
-    });
-    return response.schedule;
-  }
-
-  cancelSchedule(id: string): Promise<{ ok: boolean; id: string }> {
-    return this.request(`api/agent-schedules/${encodeURIComponent(id)}`, { method: 'DELETE' });
-  }
-
-  chatgptIntegration(): Promise<ChatGPTDesktopIntegration> {
-    return this.request('api/v2/integrations/chatgpt');
-  }
-
   traces(): Promise<Array<{ run_id: string; task: string; status: string; steps: number }>> {
     return this.request('api/traces');
   }
@@ -314,14 +277,6 @@ export class ControlPlaneClient {
 
   deleteMemory(memoryId: string): Promise<{ ok: boolean }> {
     return this.request(`api/memory/${encodeURIComponent(memoryId)}`, { method: 'DELETE' });
-  }
-
-  sessions(): Promise<Array<{ task: string; status: string; result: string; run_id: string }>> {
-    return this.request('api/session');
-  }
-
-  clearSessions(): Promise<{ ok: boolean }> {
-    return this.request('api/session', { method: 'DELETE' });
   }
 
   script<T = Record<string, unknown>>(file: string): Promise<T> {

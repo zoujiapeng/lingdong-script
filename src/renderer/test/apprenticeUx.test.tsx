@@ -20,7 +20,6 @@ function createPlane(options: {
     traces: vi.fn(async () => []),
     scripts: vi.fn(async () => []),
     memories: vi.fn(async () => []),
-    sessions: vi.fn(async () => []),
     apprenticeStatus: vi.fn(async () => ({
       mode: 'apprentice' as const,
       recording: serverRecording,

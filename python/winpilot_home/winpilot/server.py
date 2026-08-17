@@ -27,7 +27,6 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .automation_ir import (
@@ -38,10 +37,8 @@ from .automation_ir import (
     validate_automation_runtime,
     wps_from_automation_ir,
 )
-from . import scheduler as agent_scheduler
 from .action.desktop_queue import DESKTOP_ACTION_QUEUE
 from .config import CONFIG, ROOT_DIR, SCRIPTS_DIR, TRACES_DIR
-from .eval import summary as eval_summary
 from .model_adapter import model_profile_from_config
 from .perception import ocr, search, vlm
 from .recorder import human as human_mod
@@ -74,43 +71,10 @@ from .orchestrator.agent_threads import (
 )
 from .orchestrator.projection import RUN_PROJECTIONS
 from .orchestrator.runtime import ARP_RUNS, ArpExecution
-from .orchestrator.graph_compiler import legacy_goal_graph_task
-from .tasking.capability import CapabilityPlanner
 from .tasking.artifacts import ArtifactStore
-from .tasking.compiler import TaskContractCompiler
-from .tasking.contracts import ContractCompileRequest
 
-WEBUI_DIR = ROOT_DIR / "webui"
 _RECIPE_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
-CHATGPT_MCP = None
-CHATGPT_MCP_APP = None
-CHATGPT_MCP_BRIDGE = None
-CHATGPT_MCP_ERROR = ""
-CHATGPT_MCP_LIFESPAN_USED = False
-CHATGPT_MCP_ACTIVITY = {
-    "request_count": 0,
-    "last_request_at": 0.0,
-    "last_user_agent": "",
-}
-CHATGPT_MCP_ACTIVITY_LOCK = threading.Lock()
-_CHATGPT_MCP_ACTIVE_TTL_S = 45.0
 CONTROL_TOKEN = os.environ.get("WINPILOT_CONTROL_TOKEN", "").strip()
-
-
-def _legacy_build_runner(*args: Any, **kwargs: Any) -> Any:
-    """Load the retired AgentRunner composition only for its legacy callers."""
-
-    from .agent.router import build_runner
-
-    return build_runner(*args, **kwargs)
-
-
-def _legacy_session() -> Any:
-    """Return the legacy session singleton without importing it at startup."""
-
-    from .agent.session import SESSION
-
-    return SESSION
 
 
 class FlowFragmentProposalRequest(BaseModel):
@@ -154,7 +118,6 @@ def _warm_perception_dimensions() -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    global CHATGPT_MCP_LIFESPAN_USED
     RUN_PROJECTIONS.hydrate_directory(
         TRACES_DIR,
         mark_incomplete_interrupted=True,
@@ -169,19 +132,7 @@ async def _lifespan(_app: FastAPI):
     except AgentThreadError as exc:
         logger.warning("Agent Thread continuation was not restored: %s", exc)
     _warm_perception_dimensions()
-    _start_scheduler_thread()
-    try:
-        if CHATGPT_MCP_LIFESPAN_USED:
-            _install_chatgpt_mcp()
-        mcp_app = CHATGPT_MCP_APP
-        CHATGPT_MCP_LIFESPAN_USED = True
-        if mcp_app is None:
-            yield
-        else:
-            async with mcp_app.router.lifespan_context(mcp_app):
-                yield
-    finally:
-        _stop_scheduler_thread()
+    yield
 
 
 app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None, lifespan=_lifespan)
@@ -273,20 +224,7 @@ _INTERACTIVE_RUNTIME_RESOURCE = "interactive_runtime"
 class _RunState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.runner: Any | None = None
-        self.runners: dict[str, Any] = {}
         self.run_jobs: dict[str, str] = {}
-
-    def register_runner(self, runner: Any, job_id: str = "") -> None:
-        with self.lock:
-            self.runners[runner.run_id] = runner
-            if job_id:
-                self.run_jobs[runner.run_id] = job_id
-
-    def bind_runner(self, runner: Any, job_id: str = "") -> None:
-        self.register_runner(runner, job_id)
-        with self.lock:
-            self.runner = runner
 
     def job_for_run(self, run_id: str) -> RuntimeJob | None:
         with self.lock:
@@ -311,8 +249,6 @@ class _RunState:
 
 
 STATE = _RunState()
-_SCHEDULER_STOP = threading.Event()
-_SCHEDULER_THREAD: threading.Thread | None = None
 
 
 def _public_runtime_replay_job(job: RuntimeJob) -> dict[str, Any]:
@@ -357,226 +293,8 @@ def _public_memory_verification_job(job: RuntimeJob) -> dict[str, Any]:
         "resources": list(job.resources),
     }
 
-def _run_agent_job(
-    runner: Any,
-    *,
-    schedule_id: str = "",
-    schedule_name: str = "",
-    expected_session_generation: int | None = None,
-) -> dict[str, Any]:
-    session = _legacy_session()
-    STATE.bind_runner(runner)
-    trace_mod.RECORDER.start(runner.run_id)
-    if schedule_id:
-        agent_scheduler.mark_started(schedule_id, runner.run_id)
-        BUS.publish(
-            "schedule",
-            action="start",
-            schedule_id=schedule_id,
-            run_id=runner.run_id,
-            name=schedule_name,
-        )
-    BUS.publish("chat", run_id=runner.run_id, role="user", content=runner.task)
-    try:
-        result = runner.run()
-        appended = session.append(
-            runner.task,
-            runner.status,
-            runner.result_text,
-            runner.run_id,
-            expected_generation=expected_session_generation,
-        )
-        BUS.publish(
-            "session",
-            action="append" if appended else "stale_append_ignored",
-            count=len(session.all()),
-            run_id=runner.run_id,
-        )
-        if schedule_id:
-            agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
-            BUS.publish(
-                "schedule",
-                action="finished",
-                schedule_id=schedule_id,
-                run_id=runner.run_id,
-                status=runner.status,
-                result=result,
-            )
-        return {
-            "ok": runner.status in {"done", "reply"},
-            "run_id": runner.run_id,
-            "status": runner.status,
-            "result": result,
-            **({"error": runner.result_text} if runner.status not in {"done", "reply"} else {}),
-        }
-    except Exception as exc:
-        logger.exception("agent runtime job crashed")
-        runner.status = "error"
-        runner.result_text = f"Agent runtime job crashed: {exc}"
-        appended = session.append(
-            runner.task,
-            runner.status,
-            runner.result_text,
-            runner.run_id,
-            expected_generation=expected_session_generation,
-        )
-        if schedule_id:
-            agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
-        BUS.publish("agent_error", run_id=runner.run_id, error=str(exc))
-        BUS.publish("agent_done", run_id=runner.run_id, status=runner.status, result=runner.result_text)
-        BUS.publish(
-            "session",
-            action="append" if appended else "stale_append_ignored",
-            count=len(session.all()),
-            run_id=runner.run_id,
-        )
-        return {
-            "ok": False,
-            "run_id": runner.run_id,
-            "status": runner.status,
-            "error": runner.result_text,
-        }
-    finally:
-        trace_mod.RECORDER.stop()
-
-
-def _try_start_scheduled(entry: dict[str, Any]) -> bool:
-    task = str(entry.get("task") or "").strip()
-    schedule_id = str(entry.get("id") or "")
-    if not task or not schedule_id:
-        return False
-    reminder = agent_scheduler.reminder_message(task)
-    if reminder:
-        run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
-        job_id = f"schedule-{schedule_id}-{run_id}"
-        agent_scheduler.mark_started(schedule_id, run_id)
-        BUS.publish("schedule", action="queued", schedule_id=schedule_id, run_id=run_id)
-
-        def deliver_notification(_stop: threading.Event) -> dict[str, Any]:
-            BUS.publish(
-                "schedule",
-                action="start",
-                schedule_id=schedule_id,
-                run_id=run_id,
-                name=str(entry.get("name") or ""),
-            )
-            BUS.publish(
-                "user_notification",
-                run_id=run_id,
-                title=str(entry.get("name") or "提醒"),
-                body=reminder,
-                kind="info",
-                schedule_id=schedule_id,
-            )
-            agent_scheduler.mark_finished(schedule_id, run_id, "done")
-            result = {"ok": True, "run_id": run_id, "status": "done", "result": reminder}
-            BUS.publish(
-                "schedule",
-                action="finished",
-                schedule_id=schedule_id,
-                run_id=run_id,
-                status="done",
-                result=result,
-            )
-            return result
-
-        RUNTIME_JOBS.submit(
-            "notification",
-            deliver_notification,
-            resources=(),
-            metadata={"run_id": run_id, "task": task, "schedule_id": schedule_id},
-            job_id=job_id,
-            on_finish=lambda job: (
-                agent_scheduler.mark_finished(schedule_id, run_id, "canceled")
-                if job.status == "canceled"
-                else None
-            ),
-        )
-        return True
-    max_steps = entry.get("max_steps")
-    try:
-        max_steps_override = int(max_steps) if max_steps else None
-    except (TypeError, ValueError):
-        max_steps_override = None
-    stop_event = threading.Event()
-    session_generation, session_context = _legacy_session().snapshot()
-    runner = _legacy_build_runner(
-        task,
-        stop_event=stop_event,
-        session_context=session_context,
-        max_steps_override=max_steps_override,
-    )
-    job_id = f"schedule-{schedule_id}-{runner.run_id}"
-    STATE.register_runner(runner, job_id)
-    agent_scheduler.mark_started(schedule_id, runner.run_id)
-    BUS.publish("schedule", action="queued", schedule_id=schedule_id, run_id=runner.run_id)
-    RUNTIME_JOBS.submit(
-        "agent",
-        lambda _stop: _run_agent_job(
-            runner,
-            schedule_id=schedule_id,
-            schedule_name=str(entry.get("name") or ""),
-            expected_session_generation=session_generation,
-        ),
-        resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
-        metadata={"run_id": runner.run_id, "task": task, "schedule_id": schedule_id},
-        job_id=job_id,
-        stop_event=stop_event,
-        on_finish=lambda job: (
-            agent_scheduler.mark_finished(schedule_id, runner.run_id, "canceled")
-            if job.status == "canceled" and runner.status == "pending"
-            else None
-        ),
-    )
-    return True
-
-
-def _scheduler_loop() -> None:
-    agent_scheduler.reset_running_flags()
-    while not _SCHEDULER_STOP.wait(1.0):
-        for entry in agent_scheduler.due_tasks(limit=1):
-            _try_start_scheduled(entry)
-
-
-def _start_scheduler_thread() -> None:
-    global _SCHEDULER_THREAD
-    if _SCHEDULER_THREAD is not None and _SCHEDULER_THREAD.is_alive():
-        return
-    _SCHEDULER_STOP.clear()
-    _SCHEDULER_THREAD = threading.Thread(target=_scheduler_loop, daemon=True, name="agent-scheduler")
-    _SCHEDULER_THREAD.start()
-
-
-def _stop_scheduler_thread() -> None:
-    _SCHEDULER_STOP.set()
-
 
 # -------------------------------------------------------------------- models
-class ChatRequest(BaseModel):
-    task: str
-    max_steps: int | None = None
-
-
-class AgentScheduleRequest(BaseModel):
-    task: str
-    name: str = ""
-    run_at: str = ""
-    delay_seconds: float | None = None
-    interval_seconds: float | None = None
-    enabled: bool = True
-    max_steps: int | None = None
-
-
-class AgentSchedulePatch(BaseModel):
-    task: str | None = None
-    name: str | None = None
-    run_at: str | None = None
-    delay_seconds: float | None = None
-    interval_seconds: float | None = None
-    enabled: bool | None = None
-    max_steps: int | None = None
-
-
 class MemoryAddRequest(BaseModel):
     task: str
     app: str = ""
@@ -673,61 +391,8 @@ def _current_run_projection() -> dict[str, Any] | None:
     return _thread_result_projection(RUN_PROJECTIONS.current())
 
 
-@app.post("/api/chat")
-def start_chat(req: ChatRequest) -> dict[str, Any]:
-    task = req.task.strip()
-    if not task:
-        raise HTTPException(400, "任务不能为空")
-    visible_chars = [char for char in task if not char.isspace()]
-    if len(visible_chars) >= 4 and visible_chars.count("?") / len(visible_chars) >= 0.5:
-        raise HTTPException(
-            400,
-            "任务文本疑似在客户端编码时损坏（大量 ?）；请使用 UTF-8 JSON 重新提交",
-        )
-    with STATE.lock:
-        if human_mod.RECORDER.is_recording():
-            raise HTTPException(409, "已有任务在运行，请先停止")
-        stop_event = threading.Event()
-        session_generation, session_context = _legacy_session().snapshot()
-        max_steps = req.max_steps if req.max_steps and req.max_steps > 0 else None
-        runner = _legacy_build_runner(
-            task,
-            stop_event=stop_event,
-            session_context=session_context,
-            max_steps_override=max_steps,
-        )
-        job_id = f"agent-{runner.run_id}"
-        STATE.runners[runner.run_id] = runner
-        STATE.run_jobs[runner.run_id] = job_id
-        job = RUNTIME_JOBS.submit(
-            "agent",
-            lambda _stop: _run_agent_job(
-                runner,
-                expected_session_generation=session_generation,
-            ),
-            resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
-            metadata={"run_id": runner.run_id, "task": task},
-            job_id=job_id,
-            stop_event=stop_event,
-        )
-    return {"run_id": runner.run_id, "job_id": job.id, "status": job.status}
-
-
-@app.post("/api/stop")
-def stop_run() -> dict[str, Any]:
-    canceled_jobs = []
-    for job in RUNTIME_JOBS.active(resource=_INTERACTIVE_RUNTIME_RESOURCE):
-        RUNTIME_JOBS.cancel(job.id)
-        canceled_jobs.append(job.id)
-    current_arp = ARP_RUNS.current()
-    if current_arp and current_arp.status.value in {"queued", "running", "paused"}:
-        current_arp.cancel()
-    return {"ok": True, "canceled_jobs": canceled_jobs}
-
-
 @app.get("/api/status")
 def status() -> dict[str, Any]:
-    runner = STATE.runner
     busy = STATE.busy_breakdown()
     arp_running = ARP_RUNS.busy()
     model_profile = model_profile_from_config(CONFIG.get("api", default={}))
@@ -749,9 +414,6 @@ def status() -> dict[str, Any]:
         "replay_running": busy["replay"],
         "arp_running": arp_running,
         "human_recording": busy["human_recording"],
-        "run_id": runner.run_id if runner else None,
-        "run_status": runner.status if runner else None,
-        "usage": dict(runner.usage_total) if runner else None,
         "ocr_provider": ocr.active_provider(),
         "vlm_configured": vlm.is_configured(),
         "vlm_reason": vlm.configuration_issue() or None,
@@ -912,14 +574,12 @@ def platform_run(run_id: str) -> dict[str, Any]:
 
 @app.post("/api/v2/runs/{run_id}/cancel")
 def cancel_platform_run(run_id: str) -> dict[str, Any]:
-    """Cancel either an Agent or ARP run through one frontend-safe route."""
+    """Cancel an ARP run through one frontend-safe route."""
     projection = RUN_PROJECTIONS.get(run_id)
     execution = ARP_RUNS.get(run_id)
     job = STATE.job_for_run(run_id)
-    with STATE.lock:
-        runner = STATE.runners.get(run_id)
 
-    if not any((projection, execution, job, runner)):
+    if not any((projection, execution, job)):
         raise HTTPException(404, "run not found")
 
     execution_active = bool(
@@ -927,17 +587,13 @@ def cancel_platform_run(run_id: str) -> dict[str, Any]:
         and execution.status.value in {"queued", "running", "paused"}
     )
     job_active = bool(job and job.status in RUNTIME_JOBS.ACTIVE)
-    runner_stop_event = getattr(runner, "stop_event", None)
-    runner_active = bool(runner_stop_event and not runner_stop_event.is_set())
-    if not any((execution_active, job_active, runner_active)):
+    if not any((execution_active, job_active)):
         raise HTTPException(409, "run is not active")
 
     if execution_active:
         execution.cancel()
     if job:
         RUNTIME_JOBS.cancel(job.id)
-    if runner_stop_event:
-        runner_stop_event.set()
 
     return {
         "ok": True,
@@ -1008,30 +664,6 @@ def platform_run_artifact(run_id: str, artifact_id: str):
 @app.post("/api/v2/arp/validate")
 def validate_arp_graph(graph: ArpGraph) -> dict[str, Any]:
     return validate_graph(graph).model_dump(mode="json")
-
-
-@app.post("/api/v2/task-contracts/compile")
-def compile_task_contract(req: ContractCompileRequest) -> dict[str, Any]:
-    try:
-        session_generation, session_context = _legacy_session().snapshot()
-        contract, graph = TaskContractCompiler().compile_graph(
-            req.task,
-            max_steps=req.max_steps,
-            cold_start=req.cold_start,
-            session_context=session_context,
-            require_gui=req.require_gui,
-            allow_unsatisfied=True,
-        )
-        graph.metadata["session_generation"] = session_generation
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    return {
-        "ok": True,
-        "needs_input": bool(contract.clarification_questions),
-        "clarification_questions": list(contract.clarification_questions),
-        "contract": contract.model_dump(mode="json"),
-        "graph": graph.model_dump(mode="json"),
-    }
 
 
 @app.post("/api/v2/automation-ir/validate")
@@ -1148,27 +780,6 @@ def _start_arp_execution(
         raise RuntimeError(
             "server-owned goal admission may only start the vNext runtime"
         )
-    expected_session_generation: int | None = None
-    if runtime_version is ArpRuntimeVersion.LEGACY:
-        current_session_generation = _legacy_session().generation()
-        raw_session_generation = graph.metadata.get("session_generation")
-        expected_session_generation = (
-            current_session_generation
-            if raw_session_generation is None
-            else int(raw_session_generation)
-        )
-        if expected_session_generation != current_session_generation:
-            raise RuntimeError(
-                "Session context changed after this task contract was compiled. "
-                "Compile it again before starting the run."
-            )
-        contract_data = graph.metadata.get("task_contract")
-        if isinstance(contract_data, dict):
-            from .tasking.contracts import TaskContract
-
-            task_contract = TaskContract.model_validate(contract_data)
-            CapabilityPlanner.assert_satisfiable(task_contract)
-            CapabilityPlanner.assert_runtime_satisfiable(task_contract)
     validation = validate_graph(graph)
     if not validation.valid:
         raise ValueError("; ".join(validation.errors))
@@ -1178,9 +789,6 @@ def _start_arp_execution(
     job_ref: dict[str, str] = {}
     trace_owner_lock = threading.Lock()
     trace_started = False
-
-    def on_runner(runner: Any) -> None:
-        STATE.bind_runner(runner, job_ref.get("job_id", ""))
 
     def on_start(started: ArpExecution) -> None:
         nonlocal trace_started
@@ -1232,50 +840,10 @@ def _start_arp_execution(
             return
         from .orchestrator.adapters import finalize_memory_feedback
 
-        session = _legacy_session()
         try:
             finalize_memory_feedback(finished)
         finally:
-            try:
-                snapshot = finished.to_dict()
-                contract_data = finished.graph.metadata.get("task_contract")
-                contract_data = contract_data if isinstance(contract_data, dict) else {}
-                artifact_snapshot = snapshot.get("artifacts")
-                artifacts = (
-                    artifact_snapshot.get("artifacts")
-                    if isinstance(artifact_snapshot, dict)
-                    and isinstance(artifact_snapshot.get("artifacts"), list)
-                    else []
-                )
-                raw_result = snapshot.get("result")
-                result_text = (
-                    raw_result
-                    if isinstance(raw_result, str)
-                    else json.dumps(raw_result, ensure_ascii=False)
-                )
-                if not str(result_text or "").strip():
-                    result_text = str(snapshot.get("error") or "")
-                appended = session.append(
-                    str(contract_data.get("task") or finished.graph.name or ""),
-                    str(snapshot.get("status") or ""),
-                    str(result_text or ""),
-                    finished.run_id,
-                    intent=(
-                        contract_data.get("intent")
-                        if isinstance(contract_data.get("intent"), dict)
-                        else {}
-                    ),
-                    artifacts=artifacts,
-                    expected_generation=int(expected_session_generation),
-                )
-                BUS.publish(
-                    "session",
-                    action="append" if appended else "stale_append_ignored",
-                    count=len(session.all()),
-                    run_id=finished.run_id,
-                )
-            finally:
-                trace_mod.RECORDER.stop()
+            trace_mod.RECORDER.stop()
 
     if runtime_version is ArpRuntimeVersion.VNEXT:
         if frozen_config is None:
@@ -1307,7 +875,7 @@ def _start_arp_execution(
 
         execution = ARP_RUNS.prepare(
             graph,
-            default_handlers(on_runner),
+            default_handlers(),
             inputs=inputs,
         )
     execution.runtime_state["runtime_version"] = runtime_version.value
@@ -1614,18 +1182,7 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
         graph = req.graph
         runtime_version = req.runtime_version
         frozen_config: dict[str, Any] | None = None
-        if runtime_version is ArpRuntimeVersion.LEGACY:
-            legacy_task = legacy_goal_graph_task(graph)
-            if legacy_task is not None:
-                task, max_steps = legacy_task
-                session_generation, session_context = _legacy_session().snapshot()
-                _contract, graph = TaskContractCompiler().compile_graph(
-                    task,
-                    max_steps=max_steps,
-                    session_context=session_context,
-                )
-                graph.metadata["session_generation"] = session_generation
-        else:
+        if runtime_version is not ArpRuntimeVersion.LEGACY:
             frozen_config = CONFIG.snapshot()
             vnext_config = frozen_config.get("vnext")
             if (
@@ -1735,167 +1292,33 @@ def cancel_arp_run(run_id: str) -> dict[str, Any]:
     return {"ok": True, "run": ARP_RUNS.get(run_id).to_dict()}
 
 
-def _chatgpt_bridge_status() -> dict[str, Any]:
-    runtime_status = status()
-    enabled = bool(CONFIG.get("integrations", "chatgpt_desktop", "enabled", default=True))
-    server_ready = CHATGPT_MCP_APP is not None
-    with CHATGPT_MCP_ACTIVITY_LOCK:
-        activity = dict(CHATGPT_MCP_ACTIVITY)
-    last_request_at = float(activity.get("last_request_at") or 0.0)
-    client_active = bool(
-        enabled
-        and server_ready
-        and last_request_at
-        and time.time() - last_request_at <= _CHATGPT_MCP_ACTIVE_TTL_S
-    )
-    current = RUN_PROJECTIONS.current()
-    current_summary = None
-    if current:
-        current_summary = {
-            key: current.get(key)
-            for key in (
-                "run_id", "kind", "status", "phase", "goal", "graph_id",
-                "current_node_id", "current_tool", "error", "metrics",
-            )
-        }
-        current_summary["evidence_count"] = len(current.get("evidence") or [])
-    return {
-        "ok": server_ready,
-        "integration": "chatgpt_desktop",
-        "transport": "mcp_streamable_http",
-        "planner": (
-            "connected ChatGPT/Codex desktop MCP client"
-            if client_active
-            else "ChatGPT/Codex desktop via MCP when connected"
-        ),
-        "requires_openai_api_key": False,
-        "enabled": enabled,
-        "server_ready": server_ready,
-        "client_active": client_active,
-        "connection_status": (
-            "disabled" if not enabled
-            else "active" if client_active
-            else "ready" if server_ready
-            else "error"
-        ),
-        "last_client_seen_at": last_request_at or None,
-        "request_count": int(activity.get("request_count") or 0),
-        "last_client": str(activity.get("last_user_agent") or ""),
-        "security_mode": "loopback_only",
-        "proxy_bypass": "NO_PROXY=127.0.0.1,localhost",
-        "allow_desktop_mutation": bool(
-            CONFIG.get("integrations", "chatgpt_desktop", "allow_desktop_mutation", default=True)
-        ),
-        "runtime": {
-            key: runtime_status.get(key)
-            for key in (
-                "running", "busy", "agent_running", "replay_running", "arp_running",
-                "human_recording", "run_id", "run_status", "ocr_provider",
-                "vlm_configured", "vlm_reason", "enabled_dimensions", "is_admin",
-                "shell_enabled", "desktop_action_queue",
-            )
-        },
-        "world_model_enabled": bool(CONFIG.get("agent", "world_model", default=True)),
-        "current_run": current_summary,
-        "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
-        **({"error": CHATGPT_MCP_ERROR} if CHATGPT_MCP_ERROR else {}),
-    }
-
-
-def _chatgpt_bridge_start_graph(graph: ArpGraph, inputs: dict[str, Any]) -> dict[str, Any]:
-    try:
-        execution = _start_arp_execution(graph, inputs)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "error": str(exc)}
-    return {"ok": True, "run_id": execution.run_id, "run": execution.to_dict()}
-
-
-def _chatgpt_bridge_get_run(run_id: str) -> dict[str, Any]:
-    projection = RUN_PROJECTIONS.get(run_id)
-    execution = ARP_RUNS.get(run_id)
-    if not projection and not execution:
-        return {"ok": False, "error": "run not found", "run_id": run_id}
-    return {
-        "ok": True,
-        "run": projection,
-        "arp": execution.to_dict() if execution else None,
-    }
-
-
-def _chatgpt_bridge_cancel_run(run_id: str) -> dict[str, Any]:
-    if not ARP_RUNS.cancel(run_id):
-        return {"ok": False, "error": "active ARP run not found", "run_id": run_id}
-    job = STATE.job_for_run(run_id)
-    if job:
-        RUNTIME_JOBS.cancel(job.id)
-    execution = ARP_RUNS.get(run_id)
-    return {"ok": True, "run": execution.to_dict() if execution else None}
-
-
 @app.get("/api/v2/integrations/chatgpt")
 async def chatgpt_integration(request: Request) -> dict[str, Any]:
-    endpoint = str(request.base_url).rstrip("/") + "/mcp"
-    tool_names = []
-    if CHATGPT_MCP is not None:
-        tool_names = [tool.name for tool in await CHATGPT_MCP.list_tools()]
+    """Legacy ChatGPT desktop MCP bridge was removed with the old Agent line.
+
+    The endpoint stays as a truthful status source for the settings panel.
+    """
     return {
-        **_chatgpt_bridge_status(),
-        "endpoint": endpoint,
-        "tool_count": len(tool_names),
-        "tools": tool_names,
-        "registration": {
-            "client": "Codex desktop",
-            "command": f"codex mcp add winpilot --url {endpoint}",
-            "environment": "NO_PROXY=127.0.0.1,localhost",
-        },
+        "ok": False,
+        "integration": "chatgpt_desktop",
+        "transport": "removed",
+        "planner": "unavailable",
+        "requires_openai_api_key": False,
+        "enabled": False,
+        "server_ready": False,
+        "client_active": False,
+        "connection_status": "removed",
+        "last_client_seen_at": None,
+        "request_count": 0,
+        "last_client": "",
+        "security_mode": "loopback_only",
+        "allow_desktop_mutation": False,
+        "runtime": {},
+        "world_model_enabled": False,
+        "current_run": None,
+        "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
+        "error": "legacy ChatGPT desktop MCP bridge removed",
     }
-
-
-@app.get("/api/agent-schedules")
-def agent_schedules(enabled_only: bool = False) -> dict[str, Any]:
-    return {
-        "ok": True,
-        "schedules": agent_scheduler.list_tasks(enabled_only=enabled_only),
-    }
-
-
-@app.post("/api/agent-schedules")
-def create_agent_schedule(req: AgentScheduleRequest) -> dict[str, Any]:
-    try:
-        entry = agent_scheduler.create_task(
-            req.task,
-            name=req.name,
-            run_at=req.run_at,
-            delay_seconds=req.delay_seconds,
-            interval_seconds=req.interval_seconds,
-            enabled=req.enabled,
-            max_steps=req.max_steps,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {"ok": True, "schedule": entry}
-
-
-@app.patch("/api/agent-schedules/{schedule_id}")
-def update_agent_schedule(schedule_id: str, req: AgentSchedulePatch) -> dict[str, Any]:
-    try:
-        entry = agent_scheduler.update_task(
-            schedule_id,
-            req.model_dump(exclude_unset=True),
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    if entry is None:
-        raise HTTPException(404, "schedule not found")
-    return {"ok": True, "schedule": entry}
-
-
-@app.delete("/api/agent-schedules/{schedule_id}")
-def cancel_agent_schedule(schedule_id: str) -> dict[str, Any]:
-    ok = agent_scheduler.cancel_task(schedule_id)
-    if not ok:
-        raise HTTPException(404, "schedule not found")
-    return {"ok": True, "id": schedule_id}
 
 
 @app.get("/api/config")
@@ -1941,15 +1364,6 @@ def patch_config(patch: dict[str, Any]) -> dict[str, Any]:
 def traces() -> list[dict[str, Any]]:
     """Trace run browser for the Electron Platform workbench (Studio surface)."""
     return trace_mod.list_traces()
-
-
-@app.get("/api/trace/{run_id}/summary")
-def trace_summary(run_id: str) -> dict[str, Any]:
-    checked_run_id = _public_trace_run_id(run_id)
-    summary = eval_summary.summarize_trace(checked_run_id)
-    if not summary.get("run_id") and not summary.get("tool_count"):
-        raise HTTPException(404, "trace summary not found")
-    return summary
 
 
 _PUBLIC_TRACE_DETAIL_LIMIT = 2_000
@@ -2496,18 +1910,6 @@ def memory_clear() -> dict[str, Any]:
     return {"ok": True}
 
 
-@app.get("/api/session")
-def session_list() -> list[dict[str, Any]]:
-    return _legacy_session().all()
-
-
-@app.delete("/api/session")
-def session_clear() -> dict[str, Any]:
-    generation = _legacy_session().clear()
-    BUS.publish("session", action="clear", count=0, generation=generation)
-    return {"ok": True, "generation": generation}
-
-
 # ---------------------------------------------------------------- websocket
 @app.websocket("/ws/events")
 async def ws_events(ws: WebSocket) -> None:
@@ -2533,72 +1935,3 @@ async def ws_events(ws: WebSocket) -> None:
         pass
     finally:
         BUS.unsubscribe(q)
-
-
-# ------------------------------------------------------------------- static
-@app.get("/")
-def index() -> FileResponse:
-    return FileResponse(WEBUI_DIR / "index.html")
-
-
-app.mount("/static", StaticFiles(directory=str(WEBUI_DIR)), name="static")
-
-
-def _install_chatgpt_mcp() -> None:
-    global CHATGPT_MCP, CHATGPT_MCP_APP, CHATGPT_MCP_BRIDGE, CHATGPT_MCP_ERROR
-    CHATGPT_MCP = None
-    CHATGPT_MCP_APP = None
-    CHATGPT_MCP_BRIDGE = None
-    CHATGPT_MCP_ERROR = ""
-    try:
-        from .integrations.chatgpt_mcp import ChatGPTBridgeHooks, build_chatgpt_mcp
-
-        hooks = ChatGPTBridgeHooks(
-            status=_chatgpt_bridge_status,
-            start_graph=_chatgpt_bridge_start_graph,
-            get_run=_chatgpt_bridge_get_run,
-            cancel_run=_chatgpt_bridge_cancel_run,
-            busy=STATE.busy,
-            enabled=lambda: bool(
-                CONFIG.get("integrations", "chatgpt_desktop", "enabled", default=True)
-            ),
-            mutation_allowed=lambda: bool(
-                CONFIG.get(
-                    "integrations",
-                    "chatgpt_desktop",
-                    "allow_desktop_mutation",
-                    default=True,
-                )
-            ),
-        )
-        CHATGPT_MCP, CHATGPT_MCP_APP, CHATGPT_MCP_BRIDGE = build_chatgpt_mcp(hooks)
-    except Exception as exc:
-        CHATGPT_MCP_ERROR = str(exc)
-        logger.exception("ChatGPT desktop MCP bridge failed to initialize")
-
-
-_install_chatgpt_mcp()
-if CHATGPT_MCP_APP is not None:
-    # Existing API/static routes are registered first; this root mount only
-    # receives the MCP protocol path and keeps the canonical URL at /mcp.
-    class _ChatGPTMcpDelegate:
-        async def __call__(self, scope, receive, send) -> None:
-            current = CHATGPT_MCP_APP
-            if current is None:
-                await JSONResponse(
-                    {"error": CHATGPT_MCP_ERROR or "ChatGPT MCP bridge unavailable"},
-                    status_code=503,
-                )(scope, receive, send)
-                return
-            if scope.get("type") == "http" and str(scope.get("path") or "").startswith("/mcp"):
-                headers = {
-                    bytes(key).decode("latin-1").casefold(): bytes(value).decode("latin-1")
-                    for key, value in scope.get("headers") or []
-                }
-                with CHATGPT_MCP_ACTIVITY_LOCK:
-                    CHATGPT_MCP_ACTIVITY["request_count"] += 1
-                    CHATGPT_MCP_ACTIVITY["last_request_at"] = time.time()
-                    CHATGPT_MCP_ACTIVITY["last_user_agent"] = headers.get("user-agent", "unknown MCP client")[:240]
-            await current(scope, receive, send)
-
-    app.mount("/", _ChatGPTMcpDelegate(), name="chatgpt-desktop-mcp")

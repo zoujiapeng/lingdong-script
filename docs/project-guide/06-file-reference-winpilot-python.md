@@ -604,24 +604,22 @@ finally:
   **历史 vNext 接口**。Protocol `ObligationVerifierPort.verify()` 只被同目录门面/测试消费，
   不接入当前 `MissionRuntime`。
 
-### 4.7 `integrations/`：外部控制面与 connector（4）
+### 4.7 `integrations/`：外部控制面与 connector（3，原 4）
 
 - [`integrations/__init__.py`](../../python/winpilot_home/winpilot/integrations/__init__.py) —
   **共享命名空间**。仅包说明；`connector_gateway` 用相对包 import 取得 `mcp_client`，没有
   自动连接外部服务。
-- [`integrations/chatgpt_mcp.py`](../../python/winpilot_home/winpilot/integrations/chatgpt_mcp.py) —
-  **Legacy 外部桥**。`ChatGPTDesktopBridge` 与 `build_chatgpt_mcp()` 暴露观察、ToolSession
-  dispatch、ARP validate/start、录制/replay/skill 等 MCP 工具，并压缩 UI/controller payload；
-  依赖 `action/fast/orchestrator/recorder/tasking/utils` 与 MCP SDK，server 仅在真正创建外部 MCP
-  session 时 lazy import。它不是 live Actor 的 connector owner。
+- `integrations/chatgpt_mcp.py` — **已删除**。旧 `ChatGPTDesktopBridge`（ToolSession/MCP 工具面）
+  与 server 的 `/mcp` mount 已随旧 Agent 线删除；`/api/v2/integrations/chatgpt` 只返回恒
+  `removed` 状态供设置面板显示。
 - [`integrations/connector_gateway.py`](../../python/winpilot_home/winpilot/integrations/connector_gateway.py) —
   **主链 connector owner**。`ConnectorGateway.available/search/call` 做显式配置、目录有界化、
   opaque ref、readOnly/destructive annotation、descriptor fingerprint 二次核对、result hash/
   receipt；依赖 `mcp_client`，由 `live_agent` 注入同一 `LiveVisualActor`。
 - [`integrations/mcp_client.py`](../../python/winpilot_home/winpilot/integrations/mcp_client.py) —
-  **主链共享 + Legacy 底层**。解析显式 MCP 配置，建立 stdio/streamable HTTP 连接，
+  **主链共享**。解析显式 MCP 配置，建立 stdio/streamable HTTP 连接，
   `discover/call` 在同一物理连接内重检 tool descriptor/annotations；依赖 `config` 和 MCP SDK
-  （函数内 import），被 `ConnectorGateway` 及 Legacy `agent.mcp_tools` 调用。
+  （函数内 import），被 `ConnectorGateway` 调用（Legacy `agent.mcp_tools` 随旧线删除）。
 
 ### 4.8 `utils/`：跨路径机械工具（6）
 
@@ -667,29 +665,12 @@ finally:
   校验脚本并执行 0-token replay。直接依赖 `action/automation_ir/fast.visual_servo/memory/
   perception/recorder/utils`，由 server、adapters、MCP、eval 调用。
 
-### 4.10 `eval/`：旧 Agent 级评测工具与历史数据（6）
+### 4.10 `eval/`：已删除
 
-- [`eval/__init__.py`](../../python/winpilot_home/winpilot/eval/__init__.py) — **测试支撑**。
-  仅包说明；被 `eval.__main__` 与 server 评测 API 引用。
-- [`eval/__main__.py`](../../python/winpilot_home/winpilot/eval/__main__.py) — **测试支撑 CLI**。
-  `main()` 解析 `smoke|full --tasks --save-baseline` 并调 `winpilot.eval.run`；直接依赖包门面，
-  由 `python -m winpilot.eval` 调用。
-- [`eval/baseline.json`](../../python/winpilot_home/winpilot/eval/baseline.json) — **历史测试数据**。
-  保存旧 Agent 评测曾产生的 scorecard：一个早期 3 项摘要，以及以 7 个任务 ID 组成的
-  signature 为键的完整结果、run ID、步数、成本和耗时。`eval/runner.py` 通过
-  `BASELINE_PATH`、`_load_baselines()` 和 `_compare_baseline()` 读取它，只有显式传入
-  `--save-baseline` 才会更新。它是 Legacy 评测的历史比较快照，不是当前 Electron E2E 成功率，
-  也不能作为现行产品能力证据。
-- [`eval/runner.py`](../../python/winpilot_home/winpilot/eval/runner.py) — **Legacy 测试支撑**。
-  `_run_once/run_task/run` 在进程内创建旧 `AgentRunner`、记录 trace、调用 task ground truth、
-  比较 baseline 并打印 scorecard；依赖 `agent.loop/config/eval.tasks/recorder`，由 eval CLI/包
-  动态调用，不等于 Electron 主链 E2E。
-- [`eval/summary.py`](../../python/winpilot_home/winpilot/eval/summary.py) — **测试支撑**。
-  `summarize_events/trace/eval_report` 与 `aggregate_reports` 统计延迟、perception dimension、
-  fast GUI 和成功率；依赖 `config` 与 stdlib，由 server/eval 工具按需调用。
-- [`eval/tasks.py`](../../python/winpilot_home/winpilot/eval/tasks.py) — **测试支撑**。
-  `EvalTask`、`suite/by_ids` 以及文件、进程、计算器、timer、clone/compute 的程序化 check 和
-  cleanup；依赖 `perception` 与 stdlib，由 `eval.runner` 使用。它的有限任务不能进入生产路由。
+`winpilot/eval/`（6 文件：`__init__`、`__main__`、`baseline.json`、`runner.py`、`summary.py`、
+`tasks.py`）与 `/api/trace/{run_id}/summary`、根 `scripts/eval_summary.py`、npm
+`eval:summary` 已随旧 Agent 线删除。旧 Agent 级评测的 baseline 只作为 git 历史可查；
+当前评测口径是 `scripts/gui_eval_run.py` 与真实 Electron E2E。
 
 ### 4.11 `memory/`：Legacy Memory Graph 与 replay 信任（13）
 
@@ -737,127 +718,21 @@ finally:
   dataclass `TaskFrame/MemoryCandidate/MemoryPack`；无项目内依赖，被 store/retriever/packer/
   runtime/experience/feedback 使用。
 
-### 4.12 `agent/`：冻结的统一 AgentRunner 兼容线（35）
+### 4.12 gent/：Studio 确定性执行器（21，原 35）
 
-这一包仍服务旧 `/api/chat`、scheduler、Legacy ARP、外部 ChatGPT MCP 和部分 Task Stage。
-当前 `orchestrator.live_agent` 的静态依赖闭包禁止进入整个包。
+AgentRunner 半边（loop/router/session/done_verifier/failure_classifier/failure_recovery/
+scene_coverage/run_state/reflection/playbooks/prompts/context_guidance/graphical_affordances/
+gui_plan_helpers/coding）已随旧 Agent 线删除。剩余文件全部是 Studio ACTION_BATCH 的确定性
+执行器闭包：	ools.py（ToolSession）、	ool_schemas.py、	ool_result.py、mixins
+（desktop/fast/interaction/system/window/working_set/file/memory/mcp/perception/plan）、
+coding_tools.py、planner.py、scope_guard.py、
+untime_profile.py、	ask_rules.py。
 
-- [`agent/__init__.py`](../../python/winpilot_home/winpilot/agent/__init__.py) — **Legacy 空命名空间**。
-  无定义/import；loop/tools/mixins 以相对包方式访问子模块。
-- [`agent/coding.py`](../../python/winpilot_home/winpilot/agent/coding.py) — **Legacy compatibility shim**。
-  `workspace_dir` 与 `CodingRunner` 把已删除 coding sub-agent 兼容为同一个 `AgentRunner` +
-  coding runtime profile；依赖 `agent.loop/runtime_profile`，无当前静态产品调用者。
-- [`agent/coding_tools.py`](../../python/winpilot_home/winpilot/agent/coding_tools.py) — **Legacy**。
-  `coding_tool_schemas`、`CodingSession.dispatch` 提供有界 filesystem/repo/read/fetch 工具；依赖
-  `utils.log` 与 pathlib/urllib，由 `agent.tools` 组合。
-- [`agent/context_guidance.py`](../../python/winpilot_home/winpilot/agent/context_guidance.py) — **Legacy**。
-  `ContextGuidanceMixin` 为旧 Runner 注入 planning/world-model/playbook guidance；依赖
-  `gui_plan_helpers/planner/config/log`，由 `AgentRunner` 继承。
-- [`agent/desktop_tools.py`](../../python/winpilot_home/winpilot/agent/desktop_tools.py) — **Legacy**。
-  `DesktopToolMixin` 处理截图、等待、视觉 probe、剪贴板/图像粘贴等通用桌面工具；依赖
-  `action/verify/interaction_tools/tool_result/perception/screenshot`，由 `ToolSession` 继承。
-- [`agent/done_verifier.py`](../../python/winpilot_home/winpilot/agent/done_verifier.py) — **Legacy**。
-  `DoneVerifierMixin` 组合可见状态、VLM 和 docx/xlsx/file 结构证据来审查旧 Runner 的 done；
-  依赖 `task_rules/config/model_adapter/modeling/perception/image_capture/log`，由 `AgentRunner`
-  继承。它不是 vNext 的第二 verifier。
-- [`agent/failure_classifier.py`](../../python/winpilot_home/winpilot/agent/failure_classifier.py) —
-  **Legacy**。`FailureType/FailureClassification` 与 `classify_failure` 从 ToolResult JSON 中提取
-  not-started/unknown/target/focus/no-effect 等事实；无项目内依赖，由 `failure_recovery` 调用。
-- [`agent/failure_recovery.py`](../../python/winpilot_home/winpilot/agent/failure_recovery.py) —
-  **Legacy**。`FailureRecoveryLayer.handle_tool_result` 按 classifier 结果决定旧 loop 的继续、
-  reobserve、blocked 等 metadata；依赖 `failure_classifier`，由 `AgentRunner` 使用。
-- [`agent/fast_tools.py`](../../python/winpilot_home/winpilot/agent/fast_tools.py) — **Legacy**。
-  `FastToolMixin` 把 `action_batch/execute_subgoal` 路由到 FastGuiController、PerceptionDaemon 和
-  SubgoalExecutor，并做旧 target/window guard；依赖 `fast.*`、perception/reducer、tool_result，
-  由 `ToolSession` 继承。
-- [`agent/file_tools.py`](../../python/winpilot_home/winpilot/agent/file_tools.py) — **Legacy**。
-  `FileToolMixin` 提供 find/read/list 等本地文件工具和 ToolResult；依赖 `tool_result/log`，由
-  `ToolSession` 继承。
-- [`agent/graphical_affordances.py`](../../python/winpilot_home/winpilot/agent/graphical_affordances.py) —
-  **Legacy**。`detect_graphical_affordances()` 用 OpenCV/Numpy 在图片中提出小型无文字控件
-  hypothesis；无项目内依赖，由旧 `AgentRunner` 调用。
-- [`agent/gui_plan_helpers.py`](../../python/winpilot_home/winpilot/agent/gui_plan_helpers.py) —
-  **Legacy**。一组 `_looks_like_*` / schema profile / pure-open-goal helper，依赖
-  `task_rules/config/perception.app_aliases`，由 context guidance 与 loop 调用；这些关键词规则
-  禁止回接 live vNext。
-- [`agent/interaction_tools.py`](../../python/winpilot_home/winpilot/agent/interaction_tools.py) —
-  **Legacy**。`InteractionToolMixin` 实现 click/double-click/type/hotkey/scroll/drag/strokes/
-  mouse hold 等 ToolSession handler，并有旧输入元素与剪贴板启发式；依赖 `action/perception/
-  tool_result/config/screenshot` 和 pywin32，由 ToolSession、desktop/system mixin 调用。
-- [`agent/loop.py`](../../python/winpilot_home/winpilot/agent/loop.py) — **Legacy 巨型 loop owner**。
-  `AgentRunner.run()` 组合旧 prompts、planner、ToolSession、Memory、RunState、failure recovery、
-  scene coverage、FrameAuthority/Observer 和 model calls；还含 submitted/native coordinate
-  canonicalization。直接依赖几乎全部 `agent.*`、`fast.action_contract`、`memory/modeling/
-  perception/visual_runtime`；由旧 router、coding shim、eval 调用，主链禁止依赖。
-- [`agent/mcp_tools.py`](../../python/winpilot_home/winpilot/agent/mcp_tools.py) — **Legacy 重复 owner**。
-  `McpToolMixin` 直接 lazy 调 `integrations.mcp_client.discover/call`；只静态依赖 `tool_result`，
-  由 ToolSession 继承。它绕过当前 ConnectorGateway，不能作为产品 connector 路径。
-- [`agent/memory_tools.py`](../../python/winpilot_home/winpilot/agent/memory_tools.py) — **Legacy**。
-  `MemoryToolMixin` 提供 memory search/add/update/delete/feedback/promotion handler；依赖
-  `memory/tool_result/log`，由 ToolSession 继承。
-- [`agent/perception_tools.py`](../../python/winpilot_home/winpilot/agent/perception_tools.py) —
-  **Legacy**。`PerceptionToolMixin` 处理 observe、OCR/UIA/CV/VLM inspect 和 visual advisory，
-  并压制旧 nonblocking notice；依赖 `task_rules/config/perception/model/ocr_lines/image_capture/
-  screenshot`，由 ToolSession 继承。
-- [`agent/plan_tools.py`](../../python/winpilot_home/winpilot/agent/plan_tools.py) — **Legacy**。
-  `PlanToolMixin` 实现 todo/status/done/blocked、visible/file completion check，并含 form/submit/
-  schedule 等旧启发式；依赖 `action/task_rules/tool_result/log`，由 ToolSession 继承。
-- [`agent/planner.py`](../../python/winpilot_home/winpilot/agent/planner.py) — **Legacy**。
-  `make_plan` 与 `Plan` 为长任务生成/维护 todo，含状态 token 和 visible-check 清洗；依赖
-  `config/modeling/log`，由 context guidance 和 `AgentRunner` 调用。live vNext 不使用第二 planner。
-- [`agent/playbooks.py`](../../python/winpilot_home/winpilot/agent/playbooks.py) — **Legacy**。
-  `load_all/for_task/for_window_title/render_*` 从 JSON 加载 app/situation tactics；依赖
-  `config/log`，由旧 prompt/context 路径动态使用，禁止作为新主链应用配方。
-- [`agent/prompts.py`](../../python/winpilot_home/winpilot/agent/prompts.py) — **Legacy**。
-  `system_prompt()` 生成旧 AgentRunner 长系统提示，引用 screen geometry 和日期；依赖
-  `utils.screenshot`，由 loop 动态使用。当前 live Visual Actor 的 45-word prompt 不在此文件。
-- [`agent/reflection.py`](../../python/winpilot_home/winpilot/agent/reflection.py) — **Legacy**。
-  `ReflectionMixin` 在旧 Runner checkpoint 调模型反思/调整；依赖 `config/log`，由 loop 继承，
-  vNext 不创建该角色。
-- [`agent/router.py`](../../python/winpilot_home/winpilot/agent/router.py) — **Legacy construction**。
-  `build_runner()` 按 runtime profile 创建唯一旧 `AgentRunner` 并发布 log；依赖
-  `loop/runtime_profile/log`，由 Legacy orchestrator adapter、Task Stage、旧 server/scheduler 调用。
-- [`agent/run_state.py`](../../python/winpilot_home/winpilot/agent/run_state.py) — **Legacy**。
-  `RunStateMachine.before_tool/after_tool/accept_verification/terminal_rejected` 维护旧 task progress、
-  pending actions、no-progress、batch facts；依赖 `fast.action_contract`，由 loop 使用。
-- [`agent/runtime_profile.py`](../../python/winpilot_home/winpilot/agent/runtime_profile.py) — **Legacy**。
-  `RuntimeProfile` 与 `build_runtime_profile` 决定旧 ToolSession capability/coding workspace；依赖
-  `task_rules/config`，被 router、loop、tools、adapters 和 Tasking 使用。
-- [`agent/scene_coverage.py`](../../python/winpilot_home/winpilot/agent/scene_coverage.py) — **Legacy**。
-  `SceneCoverageLedger` 用 frame hash/OpenCV 记录场景、frontier 和边缘重复 loop；无项目内依赖，
-  由旧 AgentRunner 使用。
-- [`agent/scope_guard.py`](../../python/winpilot_home/winpilot/agent/scope_guard.py) — **Legacy**。
-  `ensure_scope/take_scope_recovery` 在旧 GUI mutation 前确认 target/foreground/point hit，并记录
-  focus transition；依赖 `action/fast.action_contract/perception/tool_result/config` 与 win32gui，
-  由旧 tools 的动态 guard 路径调用。
-- [`agent/session.py`](../../python/winpilot_home/winpilot/agent/session.py) — **Legacy session**。
-  `SessionMemory` 与 `render_context` 是进程内跨任务 entry 列表；无项目内依赖，由旧 server/
-  Runner 动态使用。不要与主链 `AgentThreadStore` 的有界成功消息 checkpoint 混淆。
-- [`agent/system_tools.py`](../../python/winpilot_home/winpilot/agent/system_tools.py) — **Legacy**。
-  `SystemToolMixin` 处理 app/process/window/tray/shell/open URL/undo 等 ToolSession handler；依赖
-  根包、`action/perception/interaction_tools/tool_result/config/log` 和 pywin32，由 ToolSession
-  继承。live vNext 当前没有 shell/launch 宏工具。
-- [`agent/task_rules.py`](../../python/winpilot_home/winpilot/agent/task_rules.py) — **Legacy 规则债务**。
-  GUI-only/coding/communication/research/task intent/payload 的 `_looks_like_*` 分类与 guard；无
-  项目内依赖，被旧 loop、planner、tools、runtime profile、subgoal 使用，禁止进入 Goal Admission。
-- [`agent/tool_result.py`](../../python/winpilot_home/winpilot/agent/tool_result.py) — **Legacy 合同**。
-  `ToolResult` 封装 text + optional meta；无依赖，被所有旧 Tool mixin、Fast controller/subgoal
-  和 MCP bridge 使用。
-- [`agent/tool_schemas.py`](../../python/winpilot_home/winpilot/agent/tool_schemas.py) — **Legacy**。
-  `tool_schemas()` 生成旧统一 Agent 的 OpenAI function schemas，含 batch/frame/expect/memory/
-  perception 等大动作面；依赖 `action/fast.action_contract/memory/perception`，由 `ToolSession`
-  组合。它不是当前 Visual Actor 的 `_tool_catalog()`。
-- [`agent/tools.py`](../../python/winpilot_home/winpilot/agent/tools.py) — **Legacy dispatch owner**。
-  `ToolSession` 多重继承 coding/desktop/fast/file/interaction/MCP/memory/perception/plan/system/
-  window/working-set mixins，管理 per-run cache/target/action session，并按工具名 dispatch；依赖
-  上述 mixins、fast/perception/config/screenshot。被 old loop、adapters、Tasking 和 MCP bridge
-  调用，live vNext 不创建它。
-- [`agent/window_tools.py`](../../python/winpilot_home/winpilot/agent/window_tools.py) — **Legacy**。
-  `WindowToolMixin` list/scan/focus 窗口并返回 ToolResult；依赖 `action/perception/config` 和
-  pywin32，由 ToolSession 继承。
-- [`agent/working_set_tools.py`](../../python/winpilot_home/winpilot/agent/working_set_tools.py) —
-  **Legacy**。`WorkingSetToolMixin` 在 run 内收集结构化 facts，供跨应用旧 workflow 使用；
-  依赖 `tool_result/log`，由 ToolSession 继承。
+ast/controller.py 经 session.dispatch 复用这套工具面；orchestrator/adapters.py 的
+_batch_handler 是 Studio 图执行的唯一入口。当前 orchestrator.live_agent 的静态依赖
+闭包禁止进入整个包。旧通信适配器方法、schedule 工具与 tasking.intent 解析已移除；
+
+erify_pointer_paths_in_frames 从 tasking port 进 interaction_tools.py。
 
 ### 4.13 `fast/`：旧低延迟 Controller 与 watcher（13）
 
@@ -980,101 +855,20 @@ finally:
   `WorldModel` 记录 action/outcome/snapshot/bulletin/facts，用 hash 做最小 stuck/跨步状态；无
   项目内依赖，由旧 Agent/ToolSession 动态使用，非 vNext mission reducer。
 
-### 4.15 `tasking/`：Task Contract / StageRuntime 兼容链（22）
+### 4.15 	asking/：vNext/Studio 共享模块（3，原 22）
 
-这套代码服务 Studio、`/api/v2/task-contracts/compile` 和 Legacy ARP `TASK_STAGE`。当前产品
-Goal Admission 不先解析 intent，也不把完整目标编译成 stages。
+Task Contract 编译器、StageRuntime、InteractionStageEngine、Subgoal 辅助和 visual_*
+几何链已随 /api/v2/task-contracts/compile 与 TASK_STAGE handler 删除。保留：
 
-- [`tasking/__init__.py`](../../python/winpilot_home/winpilot/tasking/__init__.py) — **Studio/ARP 门面**。
-  重导出 `TaskContractCompiler`、`TaskIntentParser` 与核心 contracts；直接依赖
-  `compiler/contracts/intent`，被 MCP bridge 和兼容调用消费。
-- [`tasking/adapters.py`](../../python/winpilot_home/winpilot/tasking/adapters.py) — **Legacy**。
-  Protocol `CommunicationAdapter` 规定 open conversation、resolve composer、paste/attach、send、
-  verify outbound；`DomainAdapterRegistry` 注册 channel 组件。依赖 `artifacts/evidence`，由
-  `StageRuntime` 使用，含可选 communication provider 边界。
-- [`tasking/artifacts.py`](../../python/winpilot_home/winpilot/tasking/artifacts.py) — **Studio/ARP 共享**。
-  `Artifact` 与 run-scoped `ArtifactStore` 区分 managed user artifact 和 transient observation，
-  支持 capture/import/get/resolve_sendable/latest 与 SHA/mime/manifest；依赖 `config/perception/
-  screenshot` 及 PIL/pathlib。由 server artifact API、Stage/Interaction runtime、completion 和
-  communication adapter 使用。
-- [`tasking/capability.py`](../../python/winpilot_home/winpilot/tasking/capability.py) — **Studio/ARP**。
-  `CapabilityPlanner.plan_stage/plan_contract/assert_*satisfiable` 把 TaskStage capability 选到
-  runtime component，并生成 provider/missing report；`tools_for_capabilities` 投影旧 tools。
-  依赖 `tasking.contracts`，由 compiler、StageRuntime 和 server compile/status 调用。
-- [`tasking/compiler.py`](../../python/winpilot_home/winpilot/tasking/compiler.py) — **Studio/ARP**。
-  `TaskContractCompiler.compile()` 用 `TaskIntentParser` 生成 typed contract，`compile_graph()`
-  再调 capability planning 并转 ARP；依赖 `capability/contracts/intent`，由 server 与 tasking
-  门面调用。它不是主 Agent 前置 planner。
-- [`tasking/completion.py`](../../python/winpilot_home/winpilot/tasking/completion.py) — **Studio/ARP**。
-  `CompletionContractVerifier.verify()` 逐 obligation 检查 exact stage/provider/predicate/value、
-  artifact ref 与 final conditions，fail closed 产出 verdict；依赖 `artifacts/contracts/evidence`，
-  由 StageRuntime 和 `ArpExecution` 的 TaskContract END gate 使用。
-- [`tasking/contracts.py`](../../python/winpilot_home/winpilot/tasking/contracts.py) — **Studio/ARP 合同**。
-  Pydantic `TaskIntent/Requirement/Stage/Contract`、`InteractionSessionContract`、artifact/evidence/
-  obligation/capability selection 及 compile request/response；无项目内依赖，被 server、compiler、
-  graph_compiler、Stage/Interaction runtime 和 completion 广泛调用。
-- [`tasking/conversation.py`](../../python/winpilot_home/winpilot/tasking/conversation.py) — **Legacy**。
-  `generate_conversation_response()` 对 CONVERSATION stage 做单轮 shared modeling 调用并返回
-  `ConversationResponse`；依赖 `config/model_adapter/modeling`，由 StageRuntime 调用，不进入
-  GUI loop。
-- [`tasking/evidence.py`](../../python/winpilot_home/winpilot/tasking/evidence.py) — **Studio/ARP**。
-  旧 typed `EvidenceRegistry.record/records/find/snapshot` 按 run 保存 dict evidence；无项目内依赖，
-  被 adapters/completion/Stage/Interaction runtime 使用。不要与 vNext EvidenceRegistry 混淆。
-- [`tasking/execution_context.py`](../../python/winpilot_home/winpilot/tasking/execution_context.py) —
-  **共享 handoff 兼容**。`normalize_execution_context`、`capture_foreground_window_context`、
-  `validated_handoff_target`、`foreground_handoff_conflict` 校验客户端交付 hwnd/pid/title/rect/
-  capture timestamp；只依赖 ctypes/time，被 server、Stage/Interaction runtime 调用。主链 lease
-  先经过 `goal_admission.bind_client_execution_context` 再由 live_agent 冻结更严格 target。
-- [`tasking/intent.py`](../../python/winpilot_home/winpilot/tasking/intent.py) — **Legacy 规则链**。
-  `TaskIntentParser.parse()` 以 regex 提取 application、communication recipient/message、drawing、
-  launch、actor assignment 和 primary modality；依赖 `tasking.contracts`，由 compiler/门面调用，
-  禁止回接当前原始 Goal Admission。
-- [`tasking/interaction.py`](../../python/winpilot_home/winpilot/tasking/interaction.py) — **Legacy typed
-  visual planner**。定义 `InteractionStroke/Action/Decision/ExpectedEffect/ResolutionRequirement`，
-  `plan_interaction()` 调模型并 canonicalize/validate region/path/affordance；`controller_actions`
-  及 verify helpers 把决定转旧 controller。依赖 `perception/surface_binding/visual_appearance/
-  visual_regions` 与 Pydantic，供 InteractionStageEngine、geometry/effects/controller 使用。
-- [`tasking/interaction_controller.py`](../../python/winpilot_home/winpilot/tasking/interaction_controller.py) —
-  **Legacy**。`controller_preparation_actions/controller_actions` 把 typed interaction 的 normalized
-  point/region 映到旧 Fast controller action；依赖 `surface_binding/interaction`，由
-  InteractionStageEngine 调用。
-- [`tasking/interaction_stage_runtime.py`](../../python/winpilot_home/winpilot/tasking/interaction_stage_runtime.py) —
-  **Legacy 大型阶段引擎**。`InteractionStageEngine.execute/recover_failure` 串联目标 handoff、
-  Perception/Frame、typed plan、geometry/path refinement、Fast Controller、watcher、artifact/evidence、
-  deferred/held gesture 和局部 effect/no-effect checks；依赖 old `agent.tools/runtime_profile`、
-  `fast.watcher`、`orchestrator.runtime`、perception、Tasking visual modules、utils/cv2/numpy。只由
-  `StageRuntime` 使用，不是 current MissionRuntime。
-- [`tasking/message_content.py`](../../python/winpilot_home/winpilot/tasking/message_content.py) —
-  **Legacy**。`generate_message_content()` 用 shared model 产 `MessageDraft`，
-  `authorize_message_content()` 做 deterministic draft/user payload authorization；依赖
-  `config/model_adapter/modeling`，由 StageRuntime communication stage 调用。
-- [`tasking/recovery.py`](../../python/winpilot_home/winpilot/tasking/recovery.py) — **Legacy**。
-  `RecoveryPolicy.decide()` 把 stage failure class 变成 retry/replan/stop 的 `RecoveryDecision`；
-  无项目内依赖，由 StageRuntime 调用。
-- [`tasking/stage_runtime.py`](../../python/winpilot_home/winpilot/tasking/stage_runtime.py) —
-  **Legacy Task Stage owner**。`StageRuntime.execute()` 做 capability preflight、artifact/evidence
-  registry、execution context、conversation/interaction/communication/runner stage 分派、recovery
-  与 completion；`task_stage_handler()` 适配 ARP `TASK_STAGE`。依赖 `agent.router/tools/profile`、
-  `orchestrator`、perception、Tasking 其余模块/log；由 `orchestrator.adapters.default_handlers`
-  函数内 lazy import，current vNext 不使用。
-- [`tasking/visual_appearance.py`](../../python/winpilot_home/winpilot/tasking/visual_appearance.py) —
-  **Legacy visual helper**。`inventory_frame_appearance/match_role_colours` 用 cv2/numpy 统计当前帧
-  颜色族、组件 topology；依赖 `utils`，由 typed interaction planner 使用。
-- [`tasking/visual_effects.py`](../../python/winpilot_home/winpilot/tasking/visual_effects.py) — **Legacy**。
-  `verify_pointer_paths_in_frames`、direct manipulation、gesture realization/freehand completion 等
-  基于 pre/post 图和路径做局部 causal proof；依赖 `perception/interaction` 与 cv2/numpy，由
-  InteractionStageEngine 使用。
-- [`tasking/visual_geometry.py`](../../python/winpilot_home/winpilot/tasking/visual_geometry.py) —
-  **Legacy**。`refine_interaction_geometry()` 以 masks、IoU、circle/region/partition policy 将 typed
-  plan 锚到像素，并可调用 guided path；依赖 `interaction/visual_path/visual_regions` 与 cv2/numpy，
-  由 InteractionStageEngine 使用。
-- [`tasking/visual_path.py`](../../python/winpilot_home/winpilot/tasking/visual_path.py) — **Legacy**。
-  `refine_guided_drag_path()` 通过 surface colour、障碍 mask、A*、safe simplification 和 minimum
-  clearance 生成受约束拖拽路径；无项目内依赖，供 visual_geometry 与测试使用。它没有接入
-  current Atomic adapter，不能用来暗中修 MiMo corridor 参数。
-- [`tasking/visual_regions.py`](../../python/winpilot_home/winpilot/tasking/visual_regions.py) — **Legacy**。
-  `inventory/resolve_visible_bounded_region` 与 partition/index/subregion resolver 从像素边界、线族、
-  anchor 推断通用 region；无项目内依赖，供 interaction/visual_geometry 使用。
+- [	asking/__init__.py](../../python/winpilot_home/winpilot/tasking/__init__.py) — 只重导出
+  rtifacts/evidence/execution_context。
+- [	asking/artifacts.py](../../python/winpilot_home/winpilot/tasking/artifacts.py) — **vNext/Studio
+  共享**。run-scoped ArtifactStore（managed user artifact 与 transient observation），
+  vNext 截图工件与 /api/v2/runs/{id}/artifacts/{aid} 使用。
+- [	asking/execution_context.py](../../python/winpilot_home/winpilot/tasking/execution_context.py) —
+  **vNext 共享**。capture_desktop_workspace_context 服务 /api/v2/desktop-context 租约交接。
+- [	asking/evidence.py](../../python/winpilot_home/winpilot/tasking/evidence.py) — **Studio 共享**。
+  EvidenceRegistry 由 adapters _skill_handler 使用。
 
 ## 5. 最容易混淆的同名 owner
 
@@ -1095,23 +889,22 @@ Goal Admission 不先解析 intent，也不把完整目标编译成 stages。
 | --- | ---: |
 | `serve.py` + `winpilot/*.py` + `winpilot/bin/*` | 11 |
 | `action/` | 8 |
-| `agent/` | 35 |
-| `eval/` | 6 |
+| `agent/` | 21 |
 | `fast/` | 13 |
-| `integrations/` | 4 |
+| `integrations/` | 3 |
 | `memory/` | 13 |
 | `modeling/` | 6 |
-| `orchestrator/` | 11 |
+| `orchestrator/` | 10 |
 | `perception/` | 20 |
 | `recorder/` | 5 |
-| `tasking/` | 22 |
+| `tasking/` | 3 |
 | `utils/` | 6 |
 | `visual_runtime/` | 6 |
 | `vnext/` | 44 |
-| **总计** | **210** |
+| **总计** | **169** |
 
-本次机器集合比对结果：`scope=210`、`document entries=210`、`unique=210`、
-`missing=0`、`extra=0`、`duplicates=0`。复核命令如下：
+本次机器集合比对按当前工作树执行（`eval/`、AgentRunner 半边与 Task Contract 链已删除，
+条目数相应减少）；复核命令如下：
 
 ```powershell
 $scope = @(git ls-files -- 'python/winpilot_home/winpilot/**') + @(

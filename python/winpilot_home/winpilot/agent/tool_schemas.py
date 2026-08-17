@@ -847,8 +847,7 @@ def tool_schemas(
     """
     tools = []
     include_file_tools = allow_files or coding_runtime
-    from ..tasking.capability import tools_for_capabilities
-    required_tool_names = set(stage_tools) | tools_for_capabilities(required_capabilities)
+    required_tool_names = set(stage_tools)
 
     if allow_shell and shell.shell_enabled():
         tools.extend([

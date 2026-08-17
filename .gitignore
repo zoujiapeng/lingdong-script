@@ -10,8 +10,6 @@ __pycache__/
 Thumbs.db
 screenshot_*.png
 *.js.map
-# WinPilot webui source: vanilla JS, not build artifacts — must be tracked
-!python/winpilot_home/webui/*.js
 python-runtime/
 
 # Build assets (icons, screenshots)
@@ -96,7 +94,6 @@ python/winpilot_home/config.json
 python/winpilot_home/traces/
 python/winpilot_home/scripts/
 python/winpilot_home/evals/
-python/winpilot_home/winpilot/eval/results/
 python/winpilot_home/templates_img/
 python/winpilot_home/experience_memory.json
 python/winpilot_home/memory.db

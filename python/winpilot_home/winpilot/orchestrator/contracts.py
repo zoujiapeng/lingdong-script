@@ -188,21 +188,10 @@ def _validate_node_config(node: ArpNode) -> list[str]:
         if not any(str(config.get(key) or "").strip() for key in ("script", "task", "memory_id")):
             errors.append(f"{prefix} requires config.script, config.task, or config.memory_id")
     elif node.kind == ArpNodeKind.TASK_STAGE:
-        stage = config.get("stage")
-        if not isinstance(stage, dict):
-            errors.append(f"{prefix} requires config.stage object")
-        else:
-            try:
-                from ..tasking.contracts import TaskStage
-
-                parsed = TaskStage.model_validate(stage)
-                if parsed.execution is None:
-                    errors.append(f"{prefix} requires a capability selection")
-                elif not parsed.execution.satisfiable:
-                    missing = ", ".join(parsed.execution.missing_capabilities)
-                    errors.append(f"{prefix} has missing capabilities: {missing}")
-            except Exception as exc:
-                errors.append(f"{prefix} has invalid typed stage: {exc}")
+        errors.append(
+            f"{prefix} typed task stages were removed with the legacy task-contract "
+            "chain; historical graphs must be migrated to action_batch/replay_step"
+        )
     elif node.kind == ArpNodeKind.CONDITION:
         if not str(config.get("source") or "").strip():
             errors.append(f"{prefix} requires config.source")

@@ -88,9 +88,6 @@ _DEFAULTS: dict[str, Any] = {
         "world_model": True,
         "replan_on_fail": True,
         "planning_enabled": True,
-        # Keep app/domain recipes opt-in.  The compact visual contract is the
-        # default; matching a task keyword must not silently expand it again.
-        "playbooks_enabled": False,
         "prompt_style": "compact",
         "tool_profile": "auto",
         "session_memory": True,

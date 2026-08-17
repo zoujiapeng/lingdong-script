@@ -2,6 +2,19 @@ import threading
 import time
 
 
+def _graph(nodes, edges, **extra):
+    from winpilot.orchestrator.contracts import ArpGraph, ArpPolicy
+
+    return ArpGraph(
+        id=extra.pop("id", "graph-test"),
+        name=extra.pop("name", "Test graph"),
+        nodes=nodes,
+        edges=edges,
+        policy=extra.pop("policy", ArpPolicy(require_evidence_on_done=False)),
+        **extra,
+    )
+
+
 def test_runtime_preview_preserves_replay_evidence_structure():
     from winpilot.orchestrator.runtime import _json_preview
 
@@ -41,113 +54,6 @@ def test_interaction_snapshot_never_drops_causal_action_or_verification_fields()
     assert preview["last_mutating_plan"]["actions"][0]["action"] == "drag"
     assert preview["last_executed_action"]["transaction_id"] == "tx-1"
     assert preview["last_local_verification"]["verified"] is True
-
-
-def test_stage_trace_preserves_model_capture_and_contract_budget_metrics():
-    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
-    from winpilot.orchestrator.runtime import ArpExecution, NodeResult
-
-    graph = _graph(
-        [
-            ArpNode(id="start", kind=ArpNodeKind.START),
-            ArpNode(
-                id="stage-02-infer_interaction",
-                kind=ArpNodeKind.TASK_STAGE,
-                config={"stage": {
-                    "id": "stage-02-infer_interaction",
-                    "type": "InferInteraction",
-                    "name": "infer interaction",
-                    "execution": {"satisfiable": True},
-                }},
-            ),
-            ArpNode(id="end", kind=ArpNodeKind.END),
-        ],
-        [
-            ArpEdge(
-                id="start-stage",
-                source="start",
-                target="stage-02-infer_interaction",
-            ),
-            ArpEdge(
-                id="stage-end",
-                source="stage-02-infer_interaction",
-                target="end",
-            ),
-        ],
-    )
-    huge_state = {
-        "planned_action": {
-            f"large-{index}": "x" * 500
-            for index in range(600)
-        },
-        "budget": {
-            "model_calls_used": 2,
-            "model_calls_limit": 8,
-            "replans_used": 1,
-            "replans_limit": 2,
-        },
-    }
-
-    def handler(_node, _context, _stop_event):
-        return NodeResult(output={
-            "stage_id": "stage-02-infer_interaction",
-            "stage_type": "InferInteraction",
-            "status": "done",
-            "model_calls": 1,
-            "model_elapsed_ms": 1234,
-            "controller_elapsed_ms": 17,
-            "capture_elapsed_ms": 41,
-            "selected_evidence_providers": {
-                "interaction.protocol_inferred": "interaction_protocol_inference",
-            },
-            # Deliberately place the budget after a payload larger than the
-            # generic history preview budget.  Dedicated runtime_metrics must
-            # keep the numbers exact rather than depending on traversal order.
-            "interaction_state": huge_state,
-        })
-
-    snapshot = ArpExecution(
-        graph,
-        {ArpNodeKind.TASK_STAGE: handler},
-        run_id="trace-performance-proof",
-    ).run()
-
-    trace = snapshot["stage_trace"][0]
-
-    assert trace["model_calls"] == 1
-    assert trace["model_elapsed_ms"] == 1234
-    assert trace["controller_elapsed_ms"] == 17
-    assert trace["capture_elapsed_ms"] == 41
-    assert trace["selected_evidence_providers"] == {
-        "interaction.protocol_inferred": "interaction_protocol_inference",
-    }
-    assert trace["budget"] == {
-        "model_calls_used": 2,
-        "model_calls_limit": 8,
-        "replans_used": 1,
-        "replans_limit": 2,
-    }
-    stage_history = next(
-        item for item in snapshot["history"]
-        if item["kind"] == "task_stage"
-    )
-    assert stage_history["runtime_metrics"]["model_elapsed_ms"] == 1234
-    assert stage_history["runtime_metrics"]["budget"] == trace["budget"]
-
-
-def _graph(nodes, edges, **extra):
-    from winpilot.orchestrator.contracts import ArpGraph, ArpPolicy
-
-    return ArpGraph(
-        id=extra.pop("id", "graph-test"),
-        name=extra.pop("name", "Test graph"),
-        nodes=nodes,
-        edges=edges,
-        policy=extra.pop("policy", ArpPolicy(require_evidence_on_done=False)),
-        **extra,
-    )
-
-
 def test_graph_validation_rejects_missing_route_target():
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, validate_graph
 

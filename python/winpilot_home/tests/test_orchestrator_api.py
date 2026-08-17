@@ -64,8 +64,6 @@ def client(monkeypatch):
     from winpilot import server
 
     with server.STATE.lock:
-        server.STATE.runner = None
-        server.STATE.runners.clear()
         server.STATE.run_jobs.clear()
     server.RUNTIME_JOBS.clear_finished()
     monkeypatch.setattr(server.trace_mod.RECORDER, "start", lambda run_id: None)
@@ -339,10 +337,8 @@ def test_public_trace_routes_reject_private_runtime_evidence_paths(
     )
     monkeypatch.setattr(server, "TRACES_DIR", traces)
     monkeypatch.setattr(server.trace_mod, "TRACES_DIR", traces)
-    monkeypatch.setattr(server.eval_summary, "TRACES_DIR", traces)
     downstream_calls: list[str] = []
     original_read_trace = server.trace_mod.read_trace
-    original_summarize_trace = server.eval_summary.summarize_trace
     original_export_script = server.trace_mod.export_script
     original_export_ir = server.trace_mod.export_automation_ir
     original_ensure_inside = server._ensure_inside
@@ -350,10 +346,6 @@ def test_public_trace_routes_reject_private_runtime_evidence_paths(
     def observed_read_trace(*args, **kwargs):
         downstream_calls.append("read_trace")
         return original_read_trace(*args, **kwargs)
-
-    def observed_summarize_trace(*args, **kwargs):
-        downstream_calls.append("summarize_trace")
-        return original_summarize_trace(*args, **kwargs)
 
     def observed_export_script(*args, **kwargs):
         downstream_calls.append("export_script")
@@ -371,11 +363,6 @@ def test_public_trace_routes_reject_private_runtime_evidence_paths(
         server.trace_mod,
         "read_trace",
         observed_read_trace,
-    )
-    monkeypatch.setattr(
-        server.eval_summary,
-        "summarize_trace",
-        observed_summarize_trace,
     )
     monkeypatch.setattr(
         server.trace_mod,
@@ -396,15 +383,13 @@ def test_public_trace_routes_reject_private_runtime_evidence_paths(
     private_urls = (
         "/api/trace/"
         "vnext_runtime_evidence%5Crun-private%5Cevidence",
-        "/api/trace/"
-        "vnext_runtime_evidence%5Crun-private%5Cevidence/summary",
         "/api/export/"
         "vnext_runtime_evidence%5Crun-private%5Cevidence",
         "/api/export/"
         "vnext_runtime_evidence%5Crun-private%5Cevidence/ir",
     )
-    responses = [client.get(url) for url in private_urls[:2]]
-    responses.extend(client.post(url) for url in private_urls[2:])
+    responses = [client.get(url) for url in private_urls[:1]]
+    responses.extend(client.post(url) for url in private_urls[1:])
     responses.append(
         client.get(
             "/api/trace/vnext_runtime_evidence/shot/"
@@ -466,12 +451,8 @@ def test_public_trace_routes_preserve_safe_historical_trace_and_image(
     image.write_bytes(b"safe-public-trace-image")
     monkeypatch.setattr(server, "TRACES_DIR", traces)
     monkeypatch.setattr(server.trace_mod, "TRACES_DIR", traces)
-    monkeypatch.setattr(server.eval_summary, "TRACES_DIR", traces)
 
     detail = client.get("/api/trace/historical%20trace")
-    summary = client.get(
-        "/api/trace/historical%20trace/summary"
-    )
     screenshot = client.get(
         "/api/trace/historical%20trace/shot/after%201.jpg"
     )
@@ -492,8 +473,6 @@ def test_public_trace_routes_preserve_safe_historical_trace_and_image(
         "malformed_lines": 0,
         "truncated": False,
     }
-    assert summary.status_code == 200
-    assert summary.json()["run_id"] == run_id
     assert screenshot.status_code == 200
     assert screenshot.content == b"safe-public-trace-image"
 
@@ -589,13 +568,8 @@ def test_vnext_selection_fails_closed_when_live_agent_is_disabled(
             },
         },
     )
-    monkeypatch.setattr(
-        server.TaskContractCompiler,
-        "compile_graph",
-        lambda *_args, **_kwargs: pytest.fail(
-            "vNext must not invoke the legacy compiler"
-        ),
-    )
+    # The legacy TaskContractCompiler was deleted with the tasking chain;
+    # there is no compile path left for a vNext selection to invoke.
     monkeypatch.setattr(
         server,
         "_start_arp_execution",
@@ -645,13 +619,8 @@ def test_vnext_selection_is_frozen_once_without_legacy_compilation(
         },
     )
     monkeypatch.setattr(server.CONFIG, "snapshot", lambda: frozen)
-    monkeypatch.setattr(
-        server.TaskContractCompiler,
-        "compile_graph",
-        lambda *_args, **_kwargs: pytest.fail(
-            "vNext must not invoke the legacy compiler"
-        ),
-    )
+    # The legacy TaskContractCompiler was deleted with the tasking chain;
+    # there is no compile path left for a vNext selection to invoke.
 
     def start(graph, inputs, *, runtime_version, frozen_config):
         calls.append((graph, inputs, runtime_version, frozen_config))
@@ -712,13 +681,8 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
         and thread_id == "thread-existing"
         else pytest.fail("goal admission lost the requested thread binding"),
     )
-    monkeypatch.setattr(
-        server.TaskContractCompiler,
-        "compile_graph",
-        lambda *_args, **_kwargs: pytest.fail(
-            "product goal admission must not invoke the legacy compiler"
-        ),
-    )
+    # The legacy TaskContractCompiler was deleted with the tasking chain;
+    # product goal admission has no compile path left to invoke.
 
     def start(graph, inputs, **kwargs):
         calls.append((graph, inputs, kwargs))
@@ -818,13 +782,7 @@ def test_product_goal_admission_fails_closed_without_legacy_fallback(
         "snapshot",
         lambda: {"vnext": {"live_agent_enabled": False}},
     )
-    monkeypatch.setattr(
-        server.TaskContractCompiler,
-        "compile_graph",
-        lambda *_args, **_kwargs: pytest.fail(
-            "disabled vNext must not compile a legacy task"
-        ),
-    )
+    # The legacy TaskContractCompiler was deleted with the tasking chain.
     monkeypatch.setattr(
         server,
         "_start_arp_execution",
@@ -1319,140 +1277,6 @@ def test_vnext_submit_failure_rolls_back_execution_and_job_binding(
     assert execution.to_dict()["no_legacy_fallback"] is True
     with server.STATE.lock:
         assert execution.run_id not in server.STATE.run_jobs
-
-
-def test_frontend_task_contract_compile_endpoint_returns_typed_satisfiable_graph(client):
-    task = "用画板画一只鸟然后截图用QQ发给测试联系人"
-    response = client.post(
-        "/api/v2/task-contracts/compile",
-        json={"task": task, "max_steps": 50, "require_gui": True},
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["contract"]["satisfiable"] is True
-    assert [stage["type"] for stage in data["contract"]["stages"]] == [
-        "ExecuteDesktopTask",
-    ]
-    assert data["contract"]["stages"][0]["parameters"]["goal"] == task
-    assert "task_stage" in {node["kind"] for node in data["graph"]["nodes"]}
-    assert "agent_goal" not in {node["kind"] for node in data["graph"]["nodes"]}
-
-
-def test_frontend_compile_cold_start_disables_skill_and_memory_paths(client):
-    response = client.post(
-        "/api/v2/task-contracts/compile",
-        json={
-            "task": "用画板画一只鸟然后截图用QQ发给测试联系人",
-            "max_steps": 50,
-            "cold_start": True,
-        },
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["contract"]["experience_policy"] == "disabled"
-    assert data["graph"]["metadata"]["experience_policy"] == "disabled"
-    assert all(stage["allow_skill_replay"] is False for stage in data["contract"]["stages"])
-    assert "skill_replay" not in {node["kind"] for node in data["graph"]["nodes"]}
-
-
-def test_visible_client_can_require_the_lossless_generic_gui_route(client):
-    task = "把这个弄好"
-    response = client.post(
-        "/api/v2/task-contracts/compile",
-        json={"task": task, "cold_start": True, "require_gui": True},
-    )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert [stage["type"] for stage in data["contract"]["stages"]] == [
-        "ExecuteDesktopTask",
-    ]
-    assert data["contract"]["stages"][0]["parameters"]["goal"] == task
-    assert isinstance(data["graph"]["metadata"]["session_generation"], int)
-
-
-def test_session_clear_invalidates_a_previously_compiled_graph(client):
-    compiled = client.post(
-        "/api/v2/task-contracts/compile",
-        json={"task": "把这个弄好", "cold_start": True, "require_gui": True},
-    )
-    assert compiled.status_code == 200
-    graph = compiled.json()["graph"]
-
-    cleared = client.delete("/api/session")
-    assert cleared.status_code == 200
-    assert isinstance(cleared.json()["generation"], int)
-
-    started = client.post(
-        "/api/v2/arp/runs",
-        json={"graph": graph, "inputs": {}},
-    )
-    assert started.status_code == 409
-    assert "Session context changed" in started.json()["detail"]
-
-
-def test_compile_defers_discoverable_fields_to_the_live_desktop(client):
-    response = client.post(
-        "/api/v2/task-contracts/compile",
-        json={"task": "把截图发给测试联系人", "max_steps": 20},
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["needs_input"] is False
-    assert data["contract"]["satisfiable"] is True
-    assert data["clarification_questions"] == []
-    assert [stage["type"] for stage in data["contract"]["stages"]] == [
-        "ExecuteDesktopTask",
-    ]
-    stage = data["contract"]["stages"][0]
-    assert stage["parameters"]["runtime_resolution_fields"] == ["channel"]
-    assert stage["parameters"]["preserve_original_intent"] is True
-
-
-def test_validate_and_run_arp_graph_through_api(client):
-    graph = _graph_payload()
-
-    validation = client.post("/api/v2/arp/validate", json=graph)
-    assert validation.status_code == 200
-    assert validation.json()["valid"] is True
-
-    created = client.post("/api/v2/arp/runs", json={"graph": graph, "inputs": {"source": "test"}})
-    assert created.status_code == 200
-    assert created.json()["runtime_version"] == "legacy"
-    assert created.json()["run"]["runtime_version"] == "legacy"
-    run_id = created.json()["run_id"]
-
-    direct = client.get(f"/api/v2/arp/runs/{run_id}")
-    assert direct.status_code == 200
-    assert direct.json()["run"]["run_id"] == run_id
-
-    deadline = time.time() + 2
-    detail = None
-    while time.time() < deadline:
-        response = client.get(f"/api/v2/runs/{run_id}")
-        assert response.status_code == 200
-        detail = response.json()
-        if detail["arp"]["status"] in {"done", "failed"}:
-            break
-        time.sleep(0.01)
-
-    assert detail is not None
-    assert detail["arp"]["status"] == "done"
-    assert detail["arp"]["variables"]["ready"] is True
-    assert detail["run"]["kind"] == "arp"
-    assert detail["run"]["status"] == "done"
-
-    jobs = client.get("/api/v2/jobs").json()["jobs"]
-    job = next(item for item in jobs if item["metadata"].get("run_id") == run_id)
-    assert job["kind"] == "arp"
-    assert job["status"] == "done"
-    assert "result" not in job
-
-    platform_jobs = client.get("/api/v2/platform").json()["status"]["runtime_jobs"]
-    platform_job = next(item for item in platform_jobs if item["metadata"].get("run_id") == run_id)
-    assert "result" not in platform_job
-
-
 def test_generic_run_cancel_route_cancels_arp_runtime_job(client):
     graph = {
         "format": "arp/1",
@@ -1522,34 +1346,6 @@ def test_generic_run_pause_and_resume_routes_control_arp_run(client):
     assert resumed.json()["arp"]["status"] in {"queued", "running"}
     assert client.post(f"/api/v2/runs/{run_id}/resume").status_code == 409
     assert client.post(f"/api/v2/runs/{run_id}/cancel").status_code == 200
-
-
-def test_generic_run_cancel_route_also_cancels_agent_job(client):
-    from winpilot import server
-
-    run_id = "agent-generic-cancel"
-    stop_event = threading.Event()
-    runner = SimpleNamespace(run_id=run_id, stop_event=stop_event)
-
-    def wait_for_cancel(runtime_stop):
-        runtime_stop.wait(2)
-        return {"ok": False, "error": "canceled"}
-
-    job = server.RUNTIME_JOBS.submit(
-        "agent",
-        wait_for_cancel,
-        metadata={"run_id": run_id, "task": "cancel me"},
-        stop_event=stop_event,
-    )
-    server.STATE.register_runner(runner, job.id)
-
-    response = client.post(f"/api/v2/runs/{run_id}/cancel")
-
-    assert response.status_code == 200
-    assert stop_event.is_set()
-    assert response.json()["arp"] is None
-
-
 def test_generic_run_cancel_rejects_stale_active_projection(client, monkeypatch):
     from winpilot import server
 
@@ -1688,51 +1484,19 @@ def test_common_mimo_pro_alias_is_canonicalized():
     assert patch["vlm"]["model"] == "mimo-v2.5-pro"
 
 
-def test_chatgpt_desktop_integration_exposes_real_mcp_handshake(monkeypatch):
-    pytest.importorskip("mcp")
+def test_chatgpt_desktop_integration_reports_legacy_bridge_removed():
     from fastapi.testclient import TestClient
     from winpilot import server
 
-    monkeypatch.setattr(server.ocr, "warm_async", lambda: False)
-    headers = {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
-    }
-    initialize = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {"name": "winpilot-test", "version": "1"},
-        },
-    }
-
     with TestClient(server.app, base_url="http://127.0.0.1") as mcp_client:
         integration = mcp_client.get("/api/v2/integrations/chatgpt")
-        handshake = mcp_client.post("/mcp", headers=headers, json=initialize)
-        tools = mcp_client.post(
-            "/mcp",
-            headers=headers,
-            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-        )
-        active_integration = mcp_client.get("/api/v2/integrations/chatgpt")
 
     assert integration.status_code == 200
+    assert integration.json()["ok"] is False
+    assert integration.json()["connection_status"] == "removed"
+    assert integration.json()["server_ready"] is False
+    assert integration.json()["allow_desktop_mutation"] is False
     assert integration.json()["requires_openai_api_key"] is False
-    assert integration.json()["server_ready"] is True
-    assert integration.json()["endpoint"] == "http://127.0.0.1/mcp"
-    assert handshake.status_code == 200
-    assert handshake.json()["result"]["serverInfo"]["name"] == "WinPilot GUI Agent + ARP"
-    tool_names = {tool["name"] for tool in tools.json()["result"]["tools"]}
-    assert {"observe_desktop", "execute_gui_subgoal", "run_arp_graph"} <= tool_names
-    active = active_integration.json()
-    assert active["client_active"] is True
-    assert active["connection_status"] == "active"
-    assert active["request_count"] >= 2
-    assert active["security_mode"] == "loopback_only"
-    assert active["proxy_bypass"] == "NO_PROXY=127.0.0.1,localhost"
 
 
 def test_flow_fragment_job_waits_for_interactive_resource_and_is_cancelable(

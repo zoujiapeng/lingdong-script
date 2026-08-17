@@ -26,10 +26,10 @@ function scriptFixture(): FlowScript {
     nodes: [
       { id: 'start', type: 'start', x: 10, y: 20, params: {} },
       {
-        id: 'goal', type: 'agent_goal', x: 10, y: 120,
-        label: 'Find report',
+        id: 'goal', type: 'human_gate', x: 10, y: 120,
+        label: 'Approval',
         params: {
-          goal: 'Open the report', success_criteria: 'Report table is visible', max_steps: 20,
+          message: 'Continue?', timeout_s: 60,
           retry_max_attempts: 2, retry_delay_ms: 250,
         },
       },
@@ -45,7 +45,7 @@ function scriptFixture(): FlowScript {
     ],
     edges: [
       { id: 'e1', from_node: 'start', from_port: 'output', to_node: 'goal', to_port: 'input' },
-      { id: 'e2', from_node: 'goal', from_port: 'output', to_node: 'batch', to_port: 'input' },
+      { id: 'e2', from_node: 'goal', from_port: 'approved', to_node: 'batch', to_port: 'input' },
       { id: 'e3', from_node: 'batch', from_port: 'output', to_node: 'gate', to_port: 'input' },
       { id: 'e4', from_node: 'gate', from_port: 'pass', to_node: 'end', to_port: 'input' },
     ],
@@ -348,7 +348,6 @@ describe('flow to ARP compiler', () => {
     dependency: 'local' | 'desktop' | 'human' | 'model';
     params: Record<string, unknown>;
   }> = [
-    { type: 'agent_goal', dependency: 'model', params: { goal: 'Inspect the visible result' } },
     { type: 'action_batch', dependency: 'desktop', params: { actions: [{ action: 'wait', duration_ms: 0 }] } },
     { type: 'replay_step', dependency: 'desktop', params: { step: { tool: 'ext.delay', seconds: 0 } } },
     { type: 'skill_replay', dependency: 'desktop', params: { script: 'verified.wps.json' } },
@@ -430,7 +429,7 @@ describe('flow to ARP compiler', () => {
 
   it('keeps a complete dependency and locally valid fixture matrix for every editable node', () => {
     expect(new Set(executableNodeMatrix.map((item) => item.type))).toEqual(RUNNABLE_FLOW_NODE_TYPES);
-    expect(executableNodeMatrix.filter((item) => item.dependency === 'model').map((item) => item.type)).toEqual(['agent_goal']);
+    expect(executableNodeMatrix.filter((item) => item.dependency === 'model')).toEqual([]);
 
     for (const item of executableNodeMatrix) {
       const flow = singleNodeFlow(item.type, item.params);
@@ -475,8 +474,9 @@ describe('flow to ARP compiler', () => {
     const goal = graph.nodes.find((node) => node.id === 'goal')!;
     const batch = graph.nodes.find((node) => node.id === 'batch')!;
 
-    expect(goal.kind).toBe('agent_goal');
-    expect(goal.config.goal).toContain('Completion evidence: Report table is visible');
+    expect(goal.kind).toBe('human_gate');
+    expect(goal.config.message).toBe('Continue?');
+    expect(goal.timeout_s).toBe(60);
     expect(goal.retry).toEqual({ max_attempts: 2, delay_ms: 250, backoff: 1 });
     expect(goal.config).not.toHaveProperty('retry_max_attempts');
     expect(batch.config.actions).toEqual([
@@ -484,6 +484,23 @@ describe('flow to ARP compiler', () => {
     ]);
     expect(graph.variables).toEqual({ account: 'demo' });
     expect(graph.edges.at(-1)?.branch).toBe('pass');
+  });
+
+  it('fails closed for removed agent_goal nodes in historical documents', () => {
+    const script = scriptFixture();
+    script.nodes = [
+      { id: 'start', type: 'start', x: 0, y: 0, params: {} },
+      { id: 'goal', type: 'agent_goal', x: 100, y: 0, params: { goal: 'do it' } },
+      { id: 'end', type: 'end', x: 200, y: 0, params: {} },
+    ];
+    script.edges = [
+      { id: 'e1', from_node: 'start', from_port: 'output', to_node: 'goal', to_port: 'input' },
+      { id: 'e2', from_node: 'goal', from_port: 'output', to_node: 'end', to_port: 'input' },
+    ];
+    const graph = flowToArpGraph(script);
+    expect(graph.nodes.find((node) => node.id === 'goal')?.kind).toBe('legacy_flow');
+    expect((graph.metadata.compilation as { legacy_nodes?: number }).legacy_nodes).toBe(1);
+    expect(validateAutomationLocally(automationIrFromFlowScript(script)).valid).toBe(false);
   });
 
   it('maps delays and supported variable conditions to runtime built-ins', () => {

@@ -3497,7 +3497,7 @@ class _PreparedHandler:
         run_id: str,
         mission_id: str,
     ) -> _LiveAgentStatusProvider:
-        from ..memory import experience
+        from ..config import MEMORY_DB_PATH, MEMORY_PATH, ROOT_DIR
 
         config_snapshot = _plain_dict(
             self._dependencies.config_snapshot(),
@@ -3512,7 +3512,14 @@ class _PreparedHandler:
             and config_snapshot["agent"].get("experience_memory") is True
         )
         try:
-            store_present = experience.memory_store_present()
+            db_path = Path(MEMORY_DB_PATH)
+            mem_path = Path(MEMORY_PATH)
+            if (
+                db_path == Path(ROOT_DIR) / "memory.db"
+                and mem_path != Path(ROOT_DIR) / "experience_memory.json"
+            ):
+                db_path = mem_path.with_suffix(".db")
+            store_present = db_path.is_file()
         except Exception:
             store_present = False
         return _LiveAgentStatusProvider(

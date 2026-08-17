@@ -113,10 +113,9 @@ class ToolSession(
         }
         try:
             if task_intent is None:
-                from ..tasking.intent import TaskIntentParser
-
-                parsed_intent = TaskIntentParser().parse(self.task)
-                intent_payload = parsed_intent.model_dump(mode="json")
+                # The typed task-contract parser was removed with the legacy
+                # tasking chain; deterministic callers keep an empty intent.
+                intent_payload: dict[str, Any] = {}
             elif hasattr(task_intent, "model_dump"):
                 intent_payload = task_intent.model_dump(mode="json")
             elif isinstance(task_intent, dict):

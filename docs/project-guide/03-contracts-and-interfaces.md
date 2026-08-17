@@ -384,14 +384,11 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 | --- | --- | --- |
 | GET | `/api/ping` | 无认证轻量存活探针 |
 | GET | `/api/status` | Runtime身份、当前服务状态；托管 readiness 使用 |
-| POST | `/api/chat` | Legacy Agent请求；不是产品主链 |
-| POST | `/api/stop` | Legacy Agent停止 |
-| POST | `/api/interject` | Legacy Agent插话 |
 | GET | `/api/v2/platform` | Renderer总览、runtime/model/capabilities投影 |
-| GET | `/api/v2/capabilities` | ARP/Studio capability catalog |
-| GET | `/api/v2/integrations/chatgpt` | 外部 ChatGPT desktop bridge状态 |
-| GET | `/` | Legacy/诊断 Web UI |
-| GET | `/static/*` | 挂载的 Legacy/诊断 Web UI 静态资源 |
+| GET | `/api/v2/integrations/chatgpt` | 恒报告旧 ChatGPT desktop bridge 已删除（供设置面板显示真实状态） |
+
+`/api/chat`、`/api/stop`、`/api/interject`、`/api/v2/capabilities`、`/api/session`、`/`、`/static/*`
+与 `/mcp`（旧 ChatGPT desktop MCP mount）已随旧 Agent 线删除。
 
 ### 14.2 Run、Job 与 artifact
 
@@ -423,7 +420,6 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | POST | `/api/v2/arp/validate` | 校验 ARP graph |
-| POST | `/api/v2/task-contracts/compile` | Legacy/Studio Task Contract编译 |
 | POST | `/api/v2/automation-ir/validate` | 校验 Automation IR |
 | POST | `/api/v2/flow-fragments/proposals` | 异步生成惰性编辑器片段；无执行权 |
 | POST | `/api/v2/arp/runs` | Studio/开发直接启动显式graph/runtime |
@@ -432,22 +428,21 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 | POST | `/api/v2/arp/runs/{run_id}/cancel` | ARP取消 |
 | POST | `/api/v2/arp/runs/{run_id}/gate` | human gate决策 |
 
-### 14.5 配置、调度与系统
+`POST /api/v2/task-contracts/compile`（Task Contract 编译）已随旧任务契约链删除。
+
+### 14.5 配置与系统
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| GET/POST | `/api/agent-schedules` | 列出/创建Legacy Agent schedule |
-| PATCH/DELETE | `/api/agent-schedules/{schedule_id}` | 修改/删除schedule |
-| POST | `/api/elevate` | 兼容提权入口 |
 | GET/PATCH | `/api/config` | 读/写允许的本地配置 |
+
+`/api/agent-schedules`（Legacy Agent 定时任务）已随旧 Agent 线删除。
 
 ### 14.6 Trace、导出与脚本
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET | `/api/traces` | trace列表 |
-| GET | `/api/evals` | eval汇总 |
-| GET | `/api/trace/{run_id}/summary` | trace摘要 |
 | GET | `/api/trace/{run_id}` | 完整trace投影 |
 | GET | `/api/trace/{run_id}/shot/{name}` | trace截图 |
 | POST | `/api/export/thread/{thread_id}/ir` | 对话run导出 Automation IR |
@@ -482,7 +477,8 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 | POST | `/api/memory/{recipe_id}/verification-runs` | 启动验证replay |
 | GET | `/api/memory/{recipe_id}/verification-runs/{replay_id}` | 查询验证run |
 | POST | `/api/memory/{recipe_id}/verify` | 接受指定验证结果 |
-| GET/DELETE | `/api/session` | Legacy session读/清理 |
+
+`GET/DELETE /api/session`（Legacy Agent 会话记忆）已随旧 Agent 线删除。
 
 ### 14.8 事件
 

@@ -409,20 +409,29 @@ Renderer 的默认 legacy `startGraph/compileTask` 消费者已删除。该合�
 
 全面审查确认以下问题仍在代码中，文档不能掩盖：
 
-1. `/api/v2/task-contracts/compile`、`/api/v2/arp/runs` 和 Legacy runtime 仍为 Studio/兼容调用存活；必须先清点并迁移消费者，再删除提供者。
-2. `agent/loop.py` 体积过大；`FrameAuthority` 已移出，`FastGuiController`、`RunStateMachine` 与 `FailureRecoveryLayer` 的旧逻辑尚未全部迁出和去重。
-3. `TaskContractCompiler`、`StageRuntime`、`InteractionStageEngine`、`SubgoalExecutor` 和 Controller 存在重复解释。
-4. 某些 communication/application adapter 仍含布局、别名或任务族特化。
+1. ✅ 已删（2026-08-17 分支 `analysis/new-vs-old-architecture`，未合入）：`/api/v2/task-contracts/compile`、
+   TaskContractCompiler、StageRuntime/InteractionStageEngine、`/api/chat`、`/api/stop`、
+   `webui/`、`/mcp` ChatGPT MCP、`eval/`、`/api/session`、`/api/agent-schedules`、
+   AgentRunner 半边（loop/router/session/done_verifier/failure_classifier 等 15 文件）、
+   `src/ai-interface/`、`python/lobster_mcp/`、`scripts/gui_eval_run.py`。`tasking/`
+   只剩 `artifacts/execution_context/evidence` 三个共享模块。
+2. `agent/` 剩余 21 文件是 Studio ACTION_BATCH 的确定性执行器闭包
+   （`ToolSession`+mixins），`FastGuiController` 与 `SubgoalExecutor` 仍在 `fast/`；
+   在把 Studio ACTION_BATCH 迁移到 `fast.controller` 直连之前不能删除。
+3. `TaskContractCompiler`、`StageRuntime`、`InteractionStageEngine` 已删除；
+   `SubgoalExecutor` 与 Controller 的重复解释仍是 Studio 兼容面债务。
+4. 某些 communication/application adapter 仍含布局、别名或任务族特化
+   （`agent/desktop_tools.py` 的通信适配器方法已删；`tasking.adapters` 已删）。
 5. 原生配置已默认关闭 UIA/OCR，但 `fusion.observe` 等兼容入口仍保留旧 provider 顺序；必须继续防止非默认调用面把结构化信号升级成视觉语义或失败后的自动 fallback cascade。
-6. 自主 Agent IPC/CLI 已删除；`/api/chat`、scheduler、Legacy ARP、FlowScript、旧 feature/F9 engine 和本地 7880 API 仍增加维护面。
+6. `/api/v2/arp/runs`（Studio 显式图执行）、FlowScript、旧 feature/F9 engine 和本地 7880
+   API 仍是兼容面；`/api/chat`、scheduler、Legacy ARP goal 编译、webui 已删。
 7. 当前整改版本尚未用真实 Electron 客户端完成 11 个任务和混合长任务的全量验收，不能继承历史 run 的通过结论或据此宣称通用成功率。
 8. connector transport 已有 fixture 与 GitHub 官方 remote 实证，但首个官方 GitHub
    干净用户任务仍因模型选择未批准工具并停止失败；不得加入专属 formatter 或参数
    修正。原生
    Responses/Anthropic/Gemini 仍未经过真实 provider 调用，只能保持 provisional。
 9. connector 的 run trace 尚未持久化无正文 physical receipt；旧
-   `agent/mcp_tools.py` 仍是绕过 Gateway 的 Legacy 重复 owner。这些是待证据驱动删除的
-   基础设施债务，不解释当前 GitHub 模型工具选择失败。
+   `agent/mcp_tools.py`（绕过 Gateway 的 Legacy 重复 owner）已随删除批次移除。
 
 当前切片的删除顺序与退出门见 [vNext 迁移](vnext-migration.md)，更广泛的整改优先级见 [GUI Agent 架构审计](GUI_AGENT_ARCHITECTURE_AUDIT.md)。
 

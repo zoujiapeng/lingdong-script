@@ -141,54 +141,6 @@ export const PRESET_TEMPLATES: ScriptTemplate[] = [
       };
     },
   },
-  {
-    id: 'verified-agent-task',
-    name: '有证据的智能任务',
-    description: '把目标交给 GUI Agent，并只在完成门提供新鲜证据后结束',
-    category: 'agent',
-    aliases: ['智能任务', 'agent task', 'verified task'],
-    keywords: ['目标', 'Agent', '完成验证', '证据'],
-    tags: ['agent', 'verification'],
-    createScript: () => {
-      const ids = { start: nanoid(), goal: nanoid(), evidence: nanoid(), end: nanoid() };
-      return {
-        meta: meta('有证据的智能任务', '目标执行与完成证据分离的通用任务流程'),
-        nodes: [
-          { id: ids.start, type: 'start', x: 360, y: 40, params: { label: '开始' }, label: '开始', status: 'idle' },
-          {
-            id: ids.goal,
-            type: 'agent_goal',
-            x: 360,
-            y: 200,
-            params: {
-              goal: '完成当前 GUI 任务，并以最新观察或确定性检查证明最终状态。',
-              success_criteria: '最新屏幕或确定性检查明确证明请求的最终状态已经成立。',
-              max_steps: 24,
-            },
-            label: '智能目标',
-            status: 'idle',
-          },
-          {
-            id: ids.evidence,
-            type: 'evidence_gate',
-            x: 360,
-            y: 380,
-            params: { required: [{ predicate: 'agent.done', source: 'done_gate' }] },
-            label: '完成证据',
-            status: 'idle',
-          },
-          { id: ids.end, type: 'end', x: 360, y: 560, params: { label: '完成' }, label: '完成', status: 'idle' },
-        ],
-        edges: [
-          { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.goal, to_port: 'input' },
-          { id: nanoid(), from_node: ids.goal, from_port: 'output', to_node: ids.evidence, to_port: 'input' },
-          { id: nanoid(), from_node: ids.evidence, from_port: 'pass', to_node: ids.end, to_port: 'input' },
-        ],
-        variables: {},
-        settings: { ...DEFAULT_SETTINGS },
-      };
-    },
-  },
 ];
 
 export const PRESET_TEMPLATE_META = PRESET_TEMPLATES.map(({ createScript: _createScript, ...template }) => template);

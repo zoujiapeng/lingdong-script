@@ -457,8 +457,6 @@ export function validateAutomationLocally(ir: AutomationIR): GraphValidation {
     if (node.disabled) continue;
     if (node.kind === 'legacy_flow') {
       errors.push(`节点 ${node.id} 的参数分支只能走旧执行器，不能由当前 ARP Runtime 执行。`);
-    } else if (node.kind === 'agent_goal' && !String(node.config.goal || node.config.task || '').trim()) {
-      errors.push(`代理任务节点 ${node.id} 必须填写目标。`);
     } else if (node.kind === 'action_batch') {
       const actions = node.config.actions;
       if (!Array.isArray(actions) || actions.length === 0) {
@@ -569,7 +567,7 @@ export function validateAutomationLocally(ir: AutomationIR): GraphValidation {
 
     if (graph.policy.require_evidence_on_done) {
       const evidenceKinds = new Set([
-        'agent_goal', 'action_batch', 'replay_step', 'skill_replay',
+        'action_batch', 'replay_step', 'skill_replay',
         'task_stage', 'evidence_gate', 'human_gate',
       ]);
       const hasEvidenceNode = graph.nodes.some((node) => (

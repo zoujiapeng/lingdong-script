@@ -1321,11 +1321,9 @@ class InteractionToolMixin:
                 changed = bool(ratio >= 0.0008)
                 result["visual_change_detected"] = changed
                 # A broad ROI delta can be only the moving cursor, a hover
-                # highlight, or an unrelated repaint.  Share the deterministic
-                # path provider used by the typed post-action verifier and
-                # require pixels along every declared pointer path.
-                from ..tasking.visual_effects import verify_pointer_paths_in_frames
-
+                # highlight, or an unrelated repaint.  The deterministic
+                # pointer-path verifier moved here from the removed tasking
+                # chain; require pixels along every declared pointer path.
                 local_paths = [
                     [
                         [point[0] - region.left, point[1] - region.top]
@@ -1403,6 +1401,233 @@ class InteractionToolMixin:
                 } if isinstance(frame_stroke_preparation, dict) else {}),
             },
         )
+
+def _point(value: list[float], width: int, height: int) -> tuple[int, int]:
+    return (
+        int(round(float(value[0]) / 1000.0 * max(0, width - 1))),
+        int(round(float(value[1]) / 1000.0 * max(0, height - 1))),
+    )
+
+
+def _region_mask(
+    bounds: list[float], width: int, height: int,
+) -> np.ndarray:
+    mask = np.zeros((height, width), dtype=np.uint8)
+    if len(bounds) != 4:
+        return mask
+    left, top = _point([bounds[0], bounds[1]], width, height)
+    right, bottom = _point([bounds[2], bounds[3]], width, height)
+    # Exclude a tiny boundary band.  Static cell/canvas borders are legal
+    # envelopes, not evidence that the authored path was realized.
+    inset = max(1, int(round(min(right - left + 1, bottom - top + 1) * 0.025)))
+    left, top = left + inset, top + inset
+    right, bottom = right - inset, bottom - inset
+    if right >= left and bottom >= top:
+        cv2.rectangle(mask, (left, top), (right, bottom), 255, -1)
+    return mask
+
+
+def verify_pointer_paths_in_frames(
+    before: np.ndarray,
+    after: np.ndarray,
+    paths: list[list[list[float] | tuple[float, float]]],
+    *,
+    legal_mask: np.ndarray | None = None,
+    pixel_threshold: int = 18,
+) -> dict[str, Any]:
+    """Prove that changed pixels trace every requested local pixel path.
+
+    A generic ROI diff is not sufficient: a cursor, hover highlight, animation,
+    or unrelated repaint can change many pixels without realizing a pointer
+    gesture.  This provider requires coverage along every declared path, path
+    extent, and concentration of the causal delta near those paths.  Inputs are
+    image-local pixels, so the same proof works for a small Controller capture
+    and for a complete authoritative frame.
+    """
+    if (
+        before is None
+        or after is None
+        or not isinstance(before, np.ndarray)
+        or not isinstance(after, np.ndarray)
+        or before.size == 0
+        or after.size == 0
+        or before.shape != after.shape
+        or before.ndim not in {2, 3}
+    ):
+        return {
+            "verified": False,
+            "provider": "local_pointer_path_pixels",
+            "reason": "frame_images_unavailable_or_mismatched",
+            "stroke_count": len(paths or []),
+            "stroke_coverages": [],
+            "mutation_evidence": False,
+        }
+
+    height, width = after.shape[:2]
+    delta = cv2.absdiff(before, after)
+    channel_delta = delta.max(axis=2) if delta.ndim == 3 else delta
+    changed = (channel_delta >= max(1, int(pixel_threshold))).astype(np.uint8) * 255
+    changed = cv2.morphologyEx(
+        changed,
+        cv2.MORPH_OPEN,
+        np.ones((2, 2), dtype=np.uint8),
+    )
+    if legal_mask is None:
+        legal = np.full((height, width), 255, dtype=np.uint8)
+    elif legal_mask.shape[:2] != (height, width):
+        return {
+            "verified": False,
+            "provider": "local_pointer_path_pixels",
+            "reason": "legal_mask_shape_mismatch",
+            "stroke_count": len(paths or []),
+            "stroke_coverages": [],
+            "mutation_evidence": False,
+        }
+    else:
+        legal = (np.asarray(legal_mask) > 0).astype(np.uint8) * 255
+    legal_change = cv2.bitwise_and(changed, legal)
+
+    tolerance = max(3, int(round(min(width, height) * 0.006)))
+    tolerance_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (tolerance * 2 + 1, tolerance * 2 + 1),
+    )
+    near_change = cv2.dilate(legal_change, tolerance_kernel)
+    path_mask = np.zeros((height, width), dtype=np.uint8)
+    stroke_coverages: list[float] = []
+    valid_path_count = 0
+    for raw_path in paths or []:
+        pixels: list[tuple[int, int]] = []
+        for raw_point in raw_path or []:
+            if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+                continue
+            try:
+                point = (int(round(float(raw_point[0]))), int(round(float(raw_point[1]))))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            pixels.append(point)
+        if len(pixels) < 2:
+            stroke_coverages.append(0.0)
+            continue
+        valid_path_count += 1
+        stroke_mask = np.zeros_like(path_mask)
+        cv2.polylines(
+            stroke_mask,
+            [np.asarray(pixels, dtype=np.int32)],
+            False,
+            255,
+            1,
+            lineType=cv2.LINE_8,
+        )
+        stroke_mask = cv2.bitwise_and(stroke_mask, legal)
+        planned_count = int(cv2.countNonZero(stroke_mask))
+        covered = cv2.bitwise_and(stroke_mask, near_change)
+        stroke_coverages.append(
+            float(cv2.countNonZero(covered)) / max(1, planned_count)
+        )
+        path_mask = cv2.bitwise_or(path_mask, stroke_mask)
+
+    near_paths = cv2.dilate(path_mask, tolerance_kernel)
+    attributable_change = cv2.bitwise_and(legal_change, near_paths)
+    changed_count = int(cv2.countNonZero(legal_change))
+    attributable_count = int(cv2.countNonZero(attributable_change))
+    attribution_ratio = attributable_count / max(1, changed_count)
+
+    planned_points = cv2.findNonZero(path_mask)
+    changed_points = cv2.findNonZero(attributable_change)
+    if planned_points is not None and changed_points is not None:
+        planned_x, planned_y, planned_w, planned_h = cv2.boundingRect(planned_points)
+        changed_x, changed_y, changed_w, changed_h = cv2.boundingRect(changed_points)
+        extent_x = min(1.0, changed_w / max(1.0, float(planned_w)))
+        extent_y = min(1.0, changed_h / max(1.0, float(planned_h)))
+        extent_ratio = min(extent_x, extent_y)
+        planned_bbox = [
+            planned_x, planned_y, planned_x + planned_w, planned_y + planned_h,
+        ]
+        changed_bbox = [
+            changed_x, changed_y, changed_x + changed_w, changed_y + changed_h,
+        ]
+    else:
+        extent_ratio = 0.0
+        planned_bbox = []
+        changed_bbox = []
+
+    minimum_coverage = min(stroke_coverages) if stroke_coverages else 0.0
+    maximum_coverage = max(stroke_coverages) if stroke_coverages else 0.0
+    proportional_mutation_evidence = bool(
+        maximum_coverage >= 0.42
+        and extent_ratio >= 0.30
+        and attributable_count >= 12
+        and attribution_ratio >= 0.20
+    )
+    proportional_path_realization = bool(
+        paths
+        and valid_path_count == len(paths)
+        and len(stroke_coverages) == len(paths)
+        and minimum_coverage >= 0.58
+        and extent_ratio >= 0.55
+        and attributable_count >= 12
+        and attribution_ratio >= 0.20
+    )
+    # Window chrome, cursor effects, brush previews, and composited overlays can
+    # legitimately add a broad transient delta around an otherwise exact
+    # gesture.  In that case the global attribution ratio is weaker, but a
+    # complete trace of *every* declared path is stronger causal evidence than
+    # a generic ROI delta.  Keep this branch deliberately strict: every path
+    # must be nearly completely covered over nearly its full extent, and the
+    # path corridor must still explain a material share of the changed pixels.
+    # A full-area repaint or fill therefore cannot pass merely because it
+    # happens to cover the requested coordinates.
+    high_coverage_path_shape = bool(
+        paths
+        and valid_path_count == len(paths)
+        and len(stroke_coverages) == len(paths)
+        and minimum_coverage >= 0.90
+        and extent_ratio >= 0.85
+        and attributable_count >= 12
+        and attribution_ratio >= 0.12
+    )
+    mutation_evidence = bool(
+        proportional_mutation_evidence or high_coverage_path_shape
+    )
+    verified = bool(
+        proportional_path_realization or high_coverage_path_shape
+    )
+    if verified and high_coverage_path_shape and not proportional_path_realization:
+        acceptance_policy = "all_paths_high_coverage_with_broad_transient"
+    elif verified:
+        acceptance_policy = "all_paths_proportional_delta"
+    else:
+        acceptance_policy = "none"
+    return {
+        "verified": verified,
+        "provider": "local_pointer_path_pixels",
+        "reason": (
+            "all_declared_pointer_paths_realized"
+            if verified else "declared_pointer_paths_not_realized"
+        ),
+        "stroke_count": len(paths or []),
+        "valid_path_count": valid_path_count,
+        "stroke_coverages": [round(value, 6) for value in stroke_coverages],
+        "minimum_stroke_coverage": round(minimum_coverage, 6),
+        "maximum_stroke_coverage": round(maximum_coverage, 6),
+        "extent_ratio": round(float(extent_ratio), 6),
+        "planned_bbox": planned_bbox,
+        "changed_bbox": changed_bbox,
+        "changed_pixels_in_legal_region": changed_count,
+        "changed_pixels_near_paths": attributable_count,
+        "change_attribution_ratio": round(float(attribution_ratio), 6),
+        "proportional_path_realization": proportional_path_realization,
+        "high_coverage_path_shape": high_coverage_path_shape,
+        "acceptance_policy": acceptance_policy,
+        "visual_change_detected": changed_count >= 12,
+        "mutation_evidence": mutation_evidence,
+        "tolerance_px": tolerance,
+        "pixel_threshold": max(1, int(pixel_threshold)),
+    }
+
+
+
 
     def _t_wait(self, args: dict) -> ToolResult:
         verify_mod = _tools_attr("verify", verify)

@@ -130,8 +130,8 @@ class PerceptionToolMixin:
         the exact crop so AgentRunner can make it the next authoritative frame.
         No OCR/UIA result is used to choose the crop.
         """
-        from ..agent.loop import _main_model_has_vision
-        if not _main_model_has_vision():
+        from ..model_adapter import model_profile_from_config
+        if not model_profile_from_config(CONFIG.get("api", default={})).supports_vision:
             return ""
         decision = select_visual_capture_scope(
             hwnd,
@@ -587,9 +587,13 @@ class PerceptionToolMixin:
         if bool(args.get("full") or args.get("force_full") or args.get("changed_only")):
             return False
         try:
-            from .loop import _main_model_has_vision
+            from ..model_adapter import model_profile_from_config
 
-            return bool(_main_model_has_vision())
+            return bool(
+                model_profile_from_config(
+                    CONFIG.get("api", default={})
+                ).supports_vision
+            )
         except Exception:
             return False
 

@@ -60,10 +60,8 @@ import { confirmDocumentReplacement, useStore } from '../../store';
 import type { UIState } from '../../types';
 import { useControlPlane } from '../../platform/useControlPlane';
 import type {
-  AgentSchedule,
   ArpExecutionSnapshot,
   ArpGraph,
-  ChatGPTDesktopIntegration,
   CurrentRunResponse,
   AgentThreadSnapshot,
   GraphValidation,
@@ -2148,7 +2146,6 @@ interface MemoryItem {
   verification_state?: string;
   script_sha256?: string;
 }
-interface SessionItem { task: string; status: string; result: string; run_id: string }
 type ReplayJobKind = 'replay' | 'memory_verification';
 const ACTIVE_REPLAY_JOB_STATUSES = new Set(['queued', 'waiting_resources', 'running', 'canceling']);
 const MAX_REPLAY_POLL_ERRORS = 3;
@@ -2195,7 +2192,6 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   const [traces, setTraces] = useState<TraceItem[]>([]);
   const [scripts, setScripts] = useState<ScriptItem[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
-  const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [recording, setRecording] = useState(false);
   const [replayMode, setReplayMode] = useState<ReplayMode>('offline_graph');
   const [replayJob, setReplayJob] = useState<ReplayJobView | null>(null);
@@ -2203,7 +2199,6 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   const [recordingName, setRecordingName] = useState('');
   const [evidencePredicate, setEvidencePredicate] = useState('visible.text');
   const [evidenceValue, setEvidenceValue] = useState('');
-  const [memoryView, setMemoryView] = useState<'long' | 'session'>('long');
   const [selectedMemoryId, setSelectedMemoryId] = useState('');
   const [memoryDetail, setMemoryDetail] = useState<Record<string, any> | null>(null);
   const [memoryEvidencePredicate, setMemoryEvidencePredicate] = useState('visible.text');
@@ -2230,10 +2225,10 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
     if (!plane.baseUrl) return;
     try {
       const client = plane.getClient();
-      const [nextTraces, nextScripts, nextMemories, nextSessions, apprentice] = await Promise.all([
-        client.traces(), client.scripts(), client.memories(), client.sessions(), client.apprenticeStatus(),
+      const [nextTraces, nextScripts, nextMemories, apprentice] = await Promise.all([
+        client.traces(), client.scripts(), client.memories(), client.apprenticeStatus(),
       ]);
-      setTraces(nextTraces); setScripts(nextScripts); setMemories(nextMemories); setSessions(nextSessions); setRecording(Boolean(apprentice.recording));
+      setTraces(nextTraces); setScripts(nextScripts); setMemories(nextMemories); setRecording(Boolean(apprentice.recording));
       if (apprentice.task) setRecordingTask((current) => current || apprentice.task || '');
       if (apprentice.name) setRecordingName((current) => current || apprentice.name || '');
       setError('');
@@ -2458,13 +2453,6 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
     finally { setBusy(false); }
   };
 
-  const clearSessions = async () => {
-    setBusy(true); setError('');
-    try { await plane.getClient().clearSessions(); await refresh(); }
-    catch (clearError) { setError(clearError instanceof Error ? clearError.message : String(clearError)); }
-    finally { setBusy(false); }
-  };
-
   return (
     <div className="arp-page arp-assets-page">
       <div className="arp-page-title"><div><span className="arp-kicker">离线自动化</span><h2>流程、技能与宏录制</h2></div></div>
@@ -2543,16 +2531,12 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         </section>
         <section className="arp-panel">
           <div className="arp-panel-heading">
-            <div><BrainCircuit size={15} /><strong>{memoryView === 'long' ? '长期记忆' : '会话记忆'}</strong></div>
-            <div className="arp-memory-tabs">
-              <button className={memoryView === 'long' ? 'active' : ''} onClick={() => setMemoryView('long')}>长期 {memories.length}</button>
-              <button className={memoryView === 'session' ? 'active' : ''} onClick={() => setMemoryView('session')}>会话 {sessions.length}</button>
-              {memoryView === 'session' && <button className="arp-icon-button" title="清空会话记忆" onClick={clearSessions} disabled={busy}><X size={13} /></button>}
-            </div>
+            <div><BrainCircuit size={15} /><strong>长期记忆</strong></div>
+            <span>{memories.length}</span>
           </div>
-          {memoryView === 'long' && <div className="arp-detail-note"><Info size={13} />这些长期记忆属于 Studio 回放与离线流程；当前 vNext 智能代理主链未启用长期经验记忆（experience_policy=disabled），不会读取或写入此项。</div>}
+          <div className="arp-detail-note"><Info size={13} />这些长期记忆属于 Studio 回放与离线流程；当前 vNext 智能代理主链未启用长期经验记忆（experience_policy=disabled），不会读取或写入此项。</div>
           <div className="arp-asset-list">
-            {memoryView === 'long' && memories.map((item) => (
+            {memories.map((item) => (
               <React.Fragment key={item.id}>
                 <div className="arp-asset-row">
                   <div className="arp-asset-icon"><BrainCircuit size={16} /></div>
@@ -2587,14 +2571,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
                 )}
               </React.Fragment>
             ))}
-            {memoryView === 'long' && !memories.length && <EmptyState icon={BrainCircuit} title="暂无长期记忆" />}
-            {memoryView === 'session' && sessions.map((item) => (
-              <div className="arp-asset-row" key={`${item.run_id}-${item.task}`}>
-                <div className="arp-asset-icon"><Clock3 size={16} /></div>
-                <div><strong>{item.task}</strong><span>{STATUS_LABELS[item.status] || item.status} · {item.result || item.run_id}</span></div>
-              </div>
-            ))}
-            {memoryView === 'session' && !sessions.length && <EmptyState icon={Clock3} title="暂无会话记忆" />}
+            {!memories.length && <EmptyState icon={BrainCircuit} title="暂无长期记忆" />}
           </div>
         </section>
       </div>
@@ -2662,12 +2639,6 @@ function SystemView({ plane }: { plane: Plane }) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
-  const [chatgptBridge, setChatgptBridge] = useState<ChatGPTDesktopIntegration | null>(null);
-  const [schedules, setSchedules] = useState<AgentSchedule[]>([]);
-  const [scheduleTask, setScheduleTask] = useState('');
-  const [scheduleDelayMinutes, setScheduleDelayMinutes] = useState(10);
-  const [scheduleIntervalMinutes, setScheduleIntervalMinutes] = useState(0);
-  const [scheduleSaving, setScheduleSaving] = useState(false);
   const platformStatus = plane.overview?.status;
   const runtime = platformStatus?.runtime;
   const runtimeJobs = platformStatus?.runtime_jobs || [];
@@ -2677,11 +2648,9 @@ function SystemView({ plane }: { plane: Plane }) {
   useEffect(() => {
     if (!plane.baseUrl) return;
     const client = plane.getClient();
-    Promise.all([client.config(), client.chatgptIntegration(), client.schedules()])
-      .then(([nextConfig, integration, nextSchedules]) => {
+    client.config()
+      .then((nextConfig) => {
         setConfig(nextConfig);
-        setChatgptBridge(integration);
-        setSchedules(nextSchedules);
       })
       .catch((loadError) => setError(String(loadError)));
   }, [plane.baseUrl]);
@@ -2693,42 +2662,9 @@ function SystemView({ plane }: { plane: Plane }) {
     try {
       const next = await plane.getClient().patchConfig({ api: config.api, vlm: config.vlm, perception: config.perception, fusion: config.fusion, controller: config.controller, agent: config.agent, ocr: config.ocr, integrations: config.integrations });
       setConfig(next);
-      setChatgptBridge(await plane.getClient().chatgptIntegration());
       setSaved(true); setTimeout(() => setSaved(false), 1800);
     } catch (saveError) { setError(saveError instanceof Error ? saveError.message : String(saveError)); }
     finally { setSaving(false); }
-  };
-
-  const createSchedule = async () => {
-    const task = scheduleTask.trim();
-    if (!task) return;
-    setScheduleSaving(true); setError('');
-    try {
-      const created = await plane.getClient().createSchedule({
-        task,
-        delay_seconds: Math.max(0, scheduleDelayMinutes) * 60,
-        interval_seconds: scheduleIntervalMinutes > 0 ? scheduleIntervalMinutes * 60 : null,
-      });
-      setSchedules((items) => [...items, created]);
-      setScheduleTask('');
-    } catch (scheduleError) { setError(scheduleError instanceof Error ? scheduleError.message : String(scheduleError)); }
-    finally { setScheduleSaving(false); }
-  };
-
-  const toggleSchedule = async (schedule: AgentSchedule) => {
-    setError('');
-    try {
-      const updated = await plane.getClient().updateSchedule(schedule.id, { enabled: !schedule.enabled });
-      setSchedules((items) => items.map((item) => item.id === updated.id ? updated : item));
-    } catch (scheduleError) { setError(scheduleError instanceof Error ? scheduleError.message : String(scheduleError)); }
-  };
-
-  const cancelSchedule = async (schedule: AgentSchedule) => {
-    setError('');
-    try {
-      await plane.getClient().cancelSchedule(schedule.id);
-      setSchedules((items) => items.map((item) => item.id === schedule.id ? { ...item, enabled: false, running: false } : item));
-    } catch (scheduleError) { setError(scheduleError instanceof Error ? scheduleError.message : String(scheduleError)); }
   };
 
   return (
@@ -2797,7 +2733,7 @@ function SystemView({ plane }: { plane: Plane }) {
           <div className="arp-runtime-job-list">
             {runtimeJobs.slice(0, 8).map((job) => {
               const title = displayValue(job.metadata.task || job.metadata.graph_name || job.metadata.script || job.kind);
-              return (
+  return (
                 <div className="arp-runtime-job-row" key={job.job_id}>
                   <div><strong>{title}</strong><code>{job.job_id}</code></div>
                   <span>{job.kind} · {stringList(job.resources).join(', ') || '无独占资源'} · {formatElapsed(job.started_at || job.created_at, job.finished_at)}</span>
@@ -2808,42 +2744,6 @@ function SystemView({ plane }: { plane: Plane }) {
             })}
             {!runtimeJobs.length && <EmptyState icon={Activity} title="暂无运行时任务" detail="任务启动后会在这里显示队列、资源和失败原因" />}
           </div>
-        </section>
-        <section className="arp-panel arp-config-panel arp-schedule-panel">
-          <div className="arp-panel-heading"><div><Clock3 size={15} /><strong>代理计划</strong></div><span>{schedules.filter((item) => item.enabled).length} 个启用</span></div>
-          <div className="arp-schedule-create">
-            <label className="wide"><span>任务</span><input value={scheduleTask} onChange={(event) => setScheduleTask(event.target.value)} placeholder="输入已验证的代理任务" /></label>
-            <label><span>延迟（分钟）</span><input type="number" min="0" value={scheduleDelayMinutes} onChange={(event) => setScheduleDelayMinutes(Number(event.target.value) || 0)} /></label>
-            <label><span>重复间隔（分钟，0 = 仅一次）</span><input type="number" min="0" value={scheduleIntervalMinutes} onChange={(event) => setScheduleIntervalMinutes(Number(event.target.value) || 0)} /></label>
-            <button className="arp-button arp-button-primary" onClick={createSchedule} disabled={!scheduleTask.trim() || scheduleSaving}>{scheduleSaving ? <Loader2 size={14} className="arp-spin" /> : <Clock3 size={14} />}创建计划</button>
-          </div>
-          <div className="arp-schedule-list">
-            {schedules.length === 0 && <EmptyState icon={Clock3} title="暂无计划任务" />}
-            {schedules.map((schedule) => (
-              <div className="arp-schedule-row" key={schedule.id}>
-                <div><strong>{schedule.name}</strong><span>{schedule.next_run_at ? new Date(schedule.next_run_at).toLocaleString() : STATUS_LABELS[schedule.last_status || 'inactive'] || schedule.last_status}</span></div>
-                <StatusPill status={schedule.running ? 'running' : schedule.enabled ? 'queued' : 'canceled'} label={schedule.running ? '运行中' : schedule.enabled ? '已启用' : '已停用'} />
-                <button className={`arp-toggle ${schedule.enabled ? 'on' : ''}`} onClick={() => toggleSchedule(schedule)} aria-label={`${schedule.enabled ? '停用' : '启用'} ${schedule.name}`} aria-pressed={schedule.enabled}><span /></button>
-                <button className="arp-icon-button" onClick={() => cancelSchedule(schedule)} aria-label={`取消 ${schedule.name}`} title="取消计划"><X size={14} /></button>
-              </div>
-            ))}
-          </div>
-        </section>
-        <section className="arp-panel arp-config-panel">
-          <div className="arp-panel-heading"><div><Network size={15} /><strong>ChatGPT 桌面连接</strong></div><StatusPill status={chatgptBridge?.client_active ? 'running' : chatgptBridge?.server_ready ? 'idle' : 'failed'} label={chatgptBridge?.client_active ? 'MCP 已连接' : chatgptBridge?.server_ready ? '端点已就绪' : '离线'} /></div>
-          <dl className="arp-diagnostics">
-            <div><dt>规划器</dt><dd>{chatgptBridge?.planner || '当前桌面客户端'}</dd></div>
-            <div><dt>客户端活动</dt><dd>{chatgptBridge?.client_active ? `${chatgptBridge.request_count} 次请求` : '近期无客户端请求'}</dd></div>
-            <div><dt>传输方式</dt><dd>{chatgptBridge?.transport || 'mcp_streamable_http'}</dd></div>
-            <div><dt>端点</dt><dd title={chatgptBridge?.endpoint}>{chatgptBridge?.endpoint || '-'}</dd></div>
-            <div><dt>安全模式</dt><dd>{chatgptBridge?.security_mode || '仅本机回环'}</dd></div>
-            <div><dt>OpenAI API 密钥</dt><dd>{chatgptBridge?.requires_openai_api_key ? '需要' : '未使用'}</dd></div>
-            <div><dt>工具数量</dt><dd>{chatgptBridge?.tool_count ?? 0}</dd></div>
-          </dl>
-          {config && <div className="arp-toggle-list arp-bridge-toggles">
-            <Toggle checked={Boolean(config.integrations?.chatgpt_desktop?.enabled)} onChange={(value) => setConfig((current) => current ? { ...current, integrations: { ...current.integrations, chatgpt_desktop: { ...current.integrations?.chatgpt_desktop, enabled: value } } } : current)} label="启用桌面 MCP 连接" />
-            <Toggle checked={Boolean(config.integrations?.chatgpt_desktop?.allow_desktop_mutation)} onChange={(value) => setConfig((current) => current ? { ...current, integrations: { ...current.integrations, chatgpt_desktop: { ...current.integrations?.chatgpt_desktop, allow_desktop_mutation: value } } } : current)} label="允许控制器执行动作" />
-          </div>}
         </section>
         <section className="arp-panel arp-capability-panel">
           <div className="arp-panel-heading"><div><Zap size={15} /><strong>能力注册表</strong></div><span>{plane.capabilities.length}</span></div>

@@ -29,8 +29,8 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   },
   agent_goal: {
     type: 'agent_goal',
-    label: '代理任务',
-    description: '将高层目标交给规划器和快速 GUI 控制器执行。',
+    label: '代理任务（已移除）',
+    description: '旧 Agent 线已删除，此节点不再可运行。历史文档保留只读渲染；运行会 fail closed，请改用智能代理页提交目标。',
     icon: 'Bot',
     category: 'agent',
     color: '#0f766e',

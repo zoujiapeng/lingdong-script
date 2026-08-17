@@ -108,17 +108,3 @@ def test_runtime_job_submit_rolls_back_when_thread_start_fails(monkeypatch):
     assert len(finished) == 1
     assert finished[0].status == "failed"
     assert finished[0].done.is_set()
-
-
-def test_queued_runner_registration_does_not_replace_current_runner():
-    from winpilot.server import _RunState
-
-    state = _RunState()
-    running = SimpleNamespace(run_id="running")
-    queued = SimpleNamespace(run_id="queued")
-    state.bind_runner(running, "job-running")
-    state.register_runner(queued, "job-queued")
-
-    assert state.runner is running
-    assert state.runners["queued"] is queued
-    assert state.run_jobs["queued"] == "job-queued"

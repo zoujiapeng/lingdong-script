@@ -7,7 +7,6 @@ from pathlib import Path
 
 PRODUCT_ROOT = Path(__file__).parents[1] / "winpilot"
 ALLOWED_TRANSPORT_CALLS = {
-    (Path("agent/loop.py"), ("_chat_request", "send_once")),
     (Path("model_adapter.py"), ("send_prepared_chat_completion",)),
     (Path("modeling/chat.py"), ("invoke_chat_completion", "send_once")),
 }
