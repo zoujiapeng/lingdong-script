@@ -1,15 +1,15 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-16。唯一长期产品分支是 `master`；本分支
-> `codex/model-directed-orchestration` 的 2026-08-14/08-15 两节已在本分支提交、尚未合入
-> `master`。本文件不再把某个提交写成“当前 HEAD”；接手时必须现场运行
+> 最后核对：2026-08-18。唯一长期产品分支是 `master`；2026-08-14/08-15 内容与
+> 2026-08-17 旧架构删除批次均已提交并合入 `master`。本文件不再把某个提交写成“当前 HEAD”；
+> 接手时必须现场运行
 > `git rev-parse HEAD`、`git rev-parse origin/master` 并查询该精确 SHA 的 Actions。
 > 13.20–13.28 已进入或正在进入主线；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、
 > 通用 connector、history-depth 证据或 provisional native-provider 边界。
 
-## 2026-08-17 旧架构删除批次（分支 `analysis/new-vs-old-architecture`，未提交）
+## 2026-08-17 旧架构删除批次（已提交 `a5582bb`，在 master）
 
-分析报告：`docs/legacy-vs-vnext-analysis.md`。本批已实际删除并在该分支通过全量回归：
+分析报告：`docs/legacy-vs-vnext-analysis.md`。本批已实际删除并全量回归通过：
 
 第一批（旧 Agent 产品线）：
 - `src/ai-interface/`（11 文件）+ `tsconfig.ai.json` + npm `ai`/`ai:mcp`/`ai:http`/`build:ai`。
@@ -43,8 +43,10 @@
 - `playbooks/*.json` 数据与 `playbooks_enabled` 配置键删除。
 - 关联 47 个旧包测试文件删除，5 个共享件测试修正。
 
-**仍然保留（有真实消费者，未动）**：`agent/` 剩余 21 文件 = Studio 确定性执行器
-（`ToolSession` + mixins + `scope_guard`/`planner`/`runtime_profile`/`task_rules`），
+**仍然保留（有真实消费者，未动）**：`agent/` 剩余 14 文件 = Studio 确定性执行器
+（`ToolSession` + mixins + `scope_guard`/`runtime_profile`/`task_rules`；`planner`/
+`plan_tools`/`coding_tools`/`file_tools`/`memory_tools`/`working_set_tools`/`mcp_tools`
+已在 2026-08-18 批次删除），
 `fast/`（FastGuiController/subgoal/controller 是 Studio ACTION_BATCH 的实际引擎），
 `memory/`（`/api/memory*` 与 `finalize_memory_feedback`）、`recorder/`（vNext trace 写入
 + 离线 replay）、`/api/v2/arp/*`、`automation-ir`、`python/engine|features|tools` 与
@@ -54,6 +56,42 @@ Electron 7880/F9/feature 桥（含 main.ts 的 scheduler_daemon 提醒桥）。�
 
 回归：WinPilot `2377 passed, 13 skipped`、根 `tests/` `2508 passed`、
 renderer `325 passed`、TypeScript typecheck 通过。
+
+## 2026-08-18 瘦身批次（已提交 `3d351cd`/`2505f16`/`3ae74e7`/`dcf8d99`，在 master）
+
+按“模型优先、机械极简”审查后的实际执行，四提交全部回归通过（WinPilot `2326 passed,
+13 skipped`、renderer `325 passed`、typecheck）：
+
+1. **拖拽导出降级为点击**（`3d351cd`）：`recorder/trace.py` 的 `_physical_attempt_to_wps`
+   把 drag（含 `started_held`/`keep_holding`）投影成既有 `click` 步骤（落点 x2/y2），
+   不再拒绝为 0 步；实时拖拽执行（`atomic.py`/`raw_device.py`）零改动。
+2. **删除累计动作摘要**（`2505f16`）：`ActorTurnInput.completed_action_summaries`
+   （最多 64 项）及 `mission_runtime` 的 `_completed_action_history`/`_actor_action_summary`
+   /`_completed_action_intents` 全删；单条 `previous_action` 视图保留，`semantic_summary`
+   改由 `_previous_action_summary(action, local_intent)` 直接生成。
+3. **证据账本收敛为单条 trace**（`3ae74e7`）：vNext 运行只写 `traces/<run_id>.jsonl`。
+   - 重要事实：`vnext_runtime_evidence/<run_id>/evidence.jsonl` 的写入器在更早的安全
+     清理（`5860d49`）已随 `vnext/evidence_plane/` 删除，但导出器读取逻辑残留，导致
+     生产导出一直拿不到 physical_attempt 而失败；本批删除读取器（hash 链/seal/双源
+     交叉核对）并把导出改为只读 trace.jsonl 单账本。
+   - `atomic.py`：原指针专用 `vnext_pointer_dispatch` 改为全动作 `vnext_physical_attempt`
+     （type_text 含文本、target_identity、timestamp_ns）；`orchestrator/projection.py`
+     事件名同步。
+   - canary 脚本 `client_vnext_canary_e2e_run.py` 的 `runtime_evidence_sealed` 锚点检查
+     删除（生产不再产生该事件）；`vnext_canary_campaign.py` 的 report/anchor 校验仍
+     为独立 campaign 工具，未动。
+4. **删除 agent/ 死文件**（`dcf8d99`）：`mcp_tools`（Legacy MCP 重复 owner）、
+   `coding_tools`、`file_tools`、`memory_tools`、`working_set_tools`、`plan_tools`、
+   `planner` 共 7 文件零生产消费者，随 3 个测试文件（`test_coding_tools`/
+   `test_plan_tools`/`test_unified_coding_runtime`）删除；`ToolSession` 从 11 个 mixin
+   瘦身到 6 个（只留 Desktop/Window/Perception/Interaction/System/Fast）。
+
+**尚未做（诚实边界）**：`agent/` 整包删除与 `action/verify.py` 删除依赖方案 A
+（ToolSession→`fast.controller` 直连）：`fast/controller.py` 每个动作都经
+`session._t_*` 处理器（UIA 锚定 + `verify.run_with_verify` expect 校验），直连等于
+迁移约 2000 行动作处理器；且 `action/verify.py` 的真实消费者全在 Studio 离线执行路径
+（`interaction_tools`/`desktop_tools`/`subgoal`/`tools`），现在删会弄坏离线执行。
+该迁移必须在本机可见 Electron + 真实桌面 E2E 验证后推进，不能只靠 pytest。
 
 本文件是换 Codex 窗口后的第一入口。它保存当前决策和继续工作的边界，不替代
 长期架构与测试规范。依次阅读：
@@ -275,7 +313,8 @@ shell/provider 工具，必须先形成显式 unsupported trace，不能静默�
 独立剪贴板 oracle 再次读到 68 字符和上述同一 SHA-256。
 
 这还不能称为“整场对话的所有普通 ARP 动作都已可导出”。跨 decision 的连续 held gesture
-带有 `started_held` / `keep_holding`，当前会被导出器拒绝并得到 0 步；缺少 durable
+带有 `started_held` / `keep_holding`，当前导出器把它们投影成既有 `click` 步骤（点击落点
+x2/y2），不再拒绝为 0 步（2026-08-18 起，提交 `3d351cd`）；缺少 durable
 run -> Thread owner index 时，归属和完整性也只能靠全量 trace 扫描证明。这两项是基础设施
 缺口。一次轻量 owner scan 曾把本机扫描从约 14 秒降到 1.36 秒，但存在漏掉归属/完整性异常、
 把 partial 误报为 complete 的风险，已完整回退；当前保留 correctness-first 的约 14 秒全量
@@ -388,8 +427,8 @@ schema 删除，不再要求模型为机械动作另写一份意图。连续 INV
 视觉帧或长期摘要。视觉线只保留紧邻的一笔 provider 原生
 `user image -> assistant tool call -> tool result`，每次新动作替换上一笔；
 不保存无界聊天历史，不把长期 memory 当硬能力，也不在 prompt 中教学。
-Actor 上下文目前还保留最多 64 项安全动作摘要；删除 A/B 未获准，因此暂留，但它
-仍是模型上下文压力债务，不应继续扩张。
+Actor 上下文保留紧邻一笔 `previous_action` 视图（单条 bounded 摘要）；累计 64 项
+`completed_action_summaries` 已删除（2026-08-18，提交 `2505f16`），不再给模型喂动作回忆。
 
 ## 坐标、窗口和输入规则
 
@@ -431,9 +470,9 @@ adapter 尚无真实 provider credential 联机与跨任务族 Electron E2E，�
 - `mimo-v2.5-pro`：当前官方接口不支持图片，不能作为截图主模型；
 - 为 corridor、试卷、重复点击或边缘坐标加提示/规则：禁止，错误属于模型时会对更强
   模型形成负优化。
-- 删除累计 `completed_action_summaries`：有效原生前端删除臂为 `5/10`，没有跨任务
-  收益且低于当前保留态 `6/10`，生产删除已完整回退。`ordered-clicks` 仍通过，故
-  这不证明摘要必需，只说明本次删除未达到保留门。
+- 删除累计 `completed_action_summaries`：早期 A/B 删除臂为 `5/10`、低于保留态 `6/10`，
+  曾完整回退；2026-08-18 按模型优先原则最终删除（提交 `2505f16`），保留的
+  `previous_action` 单条视图不受影响。`ordered-clicks` 仍通过，说明摘要非必需。
 - 删除与原始 goal 重复的 `desired_state`、`acceptance_criteria` 和固定
   `required_capabilities`：严格交叉配对中 A 为 Explorer `0/2`、Notepad `2/2`，
   B 为 Explorer `0/2`、Notepad 原始外部结果 `1/2`。B 的 Notepad 缺字样本实际是
