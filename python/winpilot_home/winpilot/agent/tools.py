@@ -26,28 +26,22 @@ from ..perception.model import UIElement
 from ..perception.app_aliases import expand as expand_app_aliases
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
-from . import planner, scope_guard
+from . import scope_guard
 
 # Several imports above are retained as stable monkeypatch targets for older
 # tests and scripts that patch winpilot.agent.tools.<module>. The mixins read
 # them through their _tools_attr compatibility helper.
-from .coding_tools import CodingSession
 from .desktop_tools import DesktopToolMixin
-from .file_tools import FileToolMixin
 from .fast_tools import FastToolMixin
 from .interaction_tools import (
     InteractionToolMixin,
 )
-from .memory_tools import MemoryToolMixin
-from .mcp_tools import McpToolMixin
 from .perception_tools import PerceptionToolMixin
-from .plan_tools import PlanToolMixin
 from .system_tools import SystemToolMixin
 from .tool_schemas import tool_schemas
 from .tool_result import ToolResult
 from .runtime_profile import RuntimeProfile, build_runtime_profile
 from .window_tools import WindowToolMixin
-from .working_set_tools import WorkingSetToolMixin
 
 _MUTATING_TOOLS = {
     "open_app", "launch", "click", "double_click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
@@ -77,17 +71,12 @@ _CONTROLLER_COMPOSITE_TOOLS = {"run_action_batch", "execute_subgoal"}
 
 
 class ToolSession(
-    FileToolMixin,
-    WorkingSetToolMixin,
-    MemoryToolMixin,
-    McpToolMixin,
     DesktopToolMixin,
     WindowToolMixin,
     PerceptionToolMixin,
     InteractionToolMixin,
     SystemToolMixin,
     FastToolMixin,
-    PlanToolMixin,
 ):
     """Per-run state: latest snapshot + current target window."""
 
@@ -170,15 +159,6 @@ class ToolSession(
         import threading
         self.stop_event = stop_event or threading.Event()
         self.runtime_profile = runtime_profile or build_runtime_profile(self.task)
-        self.coding_runtime = (
-            CodingSession(
-                self.runtime_profile.coding_workspace,
-                stop_event=self.stop_event,
-                task=self.task,
-            )
-            if self.runtime_profile.coding and self.runtime_profile.coding_workspace is not None
-            else None
-        )
         self._pending_visual_advisory = ""
         self._last_visual_advisory = ""
         self.target_hint: str = ""
@@ -215,7 +195,6 @@ class ToolSession(
             )
         )
         self._fail_softened = False
-        self.plan: planner.Plan | None = None
         # Lightweight undo stack: things this run created that can be rolled back.
         self._undo_stack: list[tuple[str, object]] = []
         self._screen_epoch = 0
