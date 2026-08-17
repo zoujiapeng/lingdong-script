@@ -1067,19 +1067,12 @@ def _physical_attempt_to_wps(
             "amount": arguments.get("signed_wheel_amount"),
         }
     if action == "drag" and arguments.get("kind") == "pointer_drag":
-        if (
-            arguments.get("started_held") is True
-            or arguments.get("keep_holding") is True
-        ):
-            return None
-        step = {
-            "tool": "drag",
-            "from": [arguments.get("x1"), arguments.get("y1")],
-            "to": [arguments.get("x2"), arguments.get("y2")],
+        # Drag is not replayed offline: project it onto the existing click
+        # step at the drop point so held drags no longer void the export.
+        return {
+            "tool": "click",
+            "coords": [arguments.get("x2"), arguments.get("y2")],
         }
-        if isinstance(arguments.get("points"), (list, tuple)):
-            step["points"] = [list(point) for point in arguments["points"]]
-        return step
     if action == "type_text" and arguments.get("kind") == "type_text":
         return {"tool": "type_text", "text_input": arguments.get("text")}
     if action == "hotkey" and arguments.get("kind") == "hotkey":

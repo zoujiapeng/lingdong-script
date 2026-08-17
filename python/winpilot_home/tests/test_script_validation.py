@@ -217,8 +217,7 @@ def _write_trace(path, events):
                 "kind": "pointer_drag", "x1": 1, "y1": 2, "x2": 7, "y2": 8,
                 "points": [[3, 4], [5, 6]],
             }},
-            {"tool": "drag", "from": [1, 2], "to": [7, 8],
-             "points": [[3, 4], [5, 6]]},
+            {"tool": "click", "coords": [7, 8]},
         ),
         (
             {"action": "type_text", "physical_arguments": {
@@ -238,7 +237,7 @@ def test_vnext_physical_attempt_maps_to_plain_wps(payload, expected):
     assert trace_mod._physical_attempt_to_wps(payload) == expected
 
 
-def test_vnext_plain_drag_ignores_false_hold_flags_but_rejects_live_hold():
+def test_vnext_drag_projects_to_click_drop_point_regardless_of_hold():
     attempt = {
         "action": "drag",
         "physical_arguments": {
@@ -253,14 +252,16 @@ def test_vnext_plain_drag_ignores_false_hold_flags_but_rejects_live_hold():
     }
 
     assert trace_mod._physical_attempt_to_wps(attempt) == {
-        "tool": "drag",
-        "from": [1, 2],
-        "to": [7, 8],
+        "tool": "click",
+        "coords": [7, 8],
     }
     for field in ("started_held", "keep_holding"):
         held = json.loads(json.dumps(attempt))
         held["physical_arguments"][field] = True
-        assert trace_mod._physical_attempt_to_wps(held) is None
+        assert trace_mod._physical_attempt_to_wps(held) == {
+            "tool": "click",
+            "coords": [7, 8],
+        }
 
 
 def test_vnext_authenticated_journal_deep_json_is_partial(tmp_path, monkeypatch):
