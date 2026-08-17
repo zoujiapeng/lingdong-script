@@ -193,7 +193,6 @@ def _actor_turn() -> ActorTurnInput:
             fresh=True,
         ),
         tools=tuple(tools),
-        completed_action_summaries=("click", "double_click"),
     )
 
 
@@ -514,10 +513,6 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         "scratchpad": "",
         "remaining_items": [],
     }
-    assert actor_context_value["completed_action_summaries"] == [
-        "click",
-        "double_click",
-    ]
     assert "data:image/jpeg;base64," in (
         actor_request["messages"][1]["content"][0]["image_url"]["url"]
     )
@@ -1340,20 +1335,6 @@ def test_failed_physical_action_gets_one_actionable_model_hint() -> None:
     assert "change arguments or choose another tool" in context[
         "previous_action"
     ]["next_step"]
-
-
-@pytest.mark.parametrize(
-    "summary",
-    ("secret_token", "hotkey_secret_token", "scroll_sideways"),
-)
-def test_actor_turn_contract_rejects_arbitrary_action_summaries(
-    summary: str,
-) -> None:
-    with pytest.raises(ValueError, match="privacy-safe"):
-        replace(
-            _actor_turn(),
-            completed_action_summaries=(summary,),
-        )
 
 
 def test_consecutive_visual_calls_keep_only_the_previous_native_action() -> None:

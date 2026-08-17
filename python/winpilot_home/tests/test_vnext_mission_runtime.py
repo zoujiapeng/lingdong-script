@@ -1370,23 +1370,9 @@ def test_actor_receives_completed_action_order_with_semantic_intent() -> None:
     assert first.status is RuntimeStatus.ACTION_RECORDED
     assert second.status is RuntimeStatus.ACTION_RECORDED
     assert verified.status is RuntimeStatus.MISSION_VERIFIED
-    assert harness.actor.turns[0].completed_action_summaries == ()
-    assert harness.actor.turns[1].completed_action_summaries == (
-        "click: perform one click",
-    )
-    assert harness.actor.turns[2].completed_action_summaries == (
-        "click: perform one click",
-        "double_click: perform one double_click",
-    )
-    history_wire = json.dumps(
-        harness.actor.turns[2].completed_action_summaries
-    )
-    assert "image_x" not in history_wire
-    assert "text" not in history_wire
-    assert "perform one click" in history_wire
 
 
-def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
+def test_previous_action_keeps_safe_direction_and_chord() -> None:
     scroll_up = _action("scroll")
     scroll_up["args"]["amount"] = 120
     harness = _harness(
@@ -1403,12 +1389,6 @@ def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
     verified = harness.runtime.run_one_turn(turn_index=4)
 
     assert verified.status is RuntimeStatus.MISSION_VERIFIED
-    expected = (
-        "scroll: perform one scroll",
-        "scroll: perform one scroll",
-        "hotkey: perform one hotkey",
-        "type_text: perform one type_text",
-    )
     assert (
         harness.actor.turns[1].previous_action.semantic_summary
         == "scroll: perform one scroll"
@@ -1421,7 +1401,6 @@ def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
         harness.actor.turns[3].previous_action.semantic_summary
         == "hotkey: perform one hotkey"
     )
-    assert harness.actor.turns[4].completed_action_summaries == expected
     transition_summaries = tuple(
         event.payload["action_summary"]
         for event in harness.reducer.events
@@ -1451,10 +1430,13 @@ def test_completed_action_intent_is_bounded_without_copying_action_args() -> Non
 
     assert recorded.status is RuntimeStatus.ACTION_RECORDED
     assert verified.status is RuntimeStatus.MISSION_VERIFIED
-    summary = harness.actor.turns[1].completed_action_summaries[0]
-    assert summary.startswith("type_text: 记录进度 ")
-    assert len(summary) == 256
-    assert "credential-value" not in summary
+    transition_summaries = tuple(
+        event.payload["action_summary"]
+        for event in harness.reducer.events
+        if event.kind == "transition_recorded"
+    )
+    assert transition_summaries == ("type_text",)
+    assert "credential-value" not in json.dumps(transition_summaries)
 
 
 def test_repeated_actions_are_executed_without_task_level_suppression() -> None:

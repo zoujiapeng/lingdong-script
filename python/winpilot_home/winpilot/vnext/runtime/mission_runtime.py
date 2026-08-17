@@ -37,14 +37,11 @@ from ..mission import (
     MissionReducer,
     MissionStatus,
     StaleRevisionError,
-    is_safe_action_summary,
 )
 from ..profiling import ExecutionDepth, ExecutionProfile
 from .contracts import (
     APPROVED_DESKTOP_ACTIONS,
     APPROVED_RUNTIME_TOOLS,
-    MAX_COMPLETED_ACTION_HISTORY,
-    MAX_COMPLETED_ACTION_SUMMARY_LENGTH,
     ActorBudgetView,
     ControllerOutcome,
     ControllerTransition,
@@ -131,7 +128,6 @@ class MissionRuntime:
         self._verified_completion_result: str | None = None
         self._latest_narration: str = ""
         self._previous_action_local_intent: str | None = None
-        self._completed_action_intents: list[str] = []
         self._task_state = ActorTaskState.initial()
         self._turn_lock = threading.Lock()
         if budget_facts_provider is not None and not callable(
@@ -401,46 +397,6 @@ class MissionRuntime:
         except Exception:
             return None
 
-    def _completed_action_history(
-        self,
-        obligation_id: str,
-    ) -> tuple[str, ...]:
-        actions: list[str] = []
-        for event in self._reducer.events:
-            if event.kind != "transition_recorded":
-                continue
-            payload = event.payload
-            action = payload.get("action")
-            summary = payload.get("action_summary")
-            if summary is None:
-                summary = action
-            if (
-                payload.get("obligation_id") == obligation_id
-                and payload.get("input_completed") is True
-                and type(action) is str
-                and type(summary) is str
-                and is_safe_action_summary(action, summary)
-            ):
-                actions.append(summary)
-        actions = actions[-MAX_COMPLETED_ACTION_HISTORY:]
-        if not actions:
-            return ()
-        intents = self._completed_action_intents[-len(actions):]
-        return tuple(
-            self._actor_action_summary(action, intent)
-            for action, intent in zip(actions, intents, strict=True)
-        )
-
-    @staticmethod
-    def _actor_action_summary(action: str, local_intent: str) -> str:
-        intent = " ".join(local_intent.split())
-        if not intent:
-            return action
-        prefix = f"{action}: "
-        return prefix + intent[
-            : MAX_COMPLETED_ACTION_SUMMARY_LENGTH - len(prefix)
-        ].rstrip()
-
     def _claim_and_complete(
         self,
         proposal: ClaimObligationDone,
@@ -620,7 +576,6 @@ class MissionRuntime:
                 # physical fact into a rejection or invite a replay.
                 diagnostics.append(f"action history unavailable: {exc}")
             self._previous_action_local_intent = proposal.local_intent
-            self._completed_action_intents.append(proposal.local_intent)
             if self._stopped(stop_event):
                 return self._cancel(
                     prior_event_ids=event_ids,
@@ -721,7 +676,6 @@ class MissionRuntime:
             # evidence/event append failed.
             diagnostics.append(f"action history unavailable: {exc}")
         self._previous_action_local_intent = proposal.local_intent
-        self._completed_action_intents.append(proposal.local_intent)
         if self._stopped(stop_event):
             return self._cancel(
                 prior_event_ids=event_ids,
@@ -817,11 +771,6 @@ class MissionRuntime:
                 task_state=self._task_state,
                 previous_action_local_intent=(
                     self._previous_action_local_intent
-                ),
-                completed_action_summaries=(
-                    self._completed_action_history(
-                        projection.active_obligation_id or ""
-                    )
                 ),
                 budget=budget,
             )

@@ -69,7 +69,6 @@ APPROVED_RUNTIME_TOOLS = (
     | APPROVED_OBSERVATION_TOOLS
     | APPROVED_OUTCOME_TOOLS
 )
-MAX_COMPLETED_ACTION_HISTORY = 64
 MAX_COMPLETED_ACTION_SUMMARY_LENGTH = 256
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
@@ -143,6 +142,20 @@ def _action_summary_matches(action: str, summary: str) -> bool:
         return False
     summary_action, _, _ = summary.partition(": ")
     return summary_action == action
+
+
+def _previous_action_summary(
+    action: str,
+    local_intent: str | None,
+) -> str | None:
+    """One bounded identity-free summary of the immediately preceding action."""
+    intent = " ".join(str(local_intent or "").split())
+    if not intent:
+        return action
+    prefix = f"{action}: "
+    return prefix + intent[
+        : MAX_COMPLETED_ACTION_SUMMARY_LENGTH - len(prefix)
+    ].rstrip()
 
 
 def _freeze_json(value: Any) -> Any:
@@ -787,7 +800,6 @@ class ActorTurnInput:
     tools: tuple[ActorToolView, ...]
     task_state: ActorTaskState | None = None
     budget: ActorBudgetView | None = None
-    completed_action_summaries: tuple[str, ...] = ()
     previous_action: ActorPreviousActionView | None = None
     pointer_held: bool = False
     format: str = ACTOR_TURN_FORMAT
@@ -826,27 +838,7 @@ class ActorTurnInput:
             )
         if type(self.pointer_held) is not bool:
             raise RuntimeContractError("pointer_held must be boolean")
-        completed_action_summaries = tuple(
-            self.completed_action_summaries
-        )
-        if (
-            len(completed_action_summaries)
-            > MAX_COMPLETED_ACTION_HISTORY
-            or any(
-                not _is_safe_action_summary(summary)
-                for summary in completed_action_summaries
-            )
-        ):
-            raise RuntimeContractError(
-                "completed_action_summaries is outside the bounded "
-                "privacy-safe history"
-            )
         object.__setattr__(self, "tools", tools)
-        object.__setattr__(
-            self,
-            "completed_action_summaries",
-            completed_action_summaries,
-        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -858,9 +850,6 @@ class ActorTurnInput:
                 None if self.budget is None else self.budget.to_dict()
             ),
             "tools": [tool.to_dict() for tool in self.tools],
-            "completed_action_summaries": list(
-                self.completed_action_summaries
-            ),
             "previous_action": (
                 None
                 if self.previous_action is None
@@ -881,12 +870,10 @@ def project_actor_turn_input(
     *,
     task_state: ActorTaskState | None = None,
     previous_action_local_intent: str | None = None,
-    completed_action_summaries: Iterable[str] = (),
     budget: ActorBudgetView | None = None,
 ) -> ActorTurnInput:
     """Project one identity-free bounded view from canonical Runtime facts."""
 
-    completed_summaries = tuple(completed_action_summaries)
     if type(card) is not MissionCard or card.active_obligation is None:
         raise RuntimeContractError(
             "Visual Actor requires one active MissionCard obligation"
@@ -960,14 +947,9 @@ def project_actor_turn_input(
         effect = transition.action_effect
         previous = ActorPreviousActionView(
             action=transition.action,
-            semantic_summary=(
-                completed_summaries[-1]
-                if completed_summaries
-                and _action_summary_matches(
-                    transition.action,
-                    completed_summaries[-1],
-                )
-                else None
+            semantic_summary=_previous_action_summary(
+                transition.action,
+                previous_action_local_intent,
             ),
             local_intent=previous_action_local_intent,
             input_completed=transition.input_completed,
@@ -1025,7 +1007,6 @@ def project_actor_turn_input(
         tools=tuple(tools),
         task_state=task_state,
         budget=budget,
-        completed_action_summaries=completed_summaries,
         previous_action=previous,
         pointer_held=projection.pointer_lease_id is not None,
     )
@@ -1304,8 +1285,6 @@ __all__ = [
     "APPROVED_OBSERVATION_TOOLS",
     "APPROVED_OUTCOME_TOOLS",
     "APPROVED_RUNTIME_TOOLS",
-    "MAX_COMPLETED_ACTION_HISTORY",
-    "MAX_COMPLETED_ACTION_SUMMARY_LENGTH",
     "RuntimeContractError",
     "RuntimeFrameIdentity",
     "RuntimeTargetIdentity",
