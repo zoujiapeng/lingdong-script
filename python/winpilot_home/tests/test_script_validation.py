@@ -264,25 +264,6 @@ def test_vnext_drag_projects_to_click_drop_point_regardless_of_hold():
         }
 
 
-def test_vnext_authenticated_journal_deep_json_is_partial(tmp_path, monkeypatch):
-    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
-    run_id = "vnext-deep-journal"
-    directory = tmp_path / "vnext_runtime_evidence" / run_id
-    directory.mkdir(parents=True)
-    (directory / "evidence.jsonl").write_bytes(b"{}\n")
-
-    def raise_recursion(*_args, **_kwargs):
-        raise RecursionError("synthetic excessive nesting")
-
-    monkeypatch.setattr(trace_mod.json, "loads", raise_recursion)
-
-    records, head, error = trace_mod._read_vnext_journal(run_id)
-
-    assert records == []
-    assert head == "0" * 64
-    assert error == "malformed_json"
-
-
 def test_export_script_includes_batch_child_replay(tmp_path, monkeypatch):
     monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
     monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path / "scripts")

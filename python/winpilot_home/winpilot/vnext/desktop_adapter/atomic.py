@@ -661,7 +661,7 @@ class AtomicDesktopAdapter:
                     prepared.action,
                     "stop_requested_after_queue",
                 )
-            self._publish_pointer_dispatch(
+            self._publish_physical_attempt(
                 envelope,
                 prepared,
                 before_frame,
@@ -1571,6 +1571,7 @@ class AtomicDesktopAdapter:
             assert prepared.text is not None
             return {
                 "kind": "type_text",
+                "text": prepared.text,
                 "codepoint_count": len(prepared.text),
             }
         if prepared.action == "launch_application":
@@ -1591,19 +1592,14 @@ class AtomicDesktopAdapter:
             arguments["repeat"] = prepared.repeat
         return arguments
 
-    def _publish_pointer_dispatch(
+    def _publish_physical_attempt(
         self,
         envelope: ActorDecisionEnvelope,
         prepared: _PreparedAction,
         frame: RuntimeFrame,
     ) -> None:
-        """Publish the exact model and physical pointer arguments."""
+        """Publish the exact physical attempt to the single durable trace."""
 
-        if prepared.action not in {
-            "move_mouse", "click", "double_click", "drag", "scroll",
-            "input_sequence",
-        }:
-            return
         source = {
             key: value
             for key, value in envelope.proposal.args.items()
@@ -1621,6 +1617,11 @@ class AtomicDesktopAdapter:
                 "held_keys",
                 "duration_ms",
                 "press_duration_ms",
+                "text",
+                "modifiers",
+                "key",
+                "app",
+                "arguments",
             }
         }
         if isinstance(source.get("image_path"), (list, tuple)):
@@ -1632,10 +1633,25 @@ class AtomicDesktopAdapter:
             ]
         if isinstance(source.get("held_keys"), (list, tuple)):
             source["held_keys"] = list(source["held_keys"])
+        if isinstance(source.get("modifiers"), (list, tuple)):
+            source["modifiers"] = list(source["modifiers"])
         physical_arguments = self._physical_attempt_arguments(prepared)
+        binding = (
+            None
+            if envelope.frame_scope == "full_desktop"
+            else self._binding
+        )
+        target_identity = (
+            {}
+            if binding is None
+            else {
+                "executable_identity": binding.executable_identity,
+                "title_snapshot": binding.title_snapshot,
+            }
+        )
         try:
             BUS.publish(
-                "vnext_pointer_dispatch",
+                "vnext_physical_attempt",
                 runtime_version="vnext",
                 no_legacy_fallback=True,
                 run_id=envelope.run_id,
@@ -1649,7 +1665,9 @@ class AtomicDesktopAdapter:
                 frame_region=list(envelope.frame_region),
                 image_coordinates=source,
                 physical_arguments=physical_arguments,
-                parameter_visibility="pointer_coordinates",
+                target_identity=target_identity,
+                timestamp_ns=time.time_ns(),
+                parameter_visibility="physical_attempt",
             )
         except Exception:
             # Diagnostics must never reject or replay physical input.

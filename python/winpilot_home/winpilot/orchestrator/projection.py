@@ -798,7 +798,7 @@ class RunProjectionStore:
             else:
                 run["status"] = "running" if run["phase"] != "awaiting_human" else "paused"
 
-            if event_type == "vnext_pointer_dispatch":
+            if event_type == "vnext_physical_attempt":
                 summary_value = {
                     "submitted_image_size": event.get(
                         "submitted_image_size"
@@ -839,7 +839,7 @@ class RunProjectionStore:
                         if event_type in {
                             "vnext_model_reasoning",
                             "vnext_model_pointer_arguments",
-                            "vnext_pointer_dispatch",
+                            "vnext_physical_attempt",
                         }
                         else 600
                     ),

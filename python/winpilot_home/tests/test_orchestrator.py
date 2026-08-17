@@ -1215,7 +1215,7 @@ def test_run_projection_keeps_correlated_reasoning_and_pointer_coordinates():
         }],
     })
     store.on_event({
-        "type": "vnext_pointer_dispatch",
+        "type": "vnext_physical_attempt",
         "ts": 4.0,
         "run_id": run_id,
         "action": "drag",

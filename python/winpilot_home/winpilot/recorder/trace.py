@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import inspect
 import os
@@ -889,157 +888,6 @@ def _extract_target_window(events: list[dict[str, Any]]) -> dict[str, Any] | Non
     return None
 
 
-_JOURNAL_EVENT_FIELDS = (
-    "format",
-    "schema_version",
-    "sequence",
-    "previous_event_sha256",
-    "event_kind",
-    "mission_id",
-    "run_id",
-    "decision_id",
-    "action_id",
-    "payload",
-    "event_sha256",
-)
-_JOURNAL_EVENT_KINDS = frozenset({
-    "actor_decision",
-    "admission",
-    "physical_attempt",
-    "raw_receipt",
-    "controller_transition",
-    "frame_artifact",
-})
-_JOURNAL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
-_JOURNAL_SHA256 = re.compile(r"[0-9a-f]{64}")
-_JOURNAL_GENESIS = "0" * 64
-
-
-def _strict_journal_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    value: dict[str, Any] = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError("duplicate_json_key")
-        value[key] = item
-    return value
-
-
-def _reject_journal_constant(_value: str) -> None:
-    raise ValueError("non_finite_number")
-
-
-def _canonical_journal_bytes(value: Any) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    except (RecursionError, TypeError, UnicodeEncodeError, ValueError):
-        raise ValueError("non_canonical_json") from None
-
-
-def _read_vnext_journal(
-    run_id: str,
-) -> tuple[list[dict[str, Any]], str, str | None]:
-    """Authenticate the frozen journal wire format without importing vNext."""
-
-    path = TRACES_DIR / "vnext_runtime_evidence" / run_id / "evidence.jsonl"
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return [], _JOURNAL_GENESIS, "read_failed"
-    if not data:
-        return [], _JOURNAL_GENESIS, None
-    if not data.endswith(b"\n"):
-        return [], _JOURNAL_GENESIS, "missing_trailing_newline"
-    lines = data[:-1].split(b"\n")
-    if any(not line for line in lines):
-        return [], _JOURNAL_GENESIS, "empty_event_line"
-
-    records: list[dict[str, Any]] = []
-    previous = _JOURNAL_GENESIS
-    mission_id = ""
-    try:
-        for sequence, line in enumerate(lines):
-            try:
-                text = line.decode("utf-8", errors="strict")
-            except UnicodeDecodeError:
-                raise ValueError("invalid_utf8") from None
-            try:
-                event = json.loads(
-                    text,
-                    object_pairs_hook=_strict_journal_object,
-                    parse_constant=_reject_journal_constant,
-                )
-            except (ValueError, RecursionError) as exc:
-                code = str(exc)
-                if code not in {"duplicate_json_key", "non_finite_number"}:
-                    code = "malformed_json"
-                raise ValueError(code) from None
-            if type(event) is not dict:
-                raise ValueError("event_not_object")
-            if set(event) != set(_JOURNAL_EVENT_FIELDS):
-                raise ValueError("event_fields")
-            if _canonical_journal_bytes(event) != line:
-                raise ValueError("non_canonical_event_bytes")
-            if event.get("format") != "runtime-evidence-journal-event/1":
-                raise ValueError("event_format")
-            if type(event.get("schema_version")) is not int or event["schema_version"] != 1:
-                raise ValueError("schema_version")
-            if type(event.get("sequence")) is not int or event["sequence"] != sequence:
-                raise ValueError("event_sequence")
-            if event.get("previous_event_sha256") != previous:
-                raise ValueError("hash_chain")
-            if (
-                type(event.get("event_kind")) is not str
-                or event["event_kind"] not in _JOURNAL_EVENT_KINDS
-            ):
-                raise ValueError("event_kind")
-            current_mission = event.get("mission_id")
-            current_run = event.get("run_id")
-            if (
-                type(current_mission) is not str
-                or _JOURNAL_IDENTITY.fullmatch(current_mission) is None
-                or type(current_run) is not str
-                or _JOURNAL_IDENTITY.fullmatch(current_run) is None
-            ):
-                raise ValueError("event_scope")
-            if current_run != run_id:
-                raise ValueError("run_scope")
-            if mission_id and current_mission != mission_id:
-                raise ValueError("mission_scope")
-            mission_id = current_mission
-            for field in ("decision_id", "action_id"):
-                identity = event.get(field)
-                if identity is not None and (
-                    type(identity) is not str
-                    or _JOURNAL_IDENTITY.fullmatch(identity) is None
-                ):
-                    raise ValueError(f"{field}_identity")
-            if type(event.get("payload")) is not dict:
-                raise ValueError("payload_not_object")
-            digest = event.get("event_sha256")
-            if (
-                type(digest) is not str
-                or _JOURNAL_SHA256.fullmatch(digest) is None
-            ):
-                raise ValueError("event_digest")
-            material = {
-                field: event[field]
-                for field in _JOURNAL_EVENT_FIELDS[:-1]
-            }
-            if hashlib.sha256(_canonical_journal_bytes(material)).hexdigest() != digest:
-                raise ValueError("event_hash")
-            records.append(event)
-            previous = digest
-    except (ValueError, TypeError, RecursionError) as exc:
-        return [], _JOURNAL_GENESIS, str(exc)
-    return records, previous, None
-
-
 def _physical_attempt_to_wps(
     attempt: Mapping[str, Any],
 ) -> dict[str, Any] | None:
@@ -1083,173 +931,72 @@ def _physical_attempt_to_wps(
     return None
 
 
-def _vnext_journal_steps(
+def _vnext_trace_steps(
     run_id: str,
     events: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Project one vNext run onto WPS steps from the single trace ledger."""
+
     trace_receipts: dict[str, list[dict[str, Any]]] = {}
+    attempts: dict[str, list[dict[str, Any]]] = {}
     reasons: list[str] = []
     explicit_vnext = any(
         event.get("runtime_version") == "vnext"
         and event.get("type") in {
             "arp_run_start",
             "arp_run_done",
-            "runtime_evidence_sealed",
             "vnext_model_call",
         }
         for event in events
     )
-    has_evidence_seal = any(
-        event.get("type") == "runtime_evidence_sealed"
-        and event.get("runtime_version") == "vnext"
-        for event in events
-    )
     for event in events:
-        if event.get("type") != "vnext_raw_receipt":
-            continue
+        event_type = event.get("type")
         decision_id = str(event.get("decision_id") or "").strip()
         if not decision_id:
-            reasons.append("raw_receipt_decision_id_missing")
+            if event_type in {"vnext_raw_receipt", "vnext_physical_attempt"}:
+                reasons.append(f"{event_type}_decision_id_missing")
             continue
-        receipt_run_id = event.get("run_id")
-        if receipt_run_id != run_id:
-            reasons.append(f"raw_receipt_run_scope_mismatch:{decision_id}")
+        event_run_id = event.get("run_id")
+        if event_run_id != run_id:
+            if event_type in {"vnext_raw_receipt", "vnext_physical_attempt"}:
+                reasons.append(f"{event_type}_run_scope_mismatch:{decision_id}")
             continue
-        trace_receipts.setdefault(decision_id, []).append(event)
+        if event_type == "vnext_raw_receipt":
+            trace_receipts.setdefault(decision_id, []).append(event)
+        elif event_type == "vnext_physical_attempt":
+            attempts.setdefault(decision_id, []).append(event)
 
-    journal_path = (
-        TRACES_DIR / "vnext_runtime_evidence" / run_id / "evidence.jsonl"
-    )
-    if not trace_receipts and not reasons and not journal_path.is_file():
+    if not trace_receipts and not attempts and not reasons:
         if not explicit_vnext:
             return [], [], False
-        if has_evidence_seal:
-            return [], ["runtime_evidence_missing"], True
         legacy_steps, legacy_reasons = _extract_replay_steps(events)
         if legacy_steps or legacy_reasons:
             reasons.append("vnext_trace_contains_legacy_replay")
         return [], reasons, True
 
-    if not journal_path.is_file():
-        if has_evidence_seal or any(
-            receipt.get("input_completed") is not False
-            for receipt_events in trace_receipts.values()
-            for receipt in receipt_events
-        ):
-            reasons.append("runtime_evidence_missing")
-        return [], list(dict.fromkeys(reasons)), True
-
-    journal, journal_head, journal_error = _read_vnext_journal(run_id)
-    if journal_error:
-        reasons.append(f"runtime_evidence_invalid:{journal_error}")
-        return [], list(dict.fromkeys(reasons)), True
-
-    journal_mission_id = str(journal[0].get("mission_id") or "") if journal else ""
-    if journal_mission_id:
-        scoped_receipts: dict[str, list[dict[str, Any]]] = {}
-        for decision_id, receipt_events in trace_receipts.items():
-            for receipt in receipt_events:
-                receipt_mission_id = receipt.get("mission_id")
-                if receipt_mission_id != journal_mission_id:
-                    reasons.append(
-                        f"raw_receipt_mission_scope_mismatch:{decision_id}"
-                    )
-                    continue
-                scoped_receipts.setdefault(decision_id, []).append(receipt)
-        trace_receipts = scoped_receipts
-
-    seal = next((
-        event
-        for event in reversed(events)
-        if event.get("type") == "runtime_evidence_sealed"
-        and str(event.get("run_id") or "") == run_id
-    ), None)
-    if seal is None:
-        reasons.append("runtime_evidence_seal_missing")
-    elif seal.get("mission_id") != journal_mission_id:
-        reasons.append("runtime_evidence_seal_mission_scope_mismatch")
-    else:
-        if seal.get("journal_head_sha256") != journal_head:
-            reasons.append("runtime_evidence_seal_head_mismatch")
-        if (
-            type(seal.get("journal_event_count")) is not int
-            or seal["journal_event_count"] != len(journal)
-        ):
-            reasons.append("runtime_evidence_seal_count_mismatch")
-        if (
-            seal.get("report_status") != "complete"
-            or type(seal.get("missing_evidence_count")) is not int
-            or seal["missing_evidence_count"] != 0
-            or type(seal.get("verification_failure_count")) is not int
-            or seal["verification_failure_count"] != 0
-        ):
-            reasons.append("runtime_evidence_report_incomplete")
-
-    attempts: dict[str, list[dict[str, Any]]] = {}
-    journal_receipts: dict[str, list[dict[str, Any]]] = {}
-    for event in journal:
-        decision_id = str(event.get("decision_id") or "")
-        if event.get("event_kind") == "physical_attempt":
-            attempts.setdefault(decision_id, []).append(event)
-        elif event.get("event_kind") == "raw_receipt":
-            journal_receipts.setdefault(decision_id, []).append(event)
-
     ordered_steps: list[tuple[int, int, dict[str, Any]]] = []
     all_decisions = list(dict.fromkeys([
         *trace_receipts,
         *attempts,
-        *journal_receipts,
     ]))
     for order, decision_id in enumerate(all_decisions):
         traced = trace_receipts.get(decision_id, [])
         recorded_attempts = attempts.get(decision_id, [])
-        recorded_receipts = journal_receipts.get(decision_id, [])
         if len(traced) > 1:
             reasons.append(f"duplicate_trace_raw_receipt:{decision_id}:{len(traced)}")
         if len(recorded_attempts) > 1:
             reasons.append(f"duplicate_physical_attempt:{decision_id}:{len(recorded_attempts)}")
-        if len(recorded_receipts) > 1:
-            reasons.append(f"duplicate_journal_raw_receipt:{decision_id}:{len(recorded_receipts)}")
         trace_receipt = traced[-1] if traced else None
         attempt_event = recorded_attempts[-1] if recorded_attempts else None
-        journal_receipt_event = recorded_receipts[-1] if recorded_receipts else None
-        trace_receipt_missing = trace_receipt is None
         if trace_receipt is None:
-            if attempt_event is not None and journal_receipt_event is not None:
-                reasons.append(f"trace_raw_receipt_missing:{decision_id}")
-                trace_receipt = {}
-            elif attempt_event is not None:
+            if attempt_event is not None:
                 reasons.append(f"physical_attempt_without_trace_receipt:{decision_id}")
-                continue
-            elif journal_receipt_event is not None:
-                reasons.append(f"journal_receipt_without_trace_receipt:{decision_id}")
-                continue
-            else:
-                continue
+            continue
 
         trace_completed = trace_receipt.get("input_completed")
         if trace_completed is not None and type(trace_completed) is not bool:
             reasons.append(f"trace_raw_receipt_invalid:{decision_id}")
             continue
-        if journal_receipt_event is None:
-            if trace_completed is not False or attempt_event is not None:
-                reasons.append(f"trace_receipt_without_journal_receipt:{decision_id}")
-        else:
-            receipt_payload = journal_receipt_event.get("payload")
-            journal_completed = (
-                receipt_payload.get("input_completed")
-                if isinstance(receipt_payload, dict)
-                else "invalid"
-            )
-            if journal_completed is not None and type(journal_completed) is not bool:
-                reasons.append(f"journal_raw_receipt_invalid:{decision_id}")
-                continue
-            if trace_receipt_missing:
-                trace_completed = journal_completed
-            elif journal_completed is not trace_completed:
-                reasons.append(f"raw_receipt_completion_mismatch:{decision_id}")
-                continue
-
         if trace_completed is None:
             reasons.append(f"physical_attempt_outcome_uncertain:{decision_id}")
             continue
@@ -1261,20 +1008,30 @@ def _vnext_journal_steps(
             reasons.append(f"completed_receipt_without_physical_attempt:{decision_id}")
             continue
 
-        attempt = attempt_event.get("payload")
-        if not isinstance(attempt, dict) or (
-            attempt.get("format") != "physical-attempt-record/1"
-            or (
-                journal_mission_id
-                and attempt.get("mission_id") != journal_mission_id
+        attempt_action = str(attempt_event.get("action") or "")
+        if not attempt_action:
+            reasons.append(f"physical_attempt_invalid:{decision_id}")
+            continue
+        attempt = {
+            "format": "physical-attempt-record/1",
+            "mission_id": str(attempt_event.get("mission_id") or ""),
+            "run_id": str(attempt_event.get("run_id") or ""),
+            "decision_id": str(attempt_event.get("decision_id") or ""),
+            "action_id": str(attempt_event.get("decision_id") or ""),
+            "action": attempt_action,
+            "physical_arguments": attempt_event.get("physical_arguments"),
+            "target_identity": attempt_event.get("target_identity"),
+            "timestamp_ns": attempt_event.get("timestamp_ns"),
+        }
+        if (
+            attempt["run_id"] != run_id
+            or attempt["decision_id"] != decision_id
+            or not isinstance(
+                attempt["physical_arguments"], Mapping
             )
-            or attempt.get("run_id") != run_id
-            or attempt.get("decision_id") != decision_id
-            or attempt.get("action_id") != decision_id
         ):
             reasons.append(f"physical_attempt_invalid:{decision_id}")
             continue
-        attempt_action = str(attempt.get("action") or "")
         controller_action = str(trace_receipt.get("controller_action") or "")
         if controller_action and controller_action != attempt_action:
             reasons.append(f"controller_action_mismatch:{decision_id}")
@@ -1282,32 +1039,15 @@ def _vnext_journal_steps(
         expected_raw_action = (
             "click" if attempt_action == "double_click" else attempt_action
         )
-        receipt_payload = (
-            journal_receipt_event.get("payload")
-            if journal_receipt_event is not None
-            else None
-        )
-        journal_action = str(
-            receipt_payload.get("action") or ""
-            if isinstance(receipt_payload, dict)
-            else ""
-        )
         trace_raw_action = str(trace_receipt.get("raw_action") or "")
-        if (
-            journal_action
-            and journal_action != expected_raw_action
-        ) or (
-            trace_raw_action
-            and journal_action
-            and trace_raw_action != journal_action
-        ):
+        if trace_raw_action and trace_raw_action != expected_raw_action:
             reasons.append(f"raw_receipt_action_mismatch:{decision_id}")
             continue
         replay = _physical_attempt_to_wps(attempt)
         if replay is None:
             reasons.append(
                 f"physical_action_not_replayable:"
-                f"{attempt.get('action') or '<missing>'}:{decision_id}"
+                f"{attempt_action}:{decision_id}"
             )
             continue
         step = dict(replay)
@@ -1467,7 +1207,7 @@ def _build_run_segment(
     if not events:
         raise FileNotFoundError(f"trace 不存在: {run_id}")
     legacy_steps, omissions = _extract_replay_steps(events)
-    vnext_steps, vnext_reasons, has_vnext_trace = _vnext_journal_steps(run_id, events)
+    vnext_steps, vnext_reasons, has_vnext_trace = _vnext_trace_steps(run_id, events)
     steps = vnext_steps if has_vnext_trace else legacy_steps
     reasons = [*omissions, *vnext_reasons]
     default_target = (

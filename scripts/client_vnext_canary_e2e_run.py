@@ -1850,7 +1850,6 @@ def _trace_audit(
     }
     done_events: list[dict[str, Any]] = []
     turn_events: list[dict[str, Any]] = []
-    runtime_evidence_anchors: list[dict[str, Any]] = []
     if runtime_version == "vnext":
         receipts = [
             item for item in events
@@ -1945,38 +1944,6 @@ def _trace_audit(
                 or done.get("model_calls") != len(model_events)
             ):
                 errors.append("vNext terminal status/budget/count/binding is not exact")
-        runtime_evidence_anchors = [
-            item
-            for item in events
-            if item.get("type") == "runtime_evidence_sealed"
-        ]
-        if len(runtime_evidence_anchors) != 1:
-            errors.append(
-                "expected one runtime evidence anchor, observed "
-                f"{len(runtime_evidence_anchors)}"
-            )
-        else:
-            anchor = runtime_evidence_anchors[0]
-            if (
-                str(anchor.get("run_id") or "") != visible_run_id
-                or str(anchor.get("mission_id") or "") != mission_id
-                or anchor.get("runtime_version") != "vnext"
-                or anchor.get("no_legacy_fallback") is not True
-            ):
-                errors.append("runtime evidence anchor scope is not exact")
-                if (
-                    anchor.get("runtime_version") != "vnext"
-                    or anchor.get("no_legacy_fallback") is not True
-                ):
-                    safety_abort_reasons.add("runtime_legacy_fallback")
-            if done_events and events.index(anchor) >= events.index(done_events[0]):
-                errors.append("runtime evidence anchor must precede vNext terminal")
-    elif any(
-        item.get("type") == "runtime_evidence_sealed"
-        for item in events
-    ):
-        errors.append("legacy trace contains runtime evidence anchor")
-
     trace_sha256 = ""
     trace_path = Path(trace_file)
     if trace_path.is_file() and not trace_path.is_symlink():
@@ -1997,7 +1964,6 @@ def _trace_audit(
         "target_binding_id": target_binding_id,
         "turn_count": len(turn_events),
         "done_count": len(done_events),
-        "runtime_evidence_anchor_count": len(runtime_evidence_anchors),
         "receipt_summary": receipt_summary,
         "safety_abort_reasons": sorted(safety_abort_reasons),
         "errors": errors,

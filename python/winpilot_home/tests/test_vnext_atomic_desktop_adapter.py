@@ -2209,7 +2209,7 @@ def test_drag_publishes_every_image_path_point_in_physical_order() -> None:
     dispatch = next(
         event
         for event in events
-        if event.get("type") == "vnext_pointer_dispatch"
+        if event.get("type") == "vnext_physical_attempt"
     )
     assert dispatch["image_coordinates"] == submitted
     assert dispatch["submitted_image_size"] == [100, 80]
@@ -2253,7 +2253,7 @@ def test_drag_passes_generic_held_keys_to_the_same_physical_action() -> None:
     dispatch = next(
         event
         for event in events
-        if event.get("type") == "vnext_pointer_dispatch"
+        if event.get("type") == "vnext_physical_attempt"
     )
     assert dispatch["image_coordinates"]["held_keys"] == ["shift", "w"]
     assert dispatch["physical_arguments"]["held_keys"] == ["shift", "w"]
