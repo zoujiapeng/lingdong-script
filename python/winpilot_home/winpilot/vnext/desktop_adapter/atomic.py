@@ -41,6 +41,7 @@ from ...action.raw_device import (
 )
 from ...action.replay_policy import MutationOutcome
 from ...utils.log import BUS
+from ...utils.replay_frames import save_pending_click_frame
 from ...utils.screenshot import Region, virtual_screen_region
 from ...visual_runtime.frame_authority import FrameAuthority, FrameState
 from ...visual_runtime.frame_observer import FrameObserver
@@ -209,7 +210,7 @@ class AtomicDesktopAdapter:
         raw_device: RawDeviceExecutor,
         receipt_trace_sink: RawReceiptTraceSink | None = None,
         launcher: Callable[[str, str], Mapping[str, Any]] | None = None,
-        post_input_settle_delay_s: float = 0.12,
+        post_input_settle_delay_s: float = 1.0,
         wait: Callable[[float], Any] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         held_pointer_timeout_s: float = _DEFAULT_HELD_POINTER_TIMEOUT_S,
@@ -1536,12 +1537,19 @@ class AtomicDesktopAdapter:
                     for event in prepared.events
                 ),
             }
+            events: list[dict[str, Any]] = []
             pointer_events: list[dict[str, int | str | None]] = []
             for index, event in enumerate(prepared.events):
+                serialized: dict[str, Any] = {"kind": event.kind.value}
                 if event.kind in {
                     InputEventKind.MOVE,
                     InputEventKind.MOVE_RELATIVE,
                 }:
+                    serialized.update(
+                        x=event.x,
+                        y=event.y,
+                        duration_ms=event.duration_ms,
+                    )
                     pointer_events.append({
                         "index": index,
                         "kind": event.kind.value,
@@ -1554,17 +1562,25 @@ class AtomicDesktopAdapter:
                     InputEventKind.MOUSE_UP,
                 }:
                     assert event.button is not None
+                    serialized["button"] = event.button.value
                     pointer_events.append({
                         "index": index,
                         "kind": event.kind.value,
                         "button": event.button.value,
                     })
                 elif event.kind in {InputEventKind.WHEEL, InputEventKind.HWHEEL}:
+                    serialized["amount"] = event.amount
                     pointer_events.append({
                         "index": index,
                         "kind": event.kind.value,
                         "amount": event.amount,
                     })
+                elif event.kind in {InputEventKind.KEY_DOWN, InputEventKind.KEY_UP}:
+                    serialized["key"] = event.key
+                else:
+                    serialized["duration_ms"] = event.duration_ms
+                events.append(serialized)
+            arguments["events"] = events
             arguments["pointer_events"] = pointer_events
             return arguments
         if prepared.action == "type_text":
@@ -1649,6 +1665,16 @@ class AtomicDesktopAdapter:
                 "title_snapshot": binding.title_snapshot,
             }
         )
+        replay_frame = None
+        if prepared.action in {"click", "double_click"}:
+            try:
+                replay_frame = save_pending_click_frame(
+                    run_id=envelope.run_id,
+                    decision_id=envelope.decision_id,
+                    image_b64=frame.image_b64,
+                )
+            except Exception:
+                replay_frame = None
         try:
             BUS.publish(
                 "vnext_physical_attempt",
@@ -1668,6 +1694,7 @@ class AtomicDesktopAdapter:
                 target_identity=target_identity,
                 timestamp_ns=time.time_ns(),
                 parameter_visibility="physical_attempt",
+                **({"replay_frame": replay_frame} if replay_frame else {}),
             )
         except Exception:
             # Diagnostics must never reject or replay physical input.

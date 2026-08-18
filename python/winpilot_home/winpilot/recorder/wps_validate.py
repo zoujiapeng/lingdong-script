@@ -16,7 +16,9 @@ from .replay_control import count_leaves
 LEAF_TOOLS = frozenset({
     "click", "type_text", "hotkey", "launch", "focus_window",
     "scroll", "drag", "wait", "run_shell", "tray_click",
-    "draw_strokes", "run_detached",
+    "draw_strokes", "run_detached", "move_mouse", "input_sequence",
+    "launch_application", "copy_current_view", "capture_screen",
+    "paste_image_file", "write_file",
 })
 CTRL_TOOLS = frozenset({"ctrl.if", "ctrl.loop"})
 EXT_TOOLS = frozenset({
@@ -125,8 +127,14 @@ def _validate_leaf_step(step: dict, loc: str) -> str | None:
         return f"{loc} type_text requires text_input"
     if tool == "hotkey" and not isinstance(step.get("keys"), list):
         return f"{loc} hotkey requires keys[]"
+    if tool == "move_mouse" and not _is_point(step.get("coords")):
+        return f"{loc} move_mouse requires coords"
+    if tool == "input_sequence" and not isinstance(step.get("events"), list):
+        return f"{loc} input_sequence requires events[]"
     if tool == "launch" and not _nonempty_str(step.get("command")):
         return f"{loc} launch requires command"
+    if tool == "launch_application" and not _nonempty_str(step.get("app")):
+        return f"{loc} launch_application requires app"
     if tool == "focus_window" and not _nonempty_str(step.get("title")):
         return f"{loc} focus_window requires title"
     if tool == "scroll" and not _is_point(step.get("coords")):
@@ -141,6 +149,22 @@ def _validate_leaf_step(step: dict, loc: str) -> str | None:
         return f"{loc} run_shell requires command"
     if tool == "run_detached" and not _nonempty_str(step.get("script")):
         return f"{loc} run_detached requires script"
+    if tool == "copy_current_view":
+        reference = step.get("reference_frame")
+        if not isinstance(reference, dict) or not any(
+            _nonempty_str(reference.get(key))
+            for key in ("path", "pending_path", "asset")
+        ):
+            return f"{loc} copy_current_view requires a reference frame"
+    if tool == "capture_screen" and not _nonempty_str(step.get("path")):
+        return f"{loc} capture_screen requires path"
+    if tool == "paste_image_file" and not isinstance(step.get("path"), str):
+        return f"{loc} paste_image_file requires path"
+    if tool == "write_file" and (
+        not _nonempty_str(step.get("path"))
+        or not isinstance(step.get("content"), str)
+    ):
+        return f"{loc} write_file requires path and content"
     if tool == "tray_click" and not _nonempty_str(step.get("name")):
         return f"{loc} tray_click requires name"
     if tool == "ext.delay" and not _is_number(step.get("seconds", 0)):

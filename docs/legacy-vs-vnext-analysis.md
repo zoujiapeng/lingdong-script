@@ -113,8 +113,8 @@ Electron 智能代理页 (src/renderer/platform/)
 | `python/agent/` | 2 文件 | dialog_handler / menu_handler | `engine/executor.py`、`features/{dialog,filedialog,menu}_features.py`、`rpa_keywords` |
 | `python/{core,interaction,perception,utils,providers,rpa_keywords,lobster_mcp,macros}` | 约 20+ 文件 | 旧引擎支撑、轮选器、旧 provider、MCP wrapper、宏数据 | 同上旧线 |
 | `src/main/{engine,api,featureCallBridge,mcp-handler,schedulerBridge,macroPaths}.ts` | 6 文件 | 7880 本地 API、F9 桥、feature 桥、宏桥、调度桥 | 旧消费者与外部集成 |
-| `src/main/main.ts` 旧 IPC | ~10 handler | `engine:*`、`ai:generate`、`dsl:toFlow`、`features:list`、`feature:call`、`macro:*`、`screenshot:capture`、`ocr:recognizeRegion`、`interaction:wheelSelect`、`.claude.json` 自动注册(main.ts:1529) | renderer 旧参数控件 |
-| renderer 兼容面 | — | `store/index.ts` 的 `startExecution`(F9 兼容执行器，仅 "历史流程")、`fetchFeatures/callFeatureDirect`、`dslToFlow/aiGenerate`、PropertyPanel 的 `ClickTextParams`(OCR)、`ImageClickParams`(截图)、`WheelSelectControl`(轮选) | Studio 旧参数控件 |
+| `src/main/main.ts` 旧 IPC | ~10 handler | `engine:*`、`dsl:toFlow`、`features:list`、`feature:call`、`macro:*`、`screenshot:capture`、`ocr:recognizeRegion`、`interaction:wheelSelect`、`.claude.json` 自动注册(main.ts:1529) | renderer 旧参数控件 |
+| renderer 兼容面 | — | `store/index.ts` 的 `startExecution`(F9 兼容执行器，仅 "历史流程")、`fetchFeatures/callFeatureDirect`、`dslToFlow`、PropertyPanel 的 `ClickTextParams`(OCR)、`ImageClickParams`(截图)、`WheelSelectControl`(轮选) | Studio 旧参数控件 |
 
 ### 3.3 零消费者死面（可立即删除）
 

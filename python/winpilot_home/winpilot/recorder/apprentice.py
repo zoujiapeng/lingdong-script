@@ -30,13 +30,12 @@ class ApprenticeManager:
         app: str = "",
         verification: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        task = str(task or "").strip()
-        if not task:
-            raise ValueError("apprentice mode requires a task")
+        task = str(task or "").strip() or "未命名录制"
         requirements = list(verification or [])
-        evidence_error = trace_mod.validate_evidence_requirements(requirements)
-        if evidence_error:
-            raise ValueError(evidence_error)
+        if requirements:
+            evidence_error = trace_mod.validate_evidence_requirements(requirements)
+            if evidence_error:
+                raise ValueError(evidence_error)
         with self._lock:
             if self.recorder.is_recording():
                 raise RuntimeError("a demonstration is already recording")

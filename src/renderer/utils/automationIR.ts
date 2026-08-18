@@ -19,25 +19,8 @@ export interface AutomationIR {
   evidence: Record<string, unknown>;
   steps: Array<Record<string, unknown>>;
   variables: Record<string, string>;
-  safety: Record<string, unknown>;
-  fallback: Record<string, unknown>;
   runtime?: AutomationRuntime;
 }
-
-const DESKTOP_MUTATION_TOOLS = new Set([
-  'click',
-  'type_text',
-  'hotkey',
-  'launch',
-  'focus_window',
-  'scroll',
-  'drag',
-  'draw_strokes',
-  'run_detached',
-  'tray_click',
-  'ext.clipboard_set',
-]);
-const SHELL_TOOLS = new Set(['run_shell', 'run_detached', 'ext.run_shell']);
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? null));
@@ -62,6 +45,24 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function flowParams(value: unknown): Record<string, unknown> {
+  const params = clone(record(value) || {});
+  delete params.allow_shell;
+  delete params.preflight_contract;
+  delete params.postflight_evidence;
+  return params;
+}
+
+function flowSource(value: FlowScript['source'] | undefined): FlowScript['source'] | undefined {
+  if (!value) return undefined;
+  const source = clone(value);
+  if (source.kind === 'wps' && record(source.raw)) {
+    delete source.raw.safety;
+    delete source.raw.fallback;
+  }
+  return source;
+}
+
 function preservedWpsMetadata(script: FlowScript): Record<string, unknown> | undefined {
   return script.source?.kind === 'wps' ? record(script.source.raw) : undefined;
 }
@@ -69,31 +70,6 @@ function preservedWpsMetadata(script: FlowScript): Record<string, unknown> | und
 function canonicalEvidence(value: unknown): Record<string, unknown> {
   if (Array.isArray(value)) return { required: clone(value) };
   return clone(record(value) || { required: [] });
-}
-
-function walkWpsSteps(steps: WpsStep[]): WpsStep[] {
-  const out: WpsStep[] = [];
-  for (const step of steps || []) {
-    out.push(step);
-    for (const key of ['then', 'else', 'body']) {
-      const nested = step[key];
-      if (Array.isArray(nested)) out.push(...walkWpsSteps(nested as WpsStep[]));
-    }
-  }
-  return out;
-}
-
-function defaultSafetyForWps(steps: WpsStep[]): Record<string, unknown> {
-  const flat = walkWpsSteps(steps);
-  const mutatesDesktop = flat.some((step) => DESKTOP_MUTATION_TOOLS.has(String(step.tool || '')));
-  const usesShell = flat.some((step) => SHELL_TOOLS.has(String(step.tool || '')));
-  return {
-    requires_preflight: mutatesDesktop || usesShell,
-    mutates_desktop: mutatesDesktop,
-    uses_shell: usesShell,
-    desktop_action_queue_required: mutatesDesktop,
-    shell_requires_explicit_runtime: usesShell,
-  };
 }
 
 function targetWindowFromWps(script: WpsScript): unknown {
@@ -138,11 +114,6 @@ export function automationIrFromWps(script: WpsScript, id = `air-${nanoid(12)}`)
     evidence: Array.isArray(anyScript.evidence) ? { required: clone(anyScript.evidence) } : clone(anyScript.evidence || { required: [] }),
     steps: steps as Array<Record<string, unknown>>,
     variables: clone(script.vars || {}),
-    safety: defaultSafetyForWps(steps),
-    fallback: {
-      on_preflight_fail: 'stop',
-      on_step_fail: 'stop',
-    },
     runtime: { kind: 'wps_replay' },
   };
 }
@@ -243,7 +214,7 @@ function serializeFlowStep(node: FlowNode, edges: FlowEdge[]): Record<string, un
     y: node.y,
     label: node.label || '',
     ...(node.disabled !== undefined ? { disabled: Boolean(node.disabled) } : {}),
-    params: clone(node.params || {}),
+    params: flowParams(node.params),
     outgoing: edges
       .filter((edge) => edge.from_node === node.id)
       .map((edge) => ({
@@ -283,22 +254,12 @@ export function automationIrFromFlowScript(script: FlowScript, id = `air-${nanoi
       meta: clone(script.meta || {}),
       settings: clone(script.settings || {}),
       triggers: clone(script.triggers || []),
-      ...(script.source ? { raw: clone(script.source) } : {}),
+      ...(script.source ? { raw: flowSource(script.source) } : {}),
     },
     conditions,
     evidence: canonicalEvidence(wps?.evidence),
     steps,
     variables,
-    safety: clone(record(wps?.safety) || {
-      requires_preflight: true,
-      mutates_desktop: true,
-      desktop_action_queue_required: true,
-      executor: 'flowscript',
-    }),
-    fallback: clone(record(wps?.fallback) || {
-      on_preflight_fail: 'stop',
-      on_step_fail: 'stop',
-    }),
     runtime: {
       kind: 'arp_graph',
       graph,
@@ -346,12 +307,6 @@ export function validateAutomationRuntime(ir: AutomationIR): string | undefined 
   }
   return undefined;
 }
-
-const SPATIAL_TARGET_REQUIRED = new Set([
-  'click', 'double_click', 'click_element', 'scroll', 'move_mouse', 'drag',
-  'draw_strokes', 'ensure_input_mode', 'select_color', 'mouse_down', 'mouse_up',
-  'coordinate_click_test', 'paste_image_file',
-]);
 
 function parseLocalControllerAction(value: unknown): { name: string; inputs: Record<string, unknown> } | undefined {
   const action = record(value);
@@ -413,11 +368,7 @@ function localControllerActionError(value: unknown): string | undefined {
   return undefined;
 }
 
-/**
- * Fast, network-free structural validation for the editor. The Python control
- * plane remains authoritative before execution; this keeps basic graph editing
- * useful while that local service is starting or unavailable.
- */
+/** Fast, network-free shape checking for readable editor errors. */
 export function validateAutomationLocally(ir: AutomationIR): GraphValidation {
   const runtimeError = validateAutomationRuntime(ir);
   if (runtimeError) {
@@ -427,7 +378,7 @@ export function validateAutomationLocally(ir: AutomationIR): GraphValidation {
     return {
       valid: true,
       errors: [],
-      warnings: ['本地格式检查已通过；执行前仍需本机运行时验证重放步骤。'],
+      warnings: ['本地格式检查已通过；重放会按脚本中的动作直接执行。'],
       entry_node: null,
       reachable_nodes: [],
     };
@@ -536,45 +487,6 @@ export function validateAutomationLocally(ir: AutomationIR): GraphValidation {
       }
     }
 
-    const pendingTargetStates: Array<[string, boolean]> = [[starts[0], false]];
-    const seenTargetStates = new Set<string>();
-    const targetErrors = new Set<string>();
-    while (pendingTargetStates.length) {
-      const [nodeId, targetEstablished] = pendingTargetStates.shift()!;
-      const stateKey = `${nodeId}\u0000${targetEstablished ? '1' : '0'}`;
-      if (seenTargetStates.has(stateKey)) continue;
-      seenTargetStates.add(stateKey);
-      const node = nodeMap.get(nodeId)!;
-      let establishedAfter = targetEstablished;
-      if (node.kind === 'action_batch' && !node.disabled && Array.isArray(node.config.actions)) {
-        for (const value of node.config.actions) {
-          const action = parseLocalControllerAction(value);
-          if (!action) continue;
-          if (action.name === 'focus_window' && (Boolean(action.inputs.hwnd) || str(action.inputs.title))) {
-            establishedAfter = true;
-          } else if (SPATIAL_TARGET_REQUIRED.has(action.name) && !establishedAfter) {
-            targetErrors.add(
-              `动作批次节点 ${node.id} 在空间动作 ${action.name} 前必须确保每条可达路径都已通过带 hwnd/title 的 focus_window 建立目标。`,
-            );
-          }
-        }
-      }
-      for (const edge of outgoing.get(nodeId) || []) {
-        pendingTargetStates.push([edge.target, establishedAfter]);
-      }
-    }
-    errors.push(...[...targetErrors].sort());
-
-    if (graph.policy.require_evidence_on_done) {
-      const evidenceKinds = new Set([
-        'action_batch', 'replay_step', 'skill_replay',
-        'task_stage', 'evidence_gate', 'human_gate',
-      ]);
-      const hasEvidenceNode = graph.nodes.some((node) => (
-        seen.has(node.id) && !node.disabled && evidenceKinds.has(node.kind)
-      ));
-      if (!hasEvidenceNode) errors.push('流程要求完成证据，但没有可达的证据节点。');
-    }
   }
 
   return {
@@ -602,8 +514,6 @@ export function automationIrToWps(ir: AutomationIR): WpsScript {
     created: created(ir.created),
     vars: clone(ir.variables || {}),
     steps: clone(ir.steps || []) as WpsStep[],
-    safety: clone(ir.safety || {}),
-    fallback: clone(ir.fallback || {}),
   };
   if (conditions.target_window !== undefined && conditions.target_window !== null && conditions.target_window !== '') {
     script.target_window = clone(conditions.target_window);
@@ -641,12 +551,8 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
         ...(flow.source?.raw || {}),
         conditions: clone(ir.conditions),
         evidence: clone(ir.evidence),
-        safety: clone(ir.safety),
-        fallback: clone(ir.fallback),
       },
     };
-    const replay = [...flow.nodes].reverse().find((node) => node.type === 'replay_step');
-    if (replay) replay.params = { ...replay.params, postflight_evidence: clone(ir.evidence) };
     return assertEditableFlowScript(flow);
   }
   if (source.kind !== 'flowscript') {
@@ -659,7 +565,7 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
       type: str(step.tool) as FlowNode['type'],
       x: Number.isFinite(Number(step.x)) ? Number(step.x) : 80,
       y: Number.isFinite(Number(step.y)) ? Number(step.y) : index * 112,
-      params: clone(step.params || {}),
+      params: flowParams(step.params),
       ...(str(step.label) ? { label: str(step.label) } : {}),
       ...(step.disabled !== undefined ? { disabled: Boolean(step.disabled) } : {}),
     };
@@ -711,7 +617,7 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
     },
     ...(Array.isArray(source.triggers) ? { triggers: clone(source.triggers) as FlowScript['triggers'] } : {}),
     ...(rawSource && str(rawSource.kind) && record(rawSource.raw)
-      ? { source: clone(rawSource) as unknown as FlowScript['source'] }
+      ? { source: flowSource(clone(rawSource) as unknown as FlowScript['source']) }
       : {}),
   });
 }
@@ -744,6 +650,7 @@ export function assertEditableFlowScript(value: unknown): FlowScript {
     if (!node.params || typeof node.params !== 'object' || Array.isArray(node.params)) {
       throw new Error(`节点 ${id} 的 params 必须是对象。`);
     }
+    node.params = flowParams(node.params) as FlowNode['params'];
     const x = finiteCoordinate(node.x);
     const y = finiteCoordinate(node.y);
     if (x === undefined || y === undefined) {
@@ -768,6 +675,7 @@ export function assertEditableFlowScript(value: unknown): FlowScript {
       throw new Error(`连线 ${id} 引用了不存在的节点。`);
     }
   }
+  script.source = flowSource(script.source);
   return script;
 }
 
@@ -794,7 +702,7 @@ export function validateAutomationIR(value: unknown): string | undefined {
   if (ir.format !== 'automation-ir/1') return `未知的 Automation IR 格式：${(ir as any).format}`;
   if (!str(ir.id)) return 'Automation IR 缺少 id';
   if (!str(ir.name)) return 'Automation IR 缺少 name';
-  for (const key of ['source', 'conditions', 'evidence', 'safety', 'fallback'] as const) {
+  for (const key of ['source', 'conditions', 'evidence'] as const) {
     if (!ir[key] || typeof ir[key] !== 'object' || Array.isArray(ir[key])) return `${key} 必须是对象`;
   }
   if (!ir.variables || typeof ir.variables !== 'object' || Array.isArray(ir.variables)) return 'variables 必须是对象';

@@ -121,7 +121,7 @@ Actor 请求层还会二次执行 `_bounded_thread_messages`：把“成功历�
 
 ## 4. 精确三节点壳与唯一语义节点
 
-产品图不是模型计划。它严格固定为 `start → full-goal → end` 三个节点、两条边；只有 `full-goal` 是 `AGENT_GOAL` 语义节点。policy 要求单次 node visit、fail fast、done 需要 evidence、shell 禁止、desktop mutation 允许。图 ID 由完整 goal 确定性绑定。
+产品图不是模型计划。它严格固定为 `start → full-goal → end` 三个节点、两条边；只有 `full-goal` 是 `AGENT_GOAL` 语义节点。policy 只保留单次 node visit 与 fail fast；模型能力不再由图上的装饰性安全开关表达。图 ID 由完整 goal 确定性绑定。
 
 ```text
 build_exact_live_vnext_graph(goal):
@@ -130,10 +130,7 @@ build_exact_live_vnext_graph(goal):
   edges = [start -> full-goal, full-goal -> end]
   policy = {
     max_node_visits: 1,
-    fail_fast: true,
-    require_evidence_on_done: true,
-    allow_shell: false,
-    allow_desktop_mutation: true
+    fail_fast: true
   }
   graph = Graph(nodes, edges, policy)
   assert len(graph.nodes) == 3 and len(graph.edges) == 2
@@ -436,11 +433,11 @@ sequenceDiagram
 
 当 drag 设 `keep_holding=true` 且物理输入完成，Adapter保留一个 run-owned lease。下一帧 Broker只提供 drag；新 drag 可以继续移动并再次保持，或释放。超时、异常、取消、close 都会做有界 `mouse_up` 清理。
 
-### 13.7 launch 与 capture
+### 13.7 launch 与复制当前画面
 
 `launch_application` 发现已运行进程时稳定合并可见/隐藏候选，优先普通窗而不是
-`WS_EX_TOOLWINDOW`，只恢复排序后的一个候选；没有应用 recipe。`capture_screen` 不在
-vNext重复验证绝对路径、扩展名或文件存在性，相对 path由物理 backend按 Runtime cwd处理。
+`WS_EX_TOOLWINDOW`，只恢复排序后的一个候选；没有应用 recipe。`copy_current_view` 把该模型轮已看到的
+JPEG 直接放进剪贴板，不重抓画面、不产生或查找图片路径。后续的窗口切换和 `Ctrl+V` 仍由 Actor 选择普通动作。
 
 ## 14. 动作后的新屏幕
 
@@ -480,6 +477,7 @@ Actor提交规范 `blocker_kind` 与去重的 `observed_facts`，Runtime写 `obl
 - pause 只在安全边界等待；暂停耗时会补回 deadline；
 - 如果 pause 在 Actor admission 前到达，当前 `UNAVAILABLE` 可投影为安全的 stale boundary；
 - cancel 设置 run stop event；Actor、connector、lease wait、queue 和外层 deadline 都观察它；
+- 全局 `F8`/`F9` 的 Agent 停止由 Electron 主进程直连当前 Runtime run，不依赖 Renderer 的 `currentRun` 快照；
 - 若输入尚未开始，明确 canceled/rejected；
 - 若输入已开始或结果未知，先记录真实 receipt，再进入保守终态；
 - close 时无论任务结果如何都必须清理 held pointer 与模型资源。

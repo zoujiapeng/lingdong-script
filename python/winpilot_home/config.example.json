@@ -99,12 +99,12 @@
   },
   "integrations": {
     "chatgpt_desktop": {
-      "enabled": true,
-      "allow_desktop_mutation": true
+      "enabled": true
     }
   },
   "vnext": {
     "live_agent_enabled": true,
+    "save_click_reference_frames": false,
     "max_turns": 200,
     "max_runtime_s": 7200,
     "max_model_calls": 400

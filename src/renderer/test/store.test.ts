@@ -27,7 +27,6 @@ const mockElectronAPI = {
   engineStatus: vi.fn(async () => 'idle'),
   captureScreenshot: vi.fn(async () => ''),
   ocrRecognizeRegion: vi.fn(async () => ''),
-  aiGenerate: vi.fn(async () => null),
   dslToFlow: vi.fn(async () => null),
   featuresList: vi.fn(async () => []),
   callFeature: vi.fn(async () => ({ success: true })),
@@ -73,19 +72,13 @@ describe('store', () => {
     const state = useStore.getState();
 
     expect(state.script).toBeDefined();
-    // Store loads a valid, side-effect-free ARP workflow by default.
+    // Store starts with a small editable canvas; execution nodes are opt-in.
     expect(state.script.nodes.length).toBeGreaterThan(0);
     expect(state.script.edges.length).toBeGreaterThan(0);
-    expect(state.script.meta.name).toBe('ARP 低延迟起步流程');
+    expect(state.script.meta.name).toBe('Blank flow');
     expect(state.script.nodes.map((node) => node.type)).toEqual([
-      'start', 'action_batch', 'human_gate', 'evidence_gate', 'end',
+      'start', 'end',
     ]);
-    const humanGate = state.script.nodes.find((node) => node.type === 'human_gate');
-    expect(humanGate?.params).toMatchObject({ message: expect.any(String) });
-    expect(humanGate?.params).not.toHaveProperty('approved', true);
-    expect(state.script.nodes.find((node) => node.type === 'evidence_gate')?.params).toMatchObject({
-      required: [{ predicate: 'human.approved', source: 'human_gate', equals: true }],
-    });
     expect(state.ui).toBeDefined();
     expect(state.ui.dark_mode).toBe(false);
     expect(state.ui.themeMode).toBe('system');
@@ -215,7 +208,7 @@ describe('store', () => {
 
     useStore.getState().newScript();
     const state = useStore.getState();
-    expect(state.script.meta.name).toBe('ARP 低延迟起步流程');
+    expect(state.script.meta.name).toBe('Blank flow');
     expect(state.script.nodes.some(n => n.id === addedId)).toBe(false);
     expect(state.isDirty).toBe(false);
   });

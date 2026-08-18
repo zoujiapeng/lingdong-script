@@ -302,8 +302,8 @@ function pushHistory(nodes: FlowNode[], edges: FlowEdge[]) {
   historyIndex = history.length - 1;
 }
 
-const initialScript = createTemplateScript('arp-quickstart');
-if (!initialScript) throw new Error('Default ARP template is unavailable.');
+const initialScript = createTemplateScript('blank-flow');
+if (!initialScript) throw new Error('Default flow template is unavailable.');
 pushHistory(initialScript.nodes, initialScript.edges);
 
 export const useStore = createWithEqualityFn<AppStore>()(
@@ -342,8 +342,8 @@ export const useStore = createWithEqualityFn<AppStore>()(
     paramPromptQueue: [],
 
     newScript: () => {
-      const s = createTemplateScript('arp-quickstart');
-      if (!s) throw new Error('Default ARP template is unavailable.');
+      const s = createTemplateScript('blank-flow');
+      if (!s) throw new Error('Default flow template is unavailable.');
       history = [];
       historyIndex = -1;
       pushHistory(s.nodes, s.edges);

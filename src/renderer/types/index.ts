@@ -444,7 +444,6 @@ export interface ReplayStepNodeParams {
   target_window?: unknown;
   session?: string;
   pace_ms?: number;
-  allow_shell?: boolean;
   retry_max_attempts?: number;
   retry_delay_ms?: number;
   description?: string;

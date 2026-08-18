@@ -138,11 +138,13 @@ _DEFAULTS: dict[str, Any] = {
     "integrations": {
         "chatgpt_desktop": {
             "enabled": True,
-            "allow_desktop_mutation": True,
         },
     },
     "vnext": {
         "live_agent_enabled": True,
+        # Click samples are optional export material, not part of the model
+        # loop.  Keep them off unless the user explicitly wants CV examples.
+        "save_click_reference_frames": False,
         # Generous real-task budgets: slow visual providers and multi-step
         # ordinary desktop tasks must not be cut off by a tight wall clock or
         # turn cap.  Completion quality beats bounded-run accounting.

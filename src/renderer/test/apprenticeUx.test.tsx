@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PlatformWorkbench } from '../components/platform/PlatformWorkbench';
@@ -184,49 +184,18 @@ describe('runtime-job polling UX', () => {
 });
 
 describe('flow launch snapshot UX', () => {
-  it('launches an unchanged graph after asynchronous runtime validation', async () => {
-    useStore.getState().newScript();
+  it('launches a locally valid graph without a duplicate runtime validation request', async () => {
+    useStore.getState().loadTemplate('arp-quickstart');
     useStore.getState().setViewMode('studio');
-    let finishValidation!: (value: { valid: boolean; errors: string[]; warnings: string[] }) => void;
-    const pendingValidation = new Promise<{ valid: boolean; errors: string[]; warnings: string[] }>((resolve) => {
-      finishValidation = resolve;
-    });
     const { plane } = createPlane();
-    plane.validateAutomation = vi.fn(() => pendingValidation);
+    plane.validateAutomation = vi.fn(async () => ({ valid: true, errors: [], warnings: [] }));
     plane.startAutomation = vi.fn(async () => undefined);
     controlPlane.current = plane;
     const user = userEvent.setup();
     render(<PlatformWorkbench />);
 
     await user.click(await screen.findByRole('button', { name: '运行工作流' }));
-    await waitFor(() => expect(plane.validateAutomation).toHaveBeenCalledOnce());
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    await act(async () => finishValidation({ valid: true, errors: [], warnings: [] }));
-
     await waitFor(() => expect(plane.startAutomation).toHaveBeenCalledOnce());
-  });
-
-  it('does not launch a graph changed while runtime validation is pending', async () => {
-    useStore.getState().newScript();
-    useStore.getState().setViewMode('studio');
-    let finishValidation!: (value: { valid: boolean; errors: string[]; warnings: string[] }) => void;
-    const pendingValidation = new Promise<{ valid: boolean; errors: string[]; warnings: string[] }>((resolve) => {
-      finishValidation = resolve;
-    });
-    const { plane } = createPlane();
-    plane.validateAutomation = vi.fn(() => pendingValidation);
-    plane.startAutomation = vi.fn(async () => undefined);
-    controlPlane.current = plane;
-    const user = userEvent.setup();
-    render(<PlatformWorkbench />);
-
-    await user.click(await screen.findByRole('button', { name: '运行工作流' }));
-    await waitFor(() => expect(plane.validateAutomation).toHaveBeenCalledOnce());
-    const node = useStore.getState().script.nodes[0];
-    act(() => useStore.getState().updateNode(node.id, { label: `${node.label}（已修改）` }));
-    await act(async () => finishValidation({ valid: true, errors: [], warnings: [] }));
-
-    expect(await screen.findByText('流程在验证期间已发生变化；旧结果已丢弃，请重新验证或运行当前版本。')).toBeInTheDocument();
-    expect(plane.startAutomation).not.toHaveBeenCalled();
+    expect(plane.validateAutomation).not.toHaveBeenCalled();
   });
 });

@@ -2918,6 +2918,37 @@ def test_hotkey_accepts_string_chord_via_canonical_normalization() -> None:
     assert repeat == 1
 
 
+@pytest.mark.parametrize(
+    ("action", "action_args"),
+    (
+        ("hotkey", {"keys": ["printscreen"]}),
+        ("hotkey", {"keys": "print_screen"}),
+        ("input_sequence", {"sequence": "press printscreen"}),
+        (
+            "drag",
+            {
+                "image_path": [[50.0, 40.0], [80.0, 60.0]],
+                "held_keys": ["print_screen"],
+            },
+        ),
+    ),
+)
+def test_agent_cannot_send_printscreen(
+    action: str,
+    action_args: dict[str, Any],
+) -> None:
+    harness = _harness(action, action_args=action_args)
+
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.REJECTED
+    assert attempt.transition.input_completed is False
+    assert attempt.transition.error_kind
+    assert harness.raw.calls == []
+
+
 def test_hotkey_folds_aliases_and_orders_chord_modifiers() -> None:
     harness = _harness(
         "hotkey",

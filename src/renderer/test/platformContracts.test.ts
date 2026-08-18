@@ -614,7 +614,7 @@ describe('flow to ARP compiler', () => {
     }
   });
 
-  it('compiles exact replay steps as native zero-token nodes with explicit shell policy', () => {
+  it('compiles exact replay steps without an execution-policy gate', () => {
     const script = scriptFixture();
     script.nodes.splice(1, 0, {
       id: 'offline',
@@ -639,7 +639,8 @@ describe('flow to ARP compiler', () => {
         target_window: { title: 'Target' },
       },
     });
-    expect(graph.policy.allow_shell).toBe(true);
+    expect(graph.nodes.find((node) => node.id === 'offline')?.config).not.toHaveProperty('allow_shell');
+    expect(graph.policy).not.toHaveProperty('allow_shell');
     expect(graph.metadata.compilation).toMatchObject({ replay_nodes: 1, legacy_nodes: 0 });
   });
 

@@ -6,6 +6,7 @@ export interface ElectronAPI {
 
   // File read/write
   readFile: (filePath: string) => Promise<{ content?: string; error?: string }>;
+  readImage: (filePath: string) => Promise<{ dataURL?: string; error?: string }>;
   writeFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
 
   // Engine control
@@ -35,14 +36,6 @@ export interface ElectronAPI {
   } | { error: string } | null>;
   saveBase64Image: (filename: string, dataURL: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   ocrRecognizeRegion: (region: { x: number; y: number; w: number; h: number }) => Promise<string>;
-
-  // AI generation
-  aiGenerate: (params: {
-    apiKey: string;
-    messages: { role: string; content: string }[];
-    apiBase?: string;
-    model?: string;
-  }) => Promise<any>;
 
   // DSL conversion
   dslToFlow: (dslText: string) => Promise<any>;

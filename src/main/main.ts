@@ -7,14 +7,13 @@ import { randomBytes } from 'crypto';
 const fsp = fs.promises;
 import { spawn, ChildProcess } from 'child_process';
 import * as http from 'http';
-import * as https from 'https';
 import { SchedulerBridge, getSchedulerScriptPath, getPythonCommand } from './schedulerBridge';
 import { spawnPython, spawnPythonOneShot, runPythonCollect, startPythonEngine, stopPythonEngine } from './engine';
 import { getBaseDir, isDev } from './env';
 import { startApiServer } from './api';
 import { resolveMacroPath } from './macroPaths';
 import { callFeature, stopFeatureProcess } from './featureCallBridge';
-import { startWinpilotServer, getWinpilotConnection, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer, restartWinpilotServer } from './winpilotServer';
+import { startWinpilotServer, getWinpilotConnection, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer, restartWinpilotServer, cancelCurrentWinpilotRun } from './winpilotServer';
 import {
   mainWindow, setMainWindow,
   pythonProcess,
@@ -667,6 +666,14 @@ ipcMain.handle('file:read', async (_, filePath: string) => {
   }
 });
 
+ipcMain.handle('file:read-image', async (_, filePath: string) => {
+  try {
+    return { dataURL: `data:image/jpeg;base64,${fs.readFileSync(filePath).toString('base64')}` };
+  } catch (e: any) {
+    return { error: e.message };
+  }
+});
+
 ipcMain.handle('file:write', async (_, filePath: string, content: string) => {
   try {
     fs.writeFileSync(filePath, content, 'utf-8');
@@ -715,52 +722,6 @@ ipcMain.handle('winpilot:connection', () => getWinpilotConnection());
 // error). The Agent panel polls this so a failed startup can recover from UI.
 ipcMain.handle('winpilot:ensure', () => ensureWinpilotServer());
 ipcMain.handle('winpilot:restart', () => restartWinpilotServer());
-
-ipcMain.handle('ai:generate',(_, params: { apiKey: string; messages: { role: string; content: string }[]; apiBase?: string; model?: string }) => {
-  return new Promise((resolve) => {
-    const apiBase = (params.apiBase || process.env.LLM_API_BASE || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
-    const model = params.model || process.env.LLM_MODEL || 'deepseek-chat';
-    const body = JSON.stringify({
-      model,
-      messages: params.messages,
-      response_format: { type: 'json_object' },
-      temperature: 0.1,
-      max_tokens: 2048,
-    });
-    const u = new URL(`${apiBase}/chat/completions`);
-    const req = https.request({
-      hostname: u.hostname,
-      path: u.pathname,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${params.apiKey}`,
-        'Content-Length': Buffer.byteLength(body),
-      },
-      timeout: 30000,
-    }, (res) => {
-      const _http2Buf: Buffer[] = [];
-      res.on('data', (chunk) => { _http2Buf.push(chunk) });
-      res.on('end', () => {
-        const d = Buffer.concat(_http2Buf).toString('utf8');
-        try {
-          const parsed = JSON.parse(d);
-          if (res.statusCode && res.statusCode >= 400) {
-            resolve({ error: `API 错误 (${res.statusCode}): ${d}` });
-          } else {
-            resolve(parsed);
-          }
-        } catch {
-          resolve({ error: `响应解析失败: ${d.slice(0, 200)}` });
-        }
-      });
-    });
-    req.on('error', (e) => resolve({ error: `网络错误: ${e.message}` }));
-    req.on('timeout', () => { req.destroy(); resolve({ error: '请求超时' }); });
-    req.write(body);
-    req.end();
-  });
-});
 
 type ScreenRegionResult = {
   x: number;
@@ -1552,20 +1513,46 @@ if (!gotTheLock) {
       callFeature('program_refresh', { background: true }).catch(() => {});
     }, 5000);
 
-    // 全局 F9 热键 — 在主进程直接控制引擎启停
-    globalShortcut.register('F9', () => {
-      if (!mainWindow) return;
-      if (engineRunning) {
-        stopPythonEngine();
-        mainWindow.webContents.send('engine-message', { type: 'execution_done', status: 'stopped' });
-        mainWindow.webContents.send('engine-log', { level: 'info', message: '⏹️ 脚本已停止 (全局F9)' });
-      } else if (lastScript) {
-        startPythonEngine(lastScript);
-        mainWindow.webContents.send('engine-message', { type: 'status_report', status: 'running' });
-        mainWindow.webContents.send('engine-log', { level: 'info', message: '🔄 脚本开始执行 (全局F9)' });
-      } else {
-        mainWindow.webContents.send('engine-log', { level: 'warn', message: '没有可执行的脚本，请先在编辑器中打开或创建脚本' });
+    const stopAgentFromShortcut = async (key: 'F8' | 'F9'): Promise<boolean> => {
+      try {
+        const stopped = await cancelCurrentWinpilotRun();
+        if (stopped) {
+          mainWindow?.webContents.send('engine-log', {
+            level: 'info',
+            message: `⏹️ Agent 已停止 (全局${key})`,
+          });
+        }
+        return stopped;
+      } catch (error) {
+        console.error(`[hotkey] ${key} failed to stop Agent`, error);
+        mainWindow?.webContents.send('engine-log', {
+          level: 'error',
+          message: `Agent 停止失败 (${key})`,
+        });
+        // A failed probe is ambiguous; never start the legacy engine over a
+        // possibly active Agent run.
+        return true;
       }
+    };
+
+    // F9 stops an active Agent first; with no Agent run it keeps the legacy
+    // flow start/stop behavior.
+    globalShortcut.register('F9', () => {
+      void (async () => {
+        if (await stopAgentFromShortcut('F9')) return;
+        if (!mainWindow) return;
+        if (engineRunning) {
+          stopPythonEngine();
+          mainWindow.webContents.send('engine-message', { type: 'execution_done', status: 'stopped' });
+          mainWindow.webContents.send('engine-log', { level: 'info', message: '⏹️ 脚本已停止 (全局F9)' });
+        } else if (lastScript) {
+          startPythonEngine(lastScript);
+          mainWindow.webContents.send('engine-message', { type: 'status_report', status: 'running' });
+          mainWindow.webContents.send('engine-log', { level: 'info', message: '🔄 脚本开始执行 (全局F9)' });
+        } else {
+          mainWindow.webContents.send('engine-log', { level: 'warn', message: '没有可执行的脚本，请先在编辑器中打开或创建脚本' });
+        }
+      })();
     });
 
     // 全局 F7 热键 — 暂停/继续 vNext Agent 任务（前端控制面处理）
@@ -1573,9 +1560,10 @@ if (!gotTheLock) {
       mainWindow?.webContents.send('agent-control', { action: 'toggle_pause' });
     });
 
-    // 全局 F8 热键 — 停止 vNext Agent 任务
+    // F8 stops vNext Agent directly in the main process. It does not depend on
+    // a mounted renderer or a possibly stale currentRun snapshot.
     globalShortcut.register('F8', () => {
-      mainWindow?.webContents.send('agent-control', { action: 'stop' });
+      void stopAgentFromShortcut('F8');
     });
 
     app.on('activate', () => {

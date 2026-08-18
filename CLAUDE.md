@@ -155,8 +155,14 @@ renderer `325 passed`、TypeScript typecheck 通过。
 - `launch_application` 复用已运行实例时只做通用窗口排序：普通主窗优先于
   `WS_EX_TOOLWINDOW` 辅助窗，再按可见、隐藏与 hidden-topmost 排序；只恢复排序选中的
   候选窗，不增加 QQ、Krita 或其他应用配方。
-- `capture_screen` 的相对路径原样交给物理 backend，由 backend 按运行时 cwd 和输出格式
-  处理；vNext 不再用另一套绝对路径、扩展名或存在性检查制造假失败。
+- 需要把模型正在看到的画面交给其他应用时，模型工具 `copy_screen_to_clipboard`
+  （运行时记录仍为 `copy_current_view`）直接把本轮已提交的
+  JPEG 放入系统剪贴板；不重新截图、不猜文件路径、不自动粘贴。之后切换窗口和 `Ctrl+V`
+  仍是普通物理动作，可与该画面一起导出为离线流程。
+- `PrintScreen` 不在在线 Visual Agent 的键盘能力契约中；离线流程执行器不受影响。
+- 点击步骤的模型原始画面默认不落盘；只有用户开启
+  `vnext.save_click_reference_frames` 后，后续任务导出的点击步骤才附带 CV 参考图片。
+  显式的 `copy_current_view` 不受该开关影响。
 
 ## 2026-08-04 安全系统解耦：备份存档与最终设计（历史记录）
 

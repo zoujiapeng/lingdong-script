@@ -21,6 +21,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 export function ArpNodeParams({ type, params, onChange }: Props) {
   const [actionsText, setActionsText] = useState(() => JSON.stringify(params.actions || [], null, 2));
   const [stepText, setStepText] = useState(() => JSON.stringify(params.step || {}, null, 2));
+  const [referenceImage, setReferenceImage] = useState('');
   const [requiredText, setRequiredText] = useState(() => JSON.stringify(params.required || [], null, 2));
   const [targetText, setTargetText] = useState(() => (
     typeof params.target_window === 'string'
@@ -39,6 +40,19 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
     }
     if (type === 'evidence_gate') setRequiredText(JSON.stringify(params.required || [], null, 2));
   }, [type, params.actions, params.required, params.step, params.target_window]);
+
+  const referenceFrame = type === 'replay_step' && params.step?.reference_frame;
+  useEffect(() => {
+    let active = true;
+    const path = String(referenceFrame?.path || '');
+    const readImage = window.electronAPI?.readImage;
+    setReferenceImage('');
+    if (!path || !readImage) return () => { active = false; };
+    void readImage(path).then((result) => {
+      if (active && result.dataURL) setReferenceImage(result.dataURL);
+    });
+    return () => { active = false; };
+  }, [referenceFrame?.path]);
 
   const patch = (values: Record<string, unknown>) => onChange({ ...params, ...values });
   const commitDraft = useCallback((): string | undefined => {
@@ -125,6 +139,39 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
 
       {type === 'replay_step' && (
         <>
+          {referenceFrame && (
+            <Field
+              label="Agent 当时看到的画面"
+              hint={Array.isArray(referenceFrame.target)
+                ? `图中目标坐标：${referenceFrame.target.join(', ')}`
+                : '复制到剪贴板或重放时使用的原始画面。'}
+            >
+              {referenceImage ? (
+                <div style={{ position: 'relative' }}>
+                  <img
+                    src={referenceImage}
+                    alt="Agent 当时看到的画面"
+                    style={{ display: 'block', width: '100%', borderRadius: 6 }}
+                  />
+                  {Array.isArray(referenceFrame.target) && Array.isArray(referenceFrame.image_size) && (
+                    <span style={{
+                      position: 'absolute',
+                      left: `${(Number(referenceFrame.target[0]) / Number(referenceFrame.image_size[0])) * 100}%`,
+                      top: `${(Number(referenceFrame.target[1]) / Number(referenceFrame.image_size[1])) * 100}%`,
+                      width: 12,
+                      height: 12,
+                      border: '2px solid #ff3b30',
+                      borderRadius: '50%',
+                      transform: 'translate(-50%, -50%)',
+                      pointerEvents: 'none',
+                    }} />
+                  )}
+                </div>
+              ) : (
+                <div className="arp-field-hint">{referenceFrame.available === false ? '临时画面已过期' : referenceFrame.path}</div>
+              )}
+            </Field>
+          )}
           <Field label="WPS 步骤" hint="本地重放器执行的精确操作或控制步骤，不消耗模型 token。">
             <textarea className="form-input arp-code-editor" spellCheck={false} value={stepText} onChange={(event) => setStepText(event.target.value)} onBlur={commitDraft} />
           </Field>
@@ -139,10 +186,6 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
               <input className="form-input" type="number" min={0} max={60000} value={params.pace_ms ?? 0} onChange={(event) => patch({ pace_ms: Math.max(0, Number(event.target.value) || 0) })} />
             </Field>
           </div>
-          <label className="form-checkbox-label">
-            <input type="checkbox" checked={params.allow_shell === true} onChange={(event) => patch({ allow_shell: event.target.checked })} />
-            允许此工作流执行 shell 命令
-          </label>
           {jsonError && <div className="arp-field-error">{jsonError}</div>}
         </>
       )}

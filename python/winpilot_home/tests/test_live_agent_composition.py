@@ -235,9 +235,6 @@ def _graph_dict() -> dict[str, Any]:
         "policy": {
             "max_node_visits": 1,
             "fail_fast": True,
-            "require_evidence_on_done": False,
-            "allow_shell": False,
-            "allow_desktop_mutation": True,
         },
         "metadata": {},
     }
@@ -787,8 +784,10 @@ def test_server_owned_graph_builder_emits_the_exact_live_contract() -> None:
         ArpNodeKind.END,
     ]
     assert graph.nodes[1].config == {"goal": GOAL}
-    assert graph.policy.allow_shell is False
-    assert graph.policy.allow_desktop_mutation is True
+    assert graph.policy.model_dump(mode="json") == {
+        "max_node_visits": 1,
+        "fail_fast": True,
+    }
 
 
 def test_prepare_registers_only_exact_agent_goal_and_emits_no_live_trace() -> None:

@@ -12,7 +12,7 @@ CANONICAL_HOTKEY_KEYS = frozenset({
     *CANONICAL_HOTKEY_MODIFIERS,
     "enter", "esc", "tab", "space", "backspace", "delete", "insert",
     "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
-    "capslock", "numlock", "scrolllock", "pause", "printscreen", "menu",
+    "capslock", "numlock", "scrolllock", "pause", "menu",
     "volumeup", "volumedown", "volumemute",
     "browserback", "browserforward",
     *(f"numpad{index}" for index in range(10)),
@@ -46,7 +46,6 @@ _KEY_ALIASES = {
     # and people naturally use for standard Windows keys.
     "page_up": "pageup",
     "page_down": "pagedown",
-    "print_screen": "printscreen",
     "volume_up": "volumeup",
     "volume_down": "volumedown",
     "volume_mute": "volumemute",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from types import SimpleNamespace
 
 from winpilot.action import clipboard_ops
@@ -98,6 +99,52 @@ def test_capture_screen_delegates_relative_path_to_backend() -> None:
         "path": "current_screen.png",
         "format": "capture-screen/1",
     }
+
+
+def test_copy_current_view_delegates_the_exact_submitted_frame() -> None:
+    calls: list[str] = []
+
+    def backend(*, image_b64: str):
+        calls.append(image_b64)
+        return {"ok": True, "source": "current_model_view"}
+
+    result = desktop_ops.copy_current_view(backend, image_b64="exact-jpeg")
+
+    assert calls == ["exact-jpeg"]
+    assert result == {
+        "ok": True,
+        "source": "current_model_view",
+        "format": "copy-image/1",
+    }
+
+
+def test_copy_seen_frame_puts_exact_model_jpeg_on_clipboard(monkeypatch) -> None:
+    payload = b"\xff\xd8exact-model-view\xff\xd9"
+    encoded = base64.b64encode(payload).decode("ascii")
+    decoded: list[bytes] = []
+    clipboard_dibs: list[bytes] = []
+
+    def to_dib(value: bytes):
+        decoded.append(value)
+        return b"dib", 1120, 630
+
+    monkeypatch.setattr(clipboard_ops, "_image_bytes_to_dib", to_dib)
+    monkeypatch.setattr(
+        clipboard_ops, "set_clipboard_dib", clipboard_dibs.append
+    )
+
+    result = clipboard_ops.copy_seen_frame_backend(image_b64=encoded)
+
+    assert result == {
+        "format": "copy-image/1",
+        "ok": True,
+        "source": "current_model_view",
+        "width": 1120,
+        "height": 630,
+        "size_bytes": len(payload),
+    }
+    assert decoded == [payload]
+    assert clipboard_dibs == [b"dib"]
 
 
 def test_capture_screen_backend_puts_image_on_clipboard(monkeypatch, tmp_path):
@@ -301,3 +348,31 @@ def test_process_name_uses_pid_path_basename_and_fails_empty(monkeypatch) -> Non
     )
     assert clipboard_ops._process_name(42) == ""
     assert clipboard_ops._process_name(0) == ""
+
+
+def test_paste_image_never_uses_stale_clipboard_when_path_is_wrong(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    key_events: list[tuple[int, int]] = []
+
+    class User32:
+        @staticmethod
+        def keybd_event(vk: int, _scan: int, flags: int, _extra: int) -> None:
+            key_events.append((vk, flags))
+
+    monkeypatch.setattr(
+        clipboard_ops.ctypes,
+        "windll",
+        SimpleNamespace(user32=User32()),
+    )
+
+    missing = tmp_path / "invented-user" / "shot.png"
+    result = clipboard_ops.paste_image_backend(path=str(missing))
+
+    assert result == {
+        "format": "paste-image/1",
+        "ok": False,
+        "error": f"image file not found: {missing}",
+    }
+    assert key_events == []

@@ -10,7 +10,7 @@ def _graph(nodes, edges, **extra):
         name=extra.pop("name", "Test graph"),
         nodes=nodes,
         edges=edges,
-        policy=extra.pop("policy", ArpPolicy(require_evidence_on_done=False)),
+        policy=extra.pop("policy", ArpPolicy()),
         **extra,
     )
 
@@ -71,7 +71,7 @@ def test_graph_validation_rejects_missing_route_target():
     assert any("missing target" in error for error in result.errors)
 
 
-def test_graph_validation_enforces_evidence_policy_shape():
+def test_graph_validation_ignores_removed_evidence_policy_flag():
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy, validate_graph
 
     graph = _graph(
@@ -80,13 +80,17 @@ def test_graph_validation_enforces_evidence_policy_shape():
             ArpNode(id="end", kind=ArpNodeKind.END),
         ],
         [ArpEdge(id="e1", source="start", target="end")],
-        policy=ArpPolicy(require_evidence_on_done=True),
+        policy=ArpPolicy.model_validate({"require_evidence_on_done": True}),
     )
 
     result = validate_graph(graph)
 
-    assert result.valid is False
-    assert any("evidence-capable" in error for error in result.errors)
+    assert result.valid is True
+    assert result.errors == []
+    assert graph.policy.model_dump(mode="json") == {
+        "max_node_visits": 20,
+        "fail_fast": True,
+    }
 
 
 def test_graph_validation_rejects_empty_evidence_gate_and_retired_legacy_node():
@@ -176,7 +180,7 @@ def test_graph_validation_uses_exact_wps_contract_for_replay_steps():
     assert any("click requires" in error for error in result.errors)
 
 
-def test_graph_validation_requires_focus_on_every_path_before_spatial_batches():
+def test_graph_validation_allows_human_authored_screen_coordinates_without_focus():
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, validate_graph
 
     def batch(node_id, actions):
@@ -241,12 +245,8 @@ def test_graph_validation_requires_focus_on_every_path_before_spatial_batches():
         ],
     )
 
-    assert validate_graph(same_batch).valid is True
-    assert validate_graph(previous_batch).valid is True
-    for graph in (direct, late_focus, branched):
-        result = validate_graph(graph)
-        assert result.valid is False
-        assert any("on every reachable path before spatial action 'click'" in error for error in result.errors)
+    for graph in (direct, same_batch, previous_batch, late_focus, branched):
+        assert validate_graph(graph).valid is True
 
 
 def test_replay_steps_share_one_session_and_mix_with_native_arp(monkeypatch):
@@ -317,7 +317,7 @@ def test_replay_steps_share_one_session_and_mix_with_native_arp(monkeypatch):
             ArpEdge(id="e3", source="native", target="press"),
             ArpEdge(id="e4", source="press", target="end"),
         ],
-        policy=ArpPolicy(require_evidence_on_done=True),
+        policy=ArpPolicy(),
     )
 
     execution = ArpExecution(graph, adapters.default_handlers(), run_id="mixed-offline-replay")
@@ -365,7 +365,7 @@ def test_replay_clipboard_get_updates_arp_variables_for_conditions(monkeypatch):
             ArpEdge(id="e3", source="condition", target="end", branch="yes"),
             ArpEdge(id="e4", source="condition", target="end", branch="no"),
         ],
-        policy=ArpPolicy(require_evidence_on_done=True),
+        policy=ArpPolicy(),
     )
 
     result = ArpExecution(graph, adapters.default_handlers(), run_id="clipboard-replay").run()
@@ -415,7 +415,7 @@ def test_managed_screenshot_action_batch_surfaces_run_artifact(monkeypatch, tmp_
             ArpEdge(id="e1", source="start", target="screenshot"),
             ArpEdge(id="e2", source="screenshot", target="end"),
         ],
-        policy=ArpPolicy(require_evidence_on_done=True),
+        policy=ArpPolicy(),
     )
 
     result = ArpExecution(graph, adapters.default_handlers(), run_id="managed-flow-shot").run()
@@ -546,63 +546,35 @@ def test_action_batch_session_cleanup_runs_after_dispatch_exception(monkeypatch)
     assert "action_batch_session" not in execution.runtime_state
 
 
-def test_replay_step_enforces_postflight_evidence_before_success(tmp_path):
+def test_replay_step_ignores_removed_policy_and_verification_fields(tmp_path):
     from winpilot.orchestrator import adapters
     from winpilot.orchestrator.contracts import ArpNode, ArpNodeKind
 
-    present = tmp_path / "present.txt"
-    present.write_text("ready", encoding="utf-8")
-
-    def execute(value):
-        node = ArpNode(
-            id="replay",
-            kind=ArpNodeKind.REPLAY_STEP,
-            config={
-                "step": {"tool": "ext.delay", "seconds": 0},
-                "postflight_evidence": {
-                    "required": [{"predicate": "file.exists", "value": str(value)}],
-                },
-            },
-        )
-        return adapters._replay_step_handler(node, {
-            "run_id": "postflight-node",
-            "graph": {
-                "id": "postflight-test",
-                "policy": {"allow_shell": False, "allow_desktop_mutation": True},
-            },
-            "runtime_state": {},
-            "variables": {},
-        }, threading.Event())
-
-    succeeded = execute(present)
-    failed = execute(tmp_path / "missing.txt")
-
-    assert succeeded.ok is True
-    assert succeeded.output["postflight"]["ok"] is True
-    assert succeeded.evidence[0]["metadata"]["postflight"]["required"] is True
-    assert failed.ok is False
-    assert failed.branch == "fail"
-    assert failed.evidence == []
-    assert "evidence requirement failed" in failed.error
-
-    malformed = adapters._replay_step_handler(ArpNode(
-        id="malformed",
+    missing = tmp_path / "missing.txt"
+    result = adapters._replay_step_handler(ArpNode(
+        id="replay",
         kind=ArpNodeKind.REPLAY_STEP,
         config={
             "step": {"tool": "ext.delay", "seconds": 0},
-            "postflight_evidence": {"required": "not-an-array"},
+            "preflight_contract": {
+                "conditions": {"checks": [{"file_exists": str(missing)}]},
+                "safety": {"requires_preflight": True},
+            },
+            "postflight_evidence": {
+                "required": [{"predicate": "file.exists", "value": str(missing)}],
+            },
         },
     ), {
-        "run_id": "postflight-malformed",
-        "graph": {
-            "id": "postflight-test",
-            "policy": {"allow_shell": False, "allow_desktop_mutation": True},
-        },
+        "run_id": "plain-script-node",
+        "graph": {"id": "plain-script", "policy": {"allow_desktop_mutation": False}},
         "runtime_state": {},
         "variables": {},
     }, threading.Event())
-    assert malformed.ok is False
-    assert "must be an array" in malformed.error
+
+    assert result.ok is True
+    assert result.branch == "next"
+    assert result.output["verified_steps"] == 1
+    assert "postflight" not in result.output
 
 
 def test_replay_control_noop_preserves_wps_semantics_without_fabricating_evidence():
@@ -635,102 +607,6 @@ def test_replay_control_noop_preserves_wps_semantics_without_fabricating_evidenc
     assert result.branch == "next"
     assert result.output["verified_steps"] == 0
     assert result.evidence == []
-
-
-def test_replay_postflight_controls_graph_completion(tmp_path):
-    from winpilot.orchestrator import adapters
-    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
-    from winpilot.orchestrator.runtime import ArpExecution
-
-    def execute(value, run_id):
-        graph = _graph(
-            [
-                ArpNode(id="start", kind=ArpNodeKind.START),
-                ArpNode(
-                    id="replay",
-                    kind=ArpNodeKind.REPLAY_STEP,
-                    config={
-                        "step": {"tool": "ext.delay", "seconds": 0},
-                        "postflight_evidence": {
-                            "required": [{
-                                "predicate": "file.exists",
-                                "value": str(value),
-                            }],
-                        },
-                    },
-                ),
-                ArpNode(id="end", kind=ArpNodeKind.END),
-            ],
-            [
-                ArpEdge(id="e1", source="start", target="replay"),
-                ArpEdge(id="e2", source="replay", target="end"),
-            ],
-        )
-        return ArpExecution(
-            graph,
-            adapters.default_handlers(),
-            run_id=run_id,
-        ).run()
-
-    present = tmp_path / "present.txt"
-    present.write_text("ready", encoding="utf-8")
-    succeeded = execute(present, "postflight-present")
-    failed = execute(tmp_path / "missing.txt", "postflight-missing")
-
-    assert succeeded["status"] == "done"
-    assert [item["node_id"] for item in succeeded["history"]] == ["start", "replay", "end"]
-    assert succeeded["history"][1]["output"]["postflight"]["ok"] is True
-    assert failed["status"] == "failed"
-    assert [item["node_id"] for item in failed["history"]] == ["start", "replay"]
-    assert failed["history"][-1]["ok"] is False
-
-
-def test_replay_preflight_controls_graph_completion(tmp_path):
-    from winpilot.orchestrator import adapters
-    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
-    from winpilot.orchestrator.runtime import ArpExecution
-
-    def execute(value, run_id):
-        graph = _graph(
-            [
-                ArpNode(id="start", kind=ArpNodeKind.START),
-                ArpNode(
-                    id="replay",
-                    kind=ArpNodeKind.REPLAY_STEP,
-                    config={
-                        "step": {"tool": "ext.delay", "seconds": 0},
-                        "preflight_contract": {
-                            "conditions": {
-                                "checks": [{"file_exists": str(value)}],
-                            },
-                        },
-                    },
-                ),
-                ArpNode(id="end", kind=ArpNodeKind.END),
-            ],
-            [
-                ArpEdge(id="e1", source="start", target="replay"),
-                ArpEdge(id="e2", source="replay", target="end"),
-            ],
-        )
-        return ArpExecution(
-            graph,
-            adapters.default_handlers(),
-            run_id=run_id,
-        ).run()
-
-    present = tmp_path / "ready.txt"
-    present.write_text("ready", encoding="utf-8")
-    succeeded = execute(present, "preflight-present")
-    failed = execute(tmp_path / "missing.txt", "preflight-missing")
-
-    assert succeeded["status"] == "done"
-    assert [item["node_id"] for item in succeeded["history"]] == ["start", "replay", "end"]
-    assert succeeded["history"][1]["output"]["preflight"]["checks"][0]["ok"] is True
-    assert failed["status"] == "failed"
-    assert [item["node_id"] for item in failed["history"]] == ["start", "replay"]
-    assert failed["history"][-1]["output"]["preflight"]["ok"] is False
-    assert "preflight condition failed" in failed["error"]
 
 
 def test_graph_validation_rejects_unsupported_controller_action_before_run():
@@ -772,7 +648,7 @@ def test_evidence_gate_satisfies_done_policy():
             ArpEdge(id="e1", source="start", target="gate"),
             ArpEdge(id="e2", source="gate", target="end", branch="pass"),
         ],
-        policy=ArpPolicy(require_evidence_on_done=True),
+        policy=ArpPolicy(),
     )
 
     execution = ArpExecution(graph, run_id="arp-evidence-policy")
@@ -904,7 +780,7 @@ def test_arp_execution_routes_explicit_failure_before_fail_fast():
             ArpEdge(id="e3", source="skill", target="recover", branch="fail"),
             ArpEdge(id="e4", source="recover", target="end", branch="next"),
         ],
-        policy=ArpPolicy(fail_fast=True, require_evidence_on_done=True),
+        policy=ArpPolicy(fail_fast=True),
     )
 
     result = ArpExecution(
@@ -938,7 +814,7 @@ def test_memory_miss_routes_to_agent_exception_handler():
             ArpEdge(id="e3", source="skill", target="agent", branch="miss"),
             ArpEdge(id="e4", source="agent", target="end", branch="next"),
         ],
-        policy=ArpPolicy(require_evidence_on_done=True),
+        policy=ArpPolicy(),
     )
     handlers = {
         ArpNodeKind.SKILL_REPLAY: lambda node, context, stop: NodeResult(ok=True, branch="miss"),
@@ -1135,7 +1011,7 @@ def test_vnext_verified_result_survives_stop_between_nodes():
             ArpEdge(id="a", source="start", target="full-goal"),
             ArpEdge(id="b", source="full-goal", target="end"),
         ],
-        policy=ArpPolicy(require_evidence_on_done=True),
+        policy=ArpPolicy(),
     )
     execution = ArpExecution(
         graph,

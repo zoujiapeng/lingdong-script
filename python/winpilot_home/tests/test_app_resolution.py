@@ -136,6 +136,48 @@ def test_launch_discovered_exe_passes_generic_arguments(monkeypatch):
     assert result["arguments"] == ["--workspace", "demo"]
 
 
+def test_launch_application_waits_for_and_activates_new_window(monkeypatch):
+    from winpilot.perception import apps
+
+    entry = {
+        "name": "Nebula Desk",
+        "target": r"C:\Start\Nebula Desk.lnk",
+        "kind": "lnk",
+    }
+    probes = iter([None, {
+        "candidate_count": 1,
+        "candidates": [{"hwnd": 42, "visible": True}],
+        "activated_hwnd": 42,
+        "note": "launched window activated",
+    }])
+    monkeypatch.setattr(apps, "resolve", lambda *_args, **_kwargs: [entry])
+    monkeypatch.setattr(
+        apps,
+        "_activate_resolved_entry",
+        lambda _entry, *, visible_only=False: (
+            next(probes) if visible_only else None
+        ),
+    )
+    monkeypatch.setattr(
+        apps,
+        "launch_target",
+        lambda _entry: {
+            "ok": True,
+            "via": "lnk",
+            "target": entry["target"],
+            "arguments": [],
+            "name": entry["name"],
+            "aliases": [],
+        },
+    )
+
+    result = apps.launch_application("Nebula Desk")
+
+    assert result["activated_hwnd"] == 42
+    assert result["via"] == "lnk"
+    assert result["note"] == "launched application and activated its window"
+
+
 def test_resolve_refreshes_a_cached_multisource_index_once_on_miss(monkeypatch):
     from winpilot.perception import apps
 

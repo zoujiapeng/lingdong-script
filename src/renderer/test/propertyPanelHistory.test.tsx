@@ -78,6 +78,7 @@ describe('PropertyPanel history', () => {
 
   it('checkpoints parameter, label, and disabled edits when their controls blur', () => {
     useStore.getState().newScript();
+    useStore.getState().addNode('action_batch', 360, 180);
     const node = useStore.getState().script.nodes.find((item) => item.type === 'action_batch')!;
     const originalSubgoal = (node.params as any).subgoal;
     const originalLabel = node.label;
@@ -112,6 +113,7 @@ describe('PropertyPanel history', () => {
 
   it('blocks save and document replacement while JSON editor text is invalid', async () => {
     useStore.getState().newScript();
+    useStore.getState().addNode('action_batch', 360, 180);
     const node = useStore.getState().script.nodes.find((item) => item.type === 'action_batch')!;
     useStore.getState().selectNodes([node.id]);
     render(<PropertyPanel />);
@@ -162,8 +164,32 @@ describe('PropertyPanel history', () => {
     });
   });
 
+  it('shows the exact Agent frame attached to an extracted click', async () => {
+    useStore.getState().newScript();
+    const nodeId = useStore.getState().addNode('replay_step', 200, 200, {
+      step: {
+        tool: 'click',
+        coords: [600, 300],
+        reference_frame: {
+          path: 'C:\\flows\\quiet-song.assets\\click-001.jpg',
+          target: [350, 175],
+          image_size: [1120, 630],
+        },
+      },
+    });
+    useStore.getState().selectNodes([nodeId]);
+    const readImage = vi.fn(async () => ({ dataURL: 'data:image/jpeg;base64,AA==' }));
+    (window as any).electronAPI = { readImage };
+
+    render(<PropertyPanel />);
+
+    expect(await screen.findByAltText('Agent 当时看到的画面')).not.toBeNull();
+    expect(readImage).toHaveBeenCalledWith('C:\\flows\\quiet-song.assets\\click-001.jpg');
+  });
+
   it('preserves structured evidence conditions instead of flattening them to text', () => {
     useStore.getState().newScript();
+    useStore.getState().addNode('evidence_gate', 100, 260);
     const node = useStore.getState().script.nodes.find((item) => item.type === 'evidence_gate')!;
     const original = JSON.parse(JSON.stringify((node.params as any).required));
     useStore.getState().selectNodes([node.id]);

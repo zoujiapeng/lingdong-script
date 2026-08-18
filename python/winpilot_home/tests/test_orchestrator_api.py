@@ -76,7 +76,7 @@ def _graph_payload():
         "format": "arp/1",
         "id": "api-graph",
         "name": "API graph",
-        "policy": {"fail_fast": True, "require_evidence_on_done": False},
+        "policy": {"fail_fast": True},
         "nodes": [
             {"id": "start", "kind": "start"},
             {"id": "set", "kind": "set_variable", "config": {"name": "ready", "value": True}},
@@ -725,8 +725,10 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
         "Complete the visible task"
     )
     assert graph.metadata == {}
-    assert graph.policy.allow_shell is False
-    assert graph.policy.allow_desktop_mutation is True
+    assert graph.policy.model_dump(mode="json") == {
+        "max_node_visits": 1,
+        "fail_fast": True,
+    }
     assert kwargs["runtime_version"] is ArpRuntimeVersion.VNEXT
     assert kwargs["frozen_config"] is frozen
     assert kwargs["goal_admission"] == payload["admission"]
@@ -1291,7 +1293,7 @@ def test_generic_run_cancel_route_cancels_arp_runtime_job(client):
             {"id": "e1", "source": "start", "target": "delay"},
             {"id": "e2", "source": "delay", "target": "end"},
         ],
-        "policy": {"require_evidence_on_done": False},
+        "policy": {},
     }
     created = client.post("/api/v2/arp/runs", json={"graph": graph, "inputs": {}})
     assert created.status_code == 200
@@ -1328,7 +1330,7 @@ def test_generic_run_pause_and_resume_routes_control_arp_run(client):
             {"id": "e1", "source": "start", "target": "delay"},
             {"id": "e2", "source": "delay", "target": "end"},
         ],
-        "policy": {"require_evidence_on_done": False},
+        "policy": {},
     }
     created = client.post("/api/v2/arp/runs", json={"graph": graph, "inputs": {}})
     assert created.status_code == 200
@@ -1495,7 +1497,7 @@ def test_chatgpt_desktop_integration_reports_legacy_bridge_removed():
     assert integration.json()["ok"] is False
     assert integration.json()["connection_status"] == "removed"
     assert integration.json()["server_ready"] is False
-    assert integration.json()["allow_desktop_mutation"] is False
+    assert "allow_desktop_mutation" not in integration.json()
     assert integration.json()["requires_openai_api_key"] is False
 
 

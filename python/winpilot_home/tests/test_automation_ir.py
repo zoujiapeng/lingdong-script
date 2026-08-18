@@ -37,12 +37,8 @@ def test_automation_ir_from_wps_preserves_replay_metadata():
     assert ir["conditions"]["target_window"] == {"title": "Target"}
     assert ir["variables"] == {"msg": "hello"}
     assert ir["evidence"]["required"] == ["message visible"]
-    assert ir["safety"]["mutates_desktop"] is True
-    assert ir["safety"]["desktop_action_queue_required"] is True
-    assert ir["fallback"] == {
-        "on_preflight_fail": "stop",
-        "on_step_fail": "stop",
-    }
+    assert "safety" not in ir
+    assert "fallback" not in ir
     assert ir["runtime"] == {"kind": "wps_replay"}
     assert automation_ir.validate_automation_runtime(ir) is None
 
@@ -216,16 +212,17 @@ def test_projection_fingerprint_matches_cross_runtime_contract():
     ) == "sha256:f6996f5a13fe5cbb9a6c41e57a3ee5feb366e844d6055b54737d6f28fafcb302"
 
 
-def test_wps_runtime_safety_cannot_understate_detached_shell_execution():
+def test_wps_runtime_ignores_removed_safety_settings():
     ir = automation_ir.automation_ir_from_wps({
         "format": "wps/2",
-        "steps": [{"tool": "run_detached", "script": "echo ready"}],
+        "steps": [{"tool": "ext.delay", "seconds": 0}],
     })
 
-    assert ir["safety"]["uses_shell"] is True
-    assert ir["safety"]["shell_requires_explicit_runtime"] is True
-    ir["safety"]["uses_shell"] = False
-    assert "safety.uses_shell" in automation_ir.validate_automation_runtime(ir)
+    ir["safety"] = {"requires_preflight": True, "uses_shell": False}
+    ir["fallback"] = {"on_preflight_fail": "stop"}
+    assert automation_ir.validate_automation_runtime(ir) is None
+    assert "safety" not in automation_ir.wps_from_automation_ir(ir)
+    assert "fallback" not in automation_ir.wps_from_automation_ir(ir)
 
 
 def test_flow_projection_rejects_dangling_editor_edge():

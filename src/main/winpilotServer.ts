@@ -321,6 +321,62 @@ export function getWinpilotConnection(): { url: string; token: string } | null {
   return url ? { url, token: CONTROL_TOKEN } : null;
 }
 
+type RuntimeResponse = {
+  status: number;
+  body: any;
+};
+
+function requestRuntime(method: 'GET' | 'POST', requestPath: string): Promise<RuntimeResponse> {
+  const port = _port;
+  if (!port) return Promise.reject(new Error('WinPilot runtime is not running'));
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: HOST,
+      port,
+      path: requestPath,
+      method,
+      timeout: 2000,
+      headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        try {
+          resolve({ status: res.statusCode || 0, body: raw ? JSON.parse(raw) : null });
+        } catch {
+          reject(new Error(`WinPilot runtime returned invalid JSON (${res.statusCode || 0})`));
+        }
+      });
+    });
+    req.once('error', reject);
+    req.once('timeout', () => req.destroy(new Error('WinPilot runtime request timed out')));
+    req.end();
+  });
+}
+
+/** Cancel the active vNext Agent without depending on renderer state. */
+export async function cancelCurrentWinpilotRun(): Promise<boolean> {
+  if (!_port) return false;
+  const current = await requestRuntime('GET', '/api/v2/runs/current');
+  if (current.status !== 200) {
+    throw new Error(`WinPilot current-run request failed (${current.status})`);
+  }
+  const run = current.body?.run;
+  const runId = String(run?.run_id || '');
+  const status = String(run?.status || '').toLowerCase();
+  if (!runId || !['queued', 'running', 'paused'].includes(status)) return false;
+
+  const canceled = await requestRuntime(
+    'POST',
+    `/api/v2/runs/${encodeURIComponent(runId)}/cancel`,
+  );
+  if (canceled.status === 200) return true;
+  // The task may have finished between the probe and the cancel request.
+  if (canceled.status === 404 || canceled.status === 409) return false;
+  throw new Error(`WinPilot cancel request failed (${canceled.status})`);
+}
+
 /** Trigger a (re)start if not running, and report current status. Idempotent —
  *  safe to call repeatedly from the renderer poll. */
 export async function ensureWinpilotServer(): Promise<{ url: string | null; token: string; starting: boolean; error: string | null }> {

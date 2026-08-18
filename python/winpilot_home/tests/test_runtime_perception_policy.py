@@ -67,3 +67,4 @@ def test_default_config_keeps_uia_and_ocr_opt_in():
     assert _DEFAULTS["perception"]["ocr"]["enabled"] is False
     assert _DEFAULTS["fusion"]["predictive_ocr_enabled"] is False
     assert _DEFAULTS["ocr"]["warm_on_startup"] is False
+    assert _DEFAULTS["vnext"]["save_click_reference_frames"] is False

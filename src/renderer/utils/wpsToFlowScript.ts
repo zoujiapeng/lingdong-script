@@ -38,6 +38,8 @@ function sourceDocument(script: WpsScript): FlowScript['source'] {
   const raw = clone(script) as unknown as Record<string, unknown>;
   delete raw.steps;
   delete raw.vars;
+  delete raw.safety;
+  delete raw.fallback;
   return { kind: 'wps', raw };
 }
 
@@ -53,17 +55,26 @@ function replayTarget(script: WpsScript): unknown {
   return undefined;
 }
 
-function replayLabel(step: WpsStep): string {
+function lastReadableSentence(value: unknown): string {
+  const lines = String(value || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const line = lines[lines.length - 1] || '';
+  const sentences = line.match(/[^.!?。！？]+[.!?。！？]?/g) || [];
+  return (sentences[sentences.length - 1] || line).trim().replace(/[：:]$/, '');
+}
+
+function replayLabel(step: WpsStep, index: number): string {
   const tool = String(step.tool || 'unknown');
-  const detail = String(step.text || step.element_text || step.title || step.name || '').trim();
-  return detail ? `${tool}: ${detail.slice(0, 36)}` : tool;
+  const detail = lastReadableSentence(step.note)
+    || String(step.text || step.element_text || step.title || step.name || '').trim();
+  const summary = detail ? `${tool}: ${detail.slice(0, 36)}` : tool;
+  return `${index + 1}. ${summary}`;
 }
 
 /**
  * Convert a WPS script to an exact, editable offline-replay graph.
  *
- * A replay_step keeps verification, target-window, and nested control-flow
- * semantics intact. It can be mixed freely with native ARP nodes.
+ * A replay_step keeps the recorded action, optional target hint, and nested
+ * control flow intact. It can be mixed freely with native ARP nodes.
  */
 export function wpsToFlowScript(script: WpsScript): FlowScript {
   const nodes: FlowNode[] = [];
@@ -71,11 +82,6 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
   const targetWindow = replayTarget(script);
   const session = String(script.source_run || `offline-${nanoid(8)}`);
   const steps = script.steps || [];
-  const preflightContract = {
-    ...(script.conditions !== undefined ? { conditions: clone(script.conditions) } : {}),
-    ...(script.safety !== undefined ? { safety: clone(script.safety) } : {}),
-  };
-  const hasPreflightContract = Object.keys(preflightContract).length > 0;
   let row = 0;
 
   const add = (type: FlowNode['type'], params: NodeParams, label?: string): FlowNode => {
@@ -108,16 +114,9 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
       step: clone(step),
       session,
       pace_ms: 0,
-      allow_shell: false,
       ...(stepTarget !== undefined ? { target_window: stepTarget } : {}),
-      ...(index === 0 && hasPreflightContract
-        ? { preflight_contract: preflightContract }
-        : {}),
-      ...(index === steps.length - 1 && script.evidence !== undefined
-        ? { postflight_evidence: clone(script.evidence) }
-        : {}),
       _source_wps_replay: true,
-    } as NodeParams, replayLabel(step));
+    } as NodeParams, replayLabel(step, index));
     link(previous, node);
     previous = node;
   }

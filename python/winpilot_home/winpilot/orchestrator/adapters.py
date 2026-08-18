@@ -14,11 +14,6 @@ from ..utils.log import BUS
 from .contracts import ArpNode, ArpNodeKind
 from .runtime import NodeHandler, NodeResult
 
-_REPLAY_SHELL_TOOLS = {"run_shell", "ext.run_shell", "run_detached"}
-_REPLAY_DESKTOP_TOOLS = {
-    "click", "type_text", "hotkey", "launch", "focus_window", "scroll",
-    "drag", "draw_strokes", "run_detached", "tray_click", "ext.clipboard_set",
-}
 _ACTION_BATCH_SESSION_KEY = "action_batch_session"
 
 
@@ -133,28 +128,10 @@ def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
     )
 
 
-def _walk_replay_tools(step: dict[str, Any]) -> set[str]:
-    tools = {str(step.get("tool") or "")}
-    for key in ("then", "else", "body"):
-        nested = step.get(key)
-        if isinstance(nested, list):
-            for child in nested:
-                if isinstance(child, dict):
-                    tools.update(_walk_replay_tools(child))
-    return tools
-
-
 def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
     step = node.config.get("step")
     if not isinstance(step, dict):
         return NodeResult(ok=False, branch="fail", error="replay_step requires config.step")
-
-    tools = _walk_replay_tools(step)
-    policy = ((context.get("graph") or {}).get("policy") or {})
-    if tools & _REPLAY_SHELL_TOOLS and not policy.get("allow_shell", False):
-        return NodeResult(ok=False, branch="fail", error="replay_step shell execution is disabled by graph policy")
-    if tools & _REPLAY_DESKTOP_TOOLS and not policy.get("allow_desktop_mutation", True):
-        return NodeResult(ok=False, branch="fail", error="replay_step desktop mutation is disabled by graph policy")
 
     runtime_state = context.get("runtime_state")
     if not isinstance(runtime_state, dict):
@@ -177,30 +154,6 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
     replayer.step_delay = pace_ms / 1000.0
     variables = context.get("variables") if isinstance(context.get("variables"), dict) else {}
     seeded_variables = {str(key): str(value) for key, value in variables.items()}
-    contract_preflight: dict[str, Any] | None = None
-    if "preflight_contract" in node.config:
-        contract = node.config.get("preflight_contract")
-        if not isinstance(contract, dict):
-            return NodeResult(ok=False, branch="fail", error="replay_step preflight_contract must be an object")
-        for field in ("conditions", "safety"):
-            if field in contract and not isinstance(contract.get(field), dict):
-                return NodeResult(ok=False, branch="fail", error=f"replay_step preflight {field} must be an object")
-        try:
-            contract_preflight = replayer.verify_preflight(
-                target_window=node.config.get("target_window"),
-                conditions=contract.get("conditions"),
-                safety=contract.get("safety"),
-            )
-        except Exception as exc:
-            contract_preflight = {"ok": False, "error": f"preflight contract failed: {exc}"}
-        if not contract_preflight.get("ok", False):
-            error = str(contract_preflight.get("error") or "replay preflight contract did not pass")
-            return NodeResult(
-                ok=False,
-                branch="fail",
-                output={"preflight": contract_preflight, "session": session_id, "tool": step.get("tool")},
-                error=error,
-            )
     try:
         result = replayer.run_steps(
             [step],
@@ -210,25 +163,6 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
         )
     except Exception as exc:
         return NodeResult(ok=False, branch="fail", error=f"replay step failed: {exc}")
-    if contract_preflight is not None:
-        result = {**result, "preflight": contract_preflight}
-    postflight: dict[str, Any] | None = None
-    if result.get("ok") and "postflight_evidence" in node.config:
-        try:
-            postflight = replayer.verify_postflight(
-                node.config.get("postflight_evidence")
-            )
-        except Exception as exc:
-            postflight = {"ok": False, "error": f"postflight evidence failed: {exc}"}
-        if not postflight.get("ok", False):
-            result = {
-                **result,
-                "ok": False,
-                "error": str(
-                    postflight.get("error")
-                    or "replay postflight evidence did not pass"
-                ),
-            }
     _publish_anchor_metrics(result, context, node)
 
     # Preserve native ARP value types unless the WPS segment actually changed
@@ -250,7 +184,6 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
         "session": session_id,
         "tool": step.get("tool"),
         "verified_steps": len(verified_steps),
-        **({"postflight": postflight} if postflight is not None else {}),
     }
     return NodeResult(
         ok=ok,
@@ -264,7 +197,6 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
             "metadata": {
                 "session": session_id,
                 "verified_steps": len(verified_steps),
-                **({"postflight": postflight} if postflight is not None else {}),
             },
         }] if ok and verified_steps else [],
         error="" if ok else str(result.get("error") or "replay step failed"),

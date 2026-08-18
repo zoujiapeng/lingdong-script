@@ -1,4 +1,5 @@
 """validate_script (pure) + GET/PUT /api/script HTTP round-trip."""
+import base64
 import json
 
 import pytest
@@ -61,6 +62,7 @@ def test_valid_agent_replay_only_tools():
     script = {"format": "wps/2", "steps": [
         {"tool": "draw_strokes", "strokes": [[[1, 2], [3, 4]]], "duration": 0.1},
         {"tool": "run_detached", "script": "Start-Sleep 1", "name": "demo"},
+        {"tool": "copy_current_view", "reference_frame": {"pending_path": "run/view.jpg"}},
     ]}
     assert trace_mod.validate_script(script) is None
 
@@ -217,7 +219,8 @@ def _write_trace(path, events):
                 "kind": "pointer_drag", "x1": 1, "y1": 2, "x2": 7, "y2": 8,
                 "points": [[3, 4], [5, 6]],
             }},
-            {"tool": "click", "coords": [7, 8]},
+            {"tool": "drag", "from": [1, 2], "to": [7, 8],
+             "points": [[3, 4], [5, 6]]},
         ),
         (
             {"action": "type_text", "physical_arguments": {
@@ -231,13 +234,76 @@ def _write_trace(path, events):
             }},
             {"tool": "hotkey", "keys": ["ctrl", "shift", "s"]},
         ),
+        (
+            {"action": "move_mouse", "physical_arguments": {
+                "kind": "pointer_move", "x": 11, "y": 12, "duration_ms": 30,
+            }},
+            {"tool": "move_mouse", "coords": [11, 12], "duration_ms": 30},
+        ),
+        (
+            {"action": "input_sequence", "physical_arguments": {
+                "kind": "input_sequence",
+                "events": [{"kind": "key_down", "key": "shift"}],
+            }},
+            {"tool": "input_sequence", "events": [
+                {"kind": "key_down", "key": "shift"},
+            ]},
+        ),
+        (
+            {"action": "launch_application", "physical_arguments": {
+                "kind": "launch_application", "app": "notepad", "arguments": "a.txt",
+            }},
+            {"tool": "launch_application", "app": "notepad", "arguments": "a.txt"},
+        ),
     ],
 )
 def test_vnext_physical_attempt_maps_to_plain_wps(payload, expected):
     assert trace_mod._physical_attempt_to_wps(payload) == expected
 
 
-def test_vnext_drag_projects_to_click_drop_point_regardless_of_hold():
+def test_vnext_trace_steps_keeps_visible_activity_as_note():
+    decision_id = "decision-readable"
+    events = [
+        {
+            "type": "live_agent_activity",
+            "kind": "message",
+            "content": "The result is visible. Click the Save button.",
+        },
+        {
+            "type": "vnext_physical_attempt",
+            "run_id": "run-readable",
+            "decision_id": decision_id,
+            "action": "click",
+            "physical_arguments": {
+                "kind": "pointer_click", "x": 10, "y": 20,
+            },
+            "target_identity": {},
+            "timestamp_ns": 1,
+        },
+        {
+            "type": "vnext_raw_receipt",
+            "run_id": "run-readable",
+            "decision_id": decision_id,
+            "input_completed": True,
+            "controller_action": "click",
+            "raw_action": "click",
+        },
+    ]
+
+    steps, reasons, is_vnext = trace_mod._vnext_trace_steps(
+        "run-readable", events,
+    )
+
+    assert is_vnext is True
+    assert steps == [{
+        "tool": "click",
+        "coords": [10, 20],
+        "note": "The result is visible. Click the Save button.",
+    }]
+    assert reasons == []
+
+
+def test_vnext_drag_preserves_the_real_drag_and_hold_shape():
     attempt = {
         "action": "drag",
         "physical_arguments": {
@@ -252,16 +318,65 @@ def test_vnext_drag_projects_to_click_drop_point_regardless_of_hold():
     }
 
     assert trace_mod._physical_attempt_to_wps(attempt) == {
-        "tool": "click",
-        "coords": [7, 8],
+        "tool": "drag",
+        "from": [1, 2],
+        "to": [7, 8],
+        "started_held": False,
+        "keep_holding": False,
     }
     for field in ("started_held", "keep_holding"):
         held = json.loads(json.dumps(attempt))
         held["physical_arguments"][field] = True
-        assert trace_mod._physical_attempt_to_wps(held) == {
-            "tool": "click",
-            "coords": [7, 8],
-        }
+        projected = trace_mod._physical_attempt_to_wps(held)
+        assert projected["tool"] == "drag"
+        assert projected[field] is True
+
+
+def test_vnext_trace_orders_local_utilities_with_physical_actions():
+    events = [
+        {"type": "live_agent_activity", "kind": "tool_start", "tool": "run_shell",
+         "arguments": {"command": "Get-Date", "shell": "powershell"}, "ts": 1},
+        {"type": "vnext_physical_attempt", "run_id": "run-all", "decision_id": "d1",
+         "action": "launch_application", "timestamp_ns": 2_000_000_000,
+         "physical_arguments": {"kind": "launch_application", "app": "notepad",
+                                "arguments": ""}, "target_identity": {}},
+        {"type": "vnext_raw_receipt", "run_id": "run-all", "decision_id": "d1",
+         "input_completed": True, "controller_action": "launch_application",
+         "raw_action": "launch_application"},
+        {"type": "live_agent_activity", "kind": "tool_result",
+         "tool": "copy_current_view",
+         "arguments": {"replay_frame": "run-all/view_frame_d1.jpg"}, "ts": 2.5},
+        {"type": "live_agent_activity", "kind": "tool_start", "tool": "capture_screen",
+         "arguments": {"path": "C:/tmp/frame.png", "window": False}, "ts": 3},
+    ]
+
+    steps, _reasons, is_vnext = trace_mod._vnext_trace_steps("run-all", events)
+
+    assert is_vnext is True
+    assert [step["tool"] for step in steps] == [
+        "run_shell", "launch_application", "copy_current_view", "capture_screen",
+    ]
+    assert steps[0]["command"] == "Get-Date"
+    assert steps[2]["reference_frame"] == {
+        "pending_path": "run-all/view_frame_d1.jpg",
+    }
+    assert steps[3]["path"] == "C:/tmp/frame.png"
+
+
+def test_trace_list_counts_physical_and_utility_replay_steps(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    _write_trace(tmp_path / "run-count.jsonl", [
+        {"type": "vnext_raw_receipt", "decision_id": "d1", "input_completed": True},
+        {"type": "live_agent_activity", "kind": "tool_start", "tool": "run_shell",
+         "arguments": {"command": "Get-Date"}},
+        {"type": "live_agent_activity", "kind": "tool_start", "tool": "capture_screen",
+         "arguments": {"path": "C:/tmp/a.png"}},
+        {"type": "live_agent_activity", "kind": "tool_result",
+         "tool": "copy_current_view",
+         "arguments": {"replay_frame": "run-count/view_frame_d1.jpg"}},
+    ])
+
+    assert trace_mod.list_traces()[0]["steps"] == 4
 
 
 def test_export_script_includes_batch_child_replay(tmp_path, monkeypatch):
@@ -280,6 +395,125 @@ def test_export_script_includes_batch_child_replay(tmp_path, monkeypatch):
     assert data["format"] == "wps/2"
     assert data["steps"] == [{"tool": "click", "coords": [7, 8]}]
     assert trace_mod.validate_script(data) is None
+
+
+def test_export_attaches_exact_model_click_frame_and_consumes_cache(
+    tmp_path,
+    monkeypatch,
+):
+    traces = tmp_path / "traces"
+    scripts = tmp_path / "scripts"
+    run_dir = traces / "run-frame"
+    run_dir.mkdir(parents=True)
+    frame = run_dir / "click_frame_d1.jpg"
+    frame.write_bytes(b"\xff\xd8exact-model-frame\xff\xd9")
+    view_frame = run_dir / "view_frame_d2.jpg"
+    view_frame.write_bytes(b"\xff\xd8exact-copied-view\xff\xd9")
+    (run_dir / trace_mod._REPLAY_FRAME_MANIFEST).write_text(
+        json.dumps({"run_id": "run-frame", "thread_id": "thread-1", "created": 1}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", traces)
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", scripts)
+    _write_trace(traces / "run-frame.jsonl", [
+        {"type": "vnext_physical_attempt", "run_id": "run-frame",
+         "decision_id": "d1", "action": "click", "timestamp_ns": 1,
+         "physical_arguments": {"kind": "pointer_click", "x": 600, "y": 300},
+         "submitted_image_size": [1120, 630], "frame_region": [0, 0, 1920, 1080],
+         "image_coordinates": {"image_x": 350, "image_y": 175},
+         "frame_id": 9, "replay_frame": "run-frame/click_frame_d1.jpg",
+         "target_identity": {}},
+        {"type": "vnext_raw_receipt", "run_id": "run-frame", "decision_id": "d1",
+         "input_completed": True, "controller_action": "click", "raw_action": "click"},
+        {"type": "live_agent_activity", "kind": "tool_result",
+         "tool": "copy_current_view", "ts": 2,
+         "arguments": {"replay_frame": "run-frame/view_frame_d2.jpg"}},
+    ])
+
+    path = trace_mod.export_script("run-frame", name="click-sample")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    reference = data["steps"][0]["reference_frame"]
+    asset = scripts / reference["asset"]
+    view_reference = data["steps"][1]["reference_frame"]
+    view_asset = scripts / view_reference["asset"]
+
+    assert reference["target"] == [350, 175]
+    assert reference["image_size"] == [1120, 630]
+    assert reference["screen_region"] == [0, 0, 1920, 1080]
+    assert reference["path"] == str(asset.resolve())
+    assert asset.read_bytes() == b"\xff\xd8exact-model-frame\xff\xd9"
+    assert data["steps"][1]["tool"] == "copy_current_view"
+    assert view_reference["path"] == str(view_asset.resolve())
+    assert view_asset.name == "view-002.jpg"
+    assert view_asset.read_bytes() == b"\xff\xd8exact-copied-view\xff\xd9"
+    assert not frame.exists()
+    assert not view_frame.exists()
+    assert (run_dir / trace_mod._REPLAY_FRAME_MANIFEST).exists()
+    ir = json.loads((scripts / "click-sample.automation.json").read_text(encoding="utf-8"))
+    assert ir["steps"][0]["reference_frame"] == reference
+    assert ir["steps"][1]["reference_frame"] == view_reference
+
+
+def test_pending_click_frames_keep_only_two_latest_agent_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    for created, run_id in enumerate(("run-old", "run-middle", "run-new"), start=1):
+        run_dir = tmp_path / run_id
+        run_dir.mkdir()
+        (run_dir / trace_mod._REPLAY_FRAME_MANIFEST).write_text(
+            json.dumps({"run_id": run_id, "thread_id": run_id, "created": created}),
+            encoding="utf-8",
+        )
+        (run_dir / f"{trace_mod._REPLAY_FRAME_PREFIX}d.jpg").write_bytes(b"frame")
+        (run_dir / f"{trace_mod._REPLAY_VIEW_FRAME_PREFIX}d.jpg").write_bytes(b"view")
+
+    trace_mod.TraceRecorder._prune_replay_frames()
+
+    assert not (tmp_path / "run-old" / f"{trace_mod._REPLAY_FRAME_PREFIX}d.jpg").exists()
+    assert not (tmp_path / "run-old" / f"{trace_mod._REPLAY_VIEW_FRAME_PREFIX}d.jpg").exists()
+    assert not (tmp_path / "run-old" / trace_mod._REPLAY_FRAME_MANIFEST).exists()
+    assert (tmp_path / "run-middle" / f"{trace_mod._REPLAY_FRAME_PREFIX}d.jpg").exists()
+    assert (tmp_path / "run-middle" / f"{trace_mod._REPLAY_VIEW_FRAME_PREFIX}d.jpg").exists()
+    assert (tmp_path / "run-new" / f"{trace_mod._REPLAY_FRAME_PREFIX}d.jpg").exists()
+    assert (tmp_path / "run-new" / f"{trace_mod._REPLAY_VIEW_FRAME_PREFIX}d.jpg").exists()
+
+
+def test_exact_click_frame_cache_is_opt_in_and_requires_open_trace(tmp_path, monkeypatch):
+    from winpilot.utils import replay_frames
+
+    monkeypatch.setattr(replay_frames, "TRACES_DIR", tmp_path)
+    monkeypatch.setattr(
+        replay_frames.CONFIG,
+        "get",
+        lambda *path, default=None: False,
+    )
+    jpeg = base64.b64encode(b"\xff\xd8model-view\xff\xd9").decode("ascii")
+    (tmp_path / "run-open").mkdir()
+
+    assert replay_frames.save_pending_click_frame(
+        run_id="run-open", decision_id="click / 1", image_b64=jpeg,
+    ) is None
+    (tmp_path / "run-open.jsonl").touch()
+    assert replay_frames.save_pending_click_frame(
+        run_id="run-open", decision_id="click / 1", image_b64=jpeg,
+    ) is None
+    assert not (tmp_path / "run-open/click_frame_click_1.jpg").exists()
+    copied = replay_frames.save_pending_view_frame(
+        run_id="run-open", decision_id="copy / 1", image_b64=jpeg,
+    )
+    assert copied == "run-open/view_frame_copy_1.jpg"
+    assert (tmp_path / copied).read_bytes() == b"\xff\xd8model-view\xff\xd9"
+
+    monkeypatch.setattr(
+        replay_frames.CONFIG,
+        "get",
+        lambda *path, default=None: True,
+    )
+    relative = replay_frames.save_pending_click_frame(
+        run_id="run-open", decision_id="click / 1", image_b64=jpeg,
+    )
+
+    assert relative == "run-open/click_frame_click_1.jpg"
+    assert (tmp_path / relative).read_bytes() == b"\xff\xd8model-view\xff\xd9"
 
 
 def test_export_script_drops_only_explicit_fast_wrapper_parent(tmp_path, monkeypatch):

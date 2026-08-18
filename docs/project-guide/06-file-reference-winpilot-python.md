@@ -440,9 +440,9 @@ finally:
   只有“pure, product-unwired kernel”说明和空 `__all__`；没有自动组合副作用，真正产品 wiring
   全在 `orchestrator.live_agent`。
 - [`vnext/desktop_ops.py`](../../python/winpilot_home/winpilot/vnext/desktop_ops.py) — **主链通用工具桥**。
-  `capture_screen/list_windows/paste_image` 只调用注入的物理 backend并格式化结果。
-  `capture_screen` 将相对路径原样交给 backend，由 backend按 Runtime cwd与图片格式处理；
-  上层不重复要求绝对路径、扩展名或预先存在。
+  当前在线 Actor 使用 `copy_current_view/list_windows`；前者只调用注入的物理 backend，
+  把本轮已提交的 JPEG 放入图片剪贴板，不接受路径、不重新截图、不自动粘贴。
+  `capture_screen/paste_image` 仅保留为旧 WPS 脚本回放的兼容实现，不再暴露给在线 Actor。
 
 #### `vnext/actor/`（3）
 

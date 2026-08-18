@@ -46,7 +46,15 @@ function retryOf(params: Record<string, any>) {
 }
 
 function withoutPolicyFields(params: Record<string, any>): Record<string, unknown> {
-  const { retry_max_attempts: _attempts, retry_delay_ms: _delay, description: _description, ...config } = params;
+  const {
+    retry_max_attempts: _attempts,
+    retry_delay_ms: _delay,
+    description: _description,
+    allow_shell: _allowShell,
+    preflight_contract: _preflight,
+    postflight_evidence: _postflight,
+    ...config
+  } = params;
   return config;
 }
 
@@ -314,9 +322,6 @@ export function flowToArpGraph(script: FlowScript): ArpGraph {
     policy: {
       max_node_visits: 100,
       fail_fast: script.settings.error_handling === 'stop',
-      require_evidence_on_done: true,
-      allow_shell: replayNodes.some((node) => node.config.allow_shell === true),
-      allow_desktop_mutation: true,
     },
     metadata: {
       source: 'flow-editor',

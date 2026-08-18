@@ -142,6 +142,7 @@ _TOOL_DESCRIPTIONS = {
 _MODEL_TOOL_NAMES = {
     "hotkey": "press_key",
     "observe": "refresh_desktop",
+    "copy_current_view": "copy_screen_to_clipboard",
 }
 _RUNTIME_TOOL_NAMES = {
     model_name: runtime_name
@@ -198,18 +199,14 @@ _SHELL_MAX_COMMAND_CHARS = 16_384
 _WINDOW_TEXT_TOOL = "read_window_text"
 _STANDALONE_WINDOW_TEXT_ALLOWANCE = 2
 _WINDOW_TEXT_MAX_CHARS = 6000
-_CAPTURE_SCREEN_TOOL = "capture_screen"
-_STANDALONE_CAPTURE_ALLOWANCE = 2
+_COPY_CURRENT_VIEW_TOOL = _MODEL_TOOL_NAMES["copy_current_view"]
+_STANDALONE_COPY_CURRENT_VIEW_ALLOWANCE = 2
 _LIST_WINDOWS_TOOL = "list_windows"
 _STANDALONE_LIST_WINDOWS_ALLOWANCE = 1
-_PASTE_IMAGE_TOOL = "paste_image_file"
-_STANDALONE_PASTE_IMAGE_ALLOWANCE = 2
-_CAPTURE_OUTPUT_MAX_CHARS = 6000
 # Optional tool-schema fields and their JSON defaults.  The model may omit
 # them; the runtime fills the default so the tool schema and the validator
 # never disagree.
 _OPTIONAL_TOOL_DEFAULTS = {
-    _CAPTURE_SCREEN_TOOL: {"window": False},
     _DETACHED_SHELL_TOOL: {"name": "task"},
 }
 
@@ -222,12 +219,39 @@ class _InitialExchange:
 
 @dataclass(slots=True)
 class _VisualExchange:
-    """One immediately preceding provider-native visual action."""
+    """One pending provider-native tool transcript awaiting its GUI result."""
 
     messages: tuple[dict[str, Any], ...]
     tool_call_id: str
     runtime_tool_name: str
     result_content: dict[str, Any] | None = None
+
+
+def _text_only_tool_transcript(
+    messages: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Keep this run's tool conversation without retaining old screenshots."""
+
+    transcript: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "user":
+            transcript.append({
+                "role": "user",
+                "content": (
+                    "Earlier desktop frame omitted; use the current JPEG as "
+                    "the only authoritative visual state."
+                ),
+            })
+            continue
+        if role not in {"assistant", "tool"}:
+            continue
+        item = deepcopy(dict(message))
+        item.pop("reasoning_content", None)
+        if role == "assistant":
+            item["content"] = ""
+        transcript.append(item)
+    return tuple(transcript)
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +356,16 @@ def _projected_tool_message(
                 model_calls_remaining=model_calls_remaining,
             )
         ),
+    }
+
+
+def _model_visible_tool_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Hide recorder-only fields from the model's native tool result."""
+
+    return {
+        key: value
+        for key, value in result.items()
+        if not str(key).startswith("_")
     }
 
 
@@ -1350,46 +1384,30 @@ def _window_text_tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
-def _capture_screen_tool_definitions() -> list[dict[str, Any]]:
-    """One generic screen/window capture tool that saves a PNG/JPEG file.
-
-    The model needs real image files for tasks like "send a screenshot to my
-    phone".  The system PrintScreen / Snipping Tool flow is a modal overlay
-    the model cannot operate reliably, so the runtime exposes its own capture
-    primitive instead of forcing the model to script one.
-    """
+def _copy_current_view_tool_definitions() -> list[dict[str, Any]]:
+    """Expose the current submitted frame as a path-free clipboard action."""
 
     return [
         {
             "type": "function",
             "function": {
-                "name": _CAPTURE_SCREEN_TOOL,
+                "name": _COPY_CURRENT_VIEW_TOOL,
                 "description": (
-                    "Save a screen or window image and put the same image on "
-                    "the clipboard, so a later Ctrl+V in a chat input pastes "
-                    "it; the result reports the absolute saved path."
+                    "Replace the Windows clipboard with the exact screen image "
+                    "you are seeing in this turn. This copies; it does not "
+                    "paste or recapture. Call it while the screen you want is "
+                    "visible, then focus the destination and press Ctrl+V."
                 ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 512,
-                            "description": (
-                                "PNG/JPEG path; the result echoes the absolute "
-                                "saved path."
-                            ),
-                        },
-                        "window": {
-                            "type": "boolean",
-                            "default": False,
-                            "description": "Current window only.",
-                        },
+                "parameters": _actor_parameters_from_schema(
+                    _COPY_CURRENT_VIEW_TOOL,
+                    {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
                     },
-                    "required": ["path"],
-                    "additionalProperties": False,
-                },
+                    requires_local_intent=False,
+                ),
                 "strict": True,
             },
         },
@@ -1409,38 +1427,6 @@ def _list_windows_tool_definitions() -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {},
                     "required": [],
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            },
-        },
-    ]
-
-
-def _paste_image_tool_definitions() -> list[dict[str, Any]]:
-    """One generic image-paste tool: file -> clipboard -> Ctrl+V."""
-
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": _PASTE_IMAGE_TOOL,
-                "description": (
-                    "Load one image file onto the clipboard and press Ctrl+V "
-                    "into the current foreground window; pass the exact path "
-                    "returned by capture_screen. The result echoes the loaded "
-                    "file's absolute path, size, and modification time."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 512,
-                        },
-                    },
-                    "required": ["path"],
                     "additionalProperties": False,
                 },
                 "strict": True,
@@ -1672,34 +1658,31 @@ def _owned_tool_exchange(
     return assistant, call_id, name, arguments
 
 
-def _call_capture_screen(
-    capture_runner: Any,
-    arguments: Mapping[str, Any],
+def _call_copy_current_view(
+    copy_current_view_runner: Any,
+    *,
+    image_b64: str,
+    decision_id: str,
 ) -> dict[str, Any]:
-    """Save a screen/window capture through the injected runner."""
-    if capture_runner is None or not callable(capture_runner):
+    """Copy the exact frame already supplied to this model turn."""
+    if copy_current_view_runner is None or not callable(copy_current_view_runner):
         return _actionable_tool_result(
-            _CAPTURE_SCREEN_TOOL,
-            {"ok": False, "error": "capture runner is unavailable"},
+            _COPY_CURRENT_VIEW_TOOL,
+            {"ok": False, "error": "current-view clipboard is unavailable"},
         )
     try:
-        result = capture_runner(
-            path=str(arguments.get("path") or ""),
-            window=bool(arguments.get("window")),
+        result = copy_current_view_runner(
+            image_b64=image_b64,
+            decision_id=decision_id,
         )
     except Exception as exc:
-        return _actionable_tool_error(_CAPTURE_SCREEN_TOOL, exc)
+        return _actionable_tool_error(_COPY_CURRENT_VIEW_TOOL, exc)
     if not isinstance(result, Mapping):
         return _actionable_tool_error(
-            _CAPTURE_SCREEN_TOOL,
-            TypeError("capture runner returned a non-object result"),
+            _COPY_CURRENT_VIEW_TOOL,
+            TypeError("current-view clipboard returned a non-object result"),
         )
-    output = dict(result)
-    for key in ("error", "detail"):
-        value = output.get(key)
-        if isinstance(value, str) and len(value) > _CAPTURE_OUTPUT_MAX_CHARS:
-            output[key] = value[:_CAPTURE_OUTPUT_MAX_CHARS]
-    return _actionable_tool_result(_CAPTURE_SCREEN_TOOL, output)
+    return _actionable_tool_result(_COPY_CURRENT_VIEW_TOOL, result)
 
 
 def _call_list_windows(
@@ -1742,28 +1725,6 @@ def _call_list_windows(
             if key in item
         })
     return {"ok": True, "windows": bounded, "count": len(bounded)}
-
-
-def _call_paste_image(
-    paste_runner: Any,
-    arguments: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Paste an image file into the current target through the injected runner."""
-    if paste_runner is None or not callable(paste_runner):
-        return _actionable_tool_result(
-            _PASTE_IMAGE_TOOL,
-            {"ok": False, "error": "image-paste runner is unavailable"},
-        )
-    try:
-        result = paste_runner(path=str(arguments.get("path") or ""))
-    except Exception as exc:
-        return _actionable_tool_error(_PASTE_IMAGE_TOOL, exc)
-    if not isinstance(result, Mapping):
-        return _actionable_tool_error(
-            _PASTE_IMAGE_TOOL,
-            TypeError("image-paste runner returned a non-object result"),
-        )
-    return _actionable_tool_result(_PASTE_IMAGE_TOOL, result)
 
 
 def _connector_exchange(
@@ -2167,12 +2128,6 @@ def _visual_batch_call(
         exchange = _local_utility_exchange(response)
     elif name == _WINDOW_TEXT_TOOL:
         exchange = _window_text_exchange(response)
-    elif name == _CAPTURE_SCREEN_TOOL:
-        exchange = _owned_tool_exchange(
-            response,
-            _CAPTURE_SCREEN_TOOL,
-            expected_arguments={"path": str, "window": bool},
-        )
     elif name == _LIST_WINDOWS_TOOL:
         exchange = _owned_tool_exchange(
             response,
@@ -2197,7 +2152,6 @@ def _execute_visual_batch_call(
     shell_runner: Any,
     connector_gateway: Any,
     window_text_reader: Any,
-    capture_runner: Any,
     windows_reader: Any,
     turn: ActorTurnInput,
     timeout_s: float,
@@ -2216,8 +2170,6 @@ def _execute_visual_batch_call(
         return _call_local_utility(shell_runner, name, arguments)
     if name == _WINDOW_TEXT_TOOL:
         return _call_window_text(window_text_reader, turn)
-    if name == _CAPTURE_SCREEN_TOOL:
-        return _call_capture_screen(capture_runner, arguments)
     if name == _LIST_WINDOWS_TOOL:
         return _call_list_windows(windows_reader)
     return _call_connector(
@@ -2419,9 +2371,8 @@ class LiveVisualActor:
         status_provider: Any | None = None,
         shell_runner: Any | None = None,
         window_text_reader: Any | None = None,
-        capture_runner: Any | None = None,
+        copy_current_view_runner: Any | None = None,
         windows_reader: Any | None = None,
-        paste_runner: Any | None = None,
         max_attempts: int = 1,
     ) -> None:
         if client is None:
@@ -2462,14 +2413,13 @@ class LiveVisualActor:
         self._window_text_reader = (
             window_text_reader if callable(window_text_reader) else None
         )
-        self._capture_runner = (
-            capture_runner if callable(capture_runner) else None
+        self._copy_current_view_runner = (
+            copy_current_view_runner
+            if callable(copy_current_view_runner)
+            else None
         )
         self._windows_reader = (
             windows_reader if callable(windows_reader) else None
-        )
-        self._paste_runner = (
-            paste_runner if callable(paste_runner) else None
         )
         if (
             type(max_attempts) is not int
@@ -2478,6 +2428,7 @@ class LiveVisualActor:
             raise LiveModelRoleError("max_attempts must be in [1, 5]")
         self._max_attempts = max_attempts
         self._previous_visual_exchange: _VisualExchange | None = None
+        self._completed_visual_history: list[dict[str, Any]] = []
         self._initial_exchange: _InitialExchange | None = None
         self._initial_turn_started = False
         self._initial_turn_terminal = False
@@ -2505,16 +2456,12 @@ class LiveVisualActor:
             if self._window_text_reader is not None
             else 0
         ) + (
-            _STANDALONE_CAPTURE_ALLOWANCE
-            if self._capture_runner is not None
+            _STANDALONE_COPY_CURRENT_VIEW_ALLOWANCE
+            if self._copy_current_view_runner is not None
             else 0
         ) + (
             _STANDALONE_LIST_WINDOWS_ALLOWANCE
             if self._windows_reader is not None
-            else 0
-        ) + (
-            _STANDALONE_PASTE_IMAGE_ALLOWANCE
-            if self._paste_runner is not None
             else 0
         )
         return 3 + local_allowance
@@ -2590,6 +2537,9 @@ class LiveVisualActor:
             "kind": "tool_start",
             "tool": runtime_name,
             "message": message[:4096],
+            # This is the replay payload for non-pointer utilities. Pointer
+            # actions keep using the canonical physical-attempt event.
+            "arguments": arguments,
         }
         if type(command) is str and command.strip():
             activity["command"] = command.strip()[:16_384]
@@ -2630,11 +2580,17 @@ class LiveVisualActor:
         next_step = result.get("next_step")
         if failed and type(next_step) is str and next_step.strip():
             detail = f"{detail}\nNext: {next_step.strip()}"
+        activity: dict[str, Any] = {
+            "kind": "tool_result",
+            "tool": _RUNTIME_TOOL_NAMES.get(name, name),
+            "message": detail.strip()[:4096],
+            "ok": not failed,
+        }
+        replay_frame = result.get("_replay_frame")
+        if name == _COPY_CURRENT_VIEW_TOOL and type(replay_frame) is str:
+            activity["arguments"] = {"replay_frame": replay_frame}
         self._emit_activity(
-            kind="tool_result",
-            tool=_RUNTIME_TOOL_NAMES.get(name, name),
-            message=detail.strip()[:4096],
-            ok=not failed,
+            **activity,
         )
 
     def _model_call_allowance(self, model_call_limit: int | None) -> int:
@@ -3033,19 +2989,14 @@ class LiveVisualActor:
             if self._window_text_reader is not None
             else []
         )
-        capture_tools = (
-            _capture_screen_tool_definitions()
-            if self._capture_runner is not None
+        copy_current_view_tools = (
+            _copy_current_view_tool_definitions()
+            if self._copy_current_view_runner is not None
             else []
         )
         windows_tools = (
             _list_windows_tool_definitions()
             if self._windows_reader is not None
-            else []
-        )
-        paste_tools = (
-            _paste_image_tool_definitions()
-            if self._paste_runner is not None
             else []
         )
         connector_tools = _connector_tool_definitions(self._connector_gateway)
@@ -3150,8 +3101,10 @@ class LiveVisualActor:
             previous_exchange.result_content = {
                 "previous_action": turn.previous_action.to_dict()
             }
-            native_context.extend(deepcopy(previous_exchange.messages))
-            native_context.append(
+            self._completed_visual_history.extend(
+                deepcopy(previous_exchange.messages)
+            )
+            self._completed_visual_history.append(
                 {
                     "role": "tool",
                     "tool_call_id": previous_exchange.tool_call_id,
@@ -3160,8 +3113,10 @@ class LiveVisualActor:
                     ),
                 }
             )
+            self._previous_visual_exchange = None
         else:
             self._previous_visual_exchange = None
+        native_context.extend(deepcopy(self._completed_visual_history))
         if rejection_feedback:
             native_context.append(
                 {
@@ -3189,9 +3144,8 @@ class LiveVisualActor:
                 *status_tools,
                 *shell_tools,
                 *window_text_tools,
-                *capture_tools,
+                *copy_current_view_tools,
                 *windows_tools,
-                *paste_tools,
                 *connector_tools,
             ],
             # MiMo's documented Chat Completions surface supports only
@@ -3280,7 +3234,6 @@ class LiveVisualActor:
                         shell_runner=self._shell_runner,
                         connector_gateway=self._connector_gateway,
                         window_text_reader=self._window_text_reader,
-                        capture_runner=self._capture_runner,
                         windows_reader=turn_windows_reader,
                         turn=turn,
                         timeout_s=min(30.0, self._total_timeout_s),
@@ -3428,27 +3381,25 @@ class LiveVisualActor:
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
                 continue
-            capture = None
-            if self._capture_runner is not None:
+            copy_current_view = None
+            if self._copy_current_view_runner is not None:
                 try:
-                    capture = _owned_tool_exchange(
+                    copy_current_view = _owned_tool_exchange(
                         outcome.response,
-                        _CAPTURE_SCREEN_TOOL,
-                        expected_arguments={
-                            "path": str,
-                            "window": bool,
-                        },
+                        _COPY_CURRENT_VIEW_TOOL,
+                        expected_arguments={},
                     )
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
-            if capture is not None:
-                assistant, call_id, name, arguments = capture
+            if copy_current_view is not None:
+                assistant, call_id, name, _arguments = copy_current_view
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
                 )
-                result = _call_capture_screen(
-                    self._capture_runner,
-                    arguments,
+                result = _call_copy_current_view(
+                    self._copy_current_view_runner,
+                    image_b64=image_b64,
+                    decision_id=_decision_id(turn, image_b64),
                 )
                 self._record_tool_result(name, result)
                 connector_messages = [
@@ -3457,7 +3408,7 @@ class LiveVisualActor:
                         seen_tool_results,
                         name=name,
                         call_id=call_id,
-                        result=result,
+                        result=_model_visible_tool_result(result),
                         model_calls_remaining=model_calls_remaining,
                     ),
                 ]
@@ -3480,39 +3431,6 @@ class LiveVisualActor:
                     _initial_calls_from_response(outcome.response)[0]
                 )
                 result = _call_list_windows(turn_windows_reader)
-                self._record_tool_result(name, result)
-                connector_messages = [
-                    assistant,
-                    _projected_tool_message(
-                        seen_tool_results,
-                        name=name,
-                        call_id=call_id,
-                        result=result,
-                        model_calls_remaining=model_calls_remaining,
-                    ),
-                ]
-                current_exchange.extend(connector_messages)
-                provider_request["messages"].extend(connector_messages)
-                continue
-            paste = None
-            if self._paste_runner is not None:
-                try:
-                    paste = _owned_tool_exchange(
-                        outcome.response,
-                        _PASTE_IMAGE_TOOL,
-                        expected_arguments={"path": str},
-                    )
-                except LiveModelRoleError as exc:
-                    raise InvalidActorProposal(str(exc)) from exc
-            if paste is not None:
-                assistant, call_id, name, arguments = paste
-                self._record_tool_start(
-                    _initial_calls_from_response(outcome.response)[0]
-                )
-                result = _call_paste_image(
-                    self._paste_runner,
-                    arguments,
-                )
                 self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
@@ -3627,16 +3545,10 @@ class LiveVisualActor:
         if exchange is None:
             self._previous_visual_exchange = None
         else:
-            image_message = {
-                "role": "user",
-                "content": [
-                    deepcopy(item)
-                    for item in user_message["content"]
-                    if item.get("type") == "image_url"
-                ],
-            }
             self._previous_visual_exchange = _VisualExchange(
-                messages=tuple(deepcopy([image_message, exchange[0]])),
+                messages=_text_only_tool_transcript(
+                    [*current_exchange, exchange[0]]
+                ),
                 tool_call_id=exchange[1],
                 runtime_tool_name=exchange[2],
             )

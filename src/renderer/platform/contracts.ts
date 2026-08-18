@@ -101,9 +101,6 @@ export interface ArpGraph {
   policy: {
     max_node_visits: number;
     fail_fast: boolean;
-    require_evidence_on_done: boolean;
-    allow_shell: boolean;
-    allow_desktop_mutation: boolean;
   };
   metadata: Record<string, unknown>;
 }

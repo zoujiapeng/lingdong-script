@@ -1,4 +1,4 @@
-"""vNext-owned capture / window-inventory / image-paste operation contracts.
+"""vNext-owned desktop utility operation contracts.
 
 This module is pure logic: it validates the Actor's arguments, calls the
 injected physical backends, and formats bounded results.  The physical
@@ -14,10 +14,12 @@ from typing import Any, Callable, Mapping
 CaptureBackend = Callable[..., dict[str, Any]]
 WindowsBackend = Callable[[], dict[str, Any]]
 PasteBackend = Callable[..., dict[str, Any]]
+CopyFrameBackend = Callable[..., dict[str, Any]]
 
 CAPTURE_FORMAT = "capture-screen/1"
 WINDOWS_FORMAT = "windows-list/1"
 PASTE_FORMAT = "paste-image/1"
+COPY_IMAGE_FORMAT = "copy-image/1"
 
 _CAPTURE_OUTPUT_MAX_CHARS = 6000
 
@@ -76,6 +78,32 @@ def list_windows(backend: WindowsBackend) -> dict[str, Any]:
     return output
 
 
+def copy_current_view(
+    backend: CopyFrameBackend,
+    *,
+    image_b64: str,
+) -> dict[str, Any]:
+    """Put the already-submitted model frame onto the OS clipboard."""
+
+    try:
+        result = backend(image_b64=image_b64)
+    except Exception as exc:
+        return {
+            "format": COPY_IMAGE_FORMAT,
+            "ok": False,
+            "error": f"{type(exc).__name__}: {_bounded_text(str(exc))}",
+        }
+    if not isinstance(result, Mapping):
+        return {
+            "format": COPY_IMAGE_FORMAT,
+            "ok": False,
+            "error": "copy-frame backend returned a non-object result",
+        }
+    output = dict(result)
+    output.setdefault("format", COPY_IMAGE_FORMAT)
+    return output
+
+
 def paste_image(backend: PasteBackend, *, path: str) -> dict[str, Any]:
     """Validate one paste request and delegate to the physical backend."""
     if not path or not path.strip():
@@ -105,12 +133,15 @@ def paste_image(backend: PasteBackend, *, path: str) -> dict[str, Any]:
 
 __all__ = [
     "CaptureBackend",
+    "CopyFrameBackend",
     "WindowsBackend",
     "PasteBackend",
     "CAPTURE_FORMAT",
     "WINDOWS_FORMAT",
     "PASTE_FORMAT",
+    "COPY_IMAGE_FORMAT",
     "capture_screen",
+    "copy_current_view",
     "list_windows",
     "paste_image",
 ]

@@ -130,12 +130,9 @@ flowchart LR
   UI["NodeLibrary / Canvas / PropertyPanel"] --> Store["Zustand useStore\nFlowScript"]
   Store --> AIR["automationIrFromFlowScript"]
   AIR --> Graph["flowToArpGraph\ncanonical ARP graph"]
-  Graph --> Local["validateAutomationLocally"]
-  Local -->|失败| Stop["显示错误，不启动"]
-  Local -->|通过且离线| Edit["仍可编辑/保存"]
-  Local -->|通过且在线| Remote["POST /api/v2/automation-ir/validate"]
-  Remote --> Fingerprint["重新核对 document fingerprint"]
-  Fingerprint -->|未变化且有效| Run["POST /api/v2/automation-ir/runs"]
+  Graph --> Shape["最小结构检查"]
+  Shape -->|格式错误| Stop["显示错误，不启动"]
+  Shape -->|格式可执行| Run["POST /api/v2/automation-ir/runs"]
   Run --> Events["WS arp_node_start / arp_node_done"]
   Events --> Store
 ```
@@ -146,14 +143,16 @@ Studio 运行伪代码：
 点击“运行工作流”:
   把当前 FlowScript 包成 AutomationIR
   取 runtime.graph
-  本地检查格式、边、可达性、参数、证据门和空间动作前的 focus_window
+  本地只检查图和动作参数是否能被运行时读取
   若离线或 runtime identity 有问题 -> 不运行
-  请求后端再次验证
-  比较验证前后的流程 fingerprint
-  如果用户在等待期间改了图 -> 丢弃旧验证结果
-  否则提交同一 AutomationIR 快照
+  直接提交同一 AutomationIR 快照
   用 runtime 事件更新画布节点 running/success/error 状态
 ```
+
+“验证”按钮仍是用户主动调用的诊断工具，不再是点击运行后的第二道门。新离线流程不生成
+`safety`、`fallback`、`allow_shell`、`preflight_contract` 或
+`postflight_evidence`；打开旧文件时这些字段会被忽略，并在再次保存时清除。未绑定窗口的
+坐标动作按脚本记录的屏幕坐标执行。
 
 ### 4.1 当前本地可编译节点边界
 
@@ -334,7 +333,7 @@ CLAUDE.md 明令不得接回。
 | `src/renderer/platform/flowToArpGraph.ts` | 当前 Flow→ARP 编译器：20 个 `RUNNABLE_FLOW_NODE_TYPES`、`controllerActions()` 参数精确映射、retry/edge branch、policy/compilation metadata；不支持节点只投影 `legacy_flow` 供验证拒绝。 | Automation IR、NodeLibrary/Canvas、fragment 边界、测试。 | Studio 文档变化时编译；验证/保存/运行前。 |
 | `src/renderer/platform/taskOutcome.ts` | `taskOutcomeForRun()` 调共享分类器；仅明确 vNext/no-legacy 且无 error 的 direct reply 字符串按普通内容处理，避免把 JSON 文本猜成失败协议。 | AgentConversationTurn、taskbar helper。 | Renderer 终态展示。 |
 | `src/renderer/platform/taskbarNotification.ts` | `taskbarNotificationForTransition()` 只对观察到的活跃→终态、新 terminal run 或 live-start run 发一次通知，并输出 success/error/info 与正文。 | `useControlPlane`；taskbar tests。 | run 投影变化时。 |
-| `src/renderer/store/defaults.ts` | `DEFAULT_SETTINGS/UI_STATE`、localStorage keys、50 步 history 上限、preset template factory 与 metadata；默认 `arp-quickstart` 生成正式 Studio 起始图。 | store 初始化、模板 registry。 | Renderer 模块加载和新建流程。 |
+| `src/renderer/store/defaults.ts` | `DEFAULT_SETTINGS/UI_STATE`、localStorage keys、50 步 history 上限、preset template factory 与 metadata；默认 `blank-flow` 只生成起点和终点。 | store 初始化、模板 registry。 | Renderer 模块加载和新建流程。 |
 | `src/renderer/store/index.ts` | 1647 行 Zustand+Immer 单一编辑器 store：FlowScript/UI/selection/history/clipboard/subflow/旧 execution/features/macros/memory/triggers；保护唯一 start/end、canonical save、一次 checkpoint fragment、HMR-safe IPC listeners 与 localStorage。 | 几乎全部 Renderer 组件；App 与 Studio 直接调用。 | 编辑器常驻状态 owner；兼容 IPC/engine 事件也在此收口。 |
 | `src/renderer/store/executor.ts` | `createFlowExecutor()` 是旧浏览器预览/FlowScript 解释器，支持分支/循环/子流程/断点/变量；需要真实副作用时经 feature bridge，`require_real_features` 下拒绝模拟成功，返回 `ExecutionController`。 | 仅 store 的兼容 `startExecution()`；executor tests。 | 非 Electron 兼容预览或旧执行路径；不是 Studio 正式 run。 |
 | `src/renderer/store/persistence.ts` | localStorage CRUD：template shortcuts、custom templates、agent history；JSON 解析失败回空值。 | store 初始化与动作。 | Renderer 本地兼容资料持久化。 |
@@ -357,7 +356,7 @@ CLAUDE.md 明令不得接回。
 | `src/renderer/components/NodeLibrary/NodeLibrary.tsx` | 可搜索/分类/拖拽节点库；只展示本地可编译目录，分开标记运行时 capability 与 model requirement；也整合模板精确/统一搜索、recent 类型和 item marks。 | `Studio`；依赖 definitions、unifiedSearch、store、capability contracts。 | Studio 左侧资源抽屉。 |
 | `src/renderer/components/PropertyPanel/PropertyPanel.tsx` | 属性面板路由器：选中单节点时按全部 `NodeType` 分发专用 editor 或内联系统/聚合节点表单；另编辑 label、disabled、description 等并在 blur 建 history checkpoint。 | `Studio`；调用下列所有 params 组件与 store。 | Studio 右侧属性抽屉。 |
 | `src/renderer/components/PropertyPanel/controls/WheelSelectControl.tsx` | 原生 select 加可选全屏滚轮选择按钮；调用 preload `wheelSelect` 并回写 `selected`。 | `PopupCloseParams`。 | 旧 popup 策略编辑。 |
-| `src/renderer/components/PropertyPanel/params/ArpNodeParams.tsx` | 正式 ARP 节点 editor：goal/成功标准、action JSON、WPS replay step+target/session/shell、skill、结构化 evidence、human gate 和 retry；JSON 草稿注册 commit，解析错误阻断保存/替换。 | `PropertyPanel`；依赖 `editorDrafts`。 | 编辑原生 ARP 节点。 |
+| `src/renderer/components/PropertyPanel/params/ArpNodeParams.tsx` | 正式 ARP 节点 editor：goal/成功标准、action JSON、WPS replay step+可选 target/session、skill、显式 evidence/human gate 和 retry；JSON 草稿注册 commit，解析错误阻断保存/替换。 | `PropertyPanel`；依赖 `editorDrafts`。 | 编辑原生 ARP 节点。 |
 | `src/renderer/components/PropertyPanel/params/CameraCaptureParams.tsx` | 编辑抓拍的 camera id、输出路径、尺寸、PNG/JPG、稳定等待和说明。 | `PropertyPanel`。 | 历史 camera_capture 节点编辑；当前不在 20 节点正式目录。 |
 | `src/renderer/components/PropertyPanel/params/CameraRecordParams.tsx` | 编辑录像 camera id、输出路径、fps、duration、尺寸和说明。 | `PropertyPanel`。 | 历史 camera_record 节点编辑。 |
 | `src/renderer/components/PropertyPanel/params/ClickParams.tsx` | 坐标拾取、x/y、单/双/右/中/三击、delay 和说明；选点经 preload region selector。 | `PropertyPanel`。 | 正式 click 节点编辑。 |
@@ -388,7 +387,7 @@ CLAUDE.md 明令不得接回。
 
 | 文件 | 职责与关键符号 | 直接依赖 / 调用者 | 运行阶段 |
 | --- | --- | --- | --- |
-| `src/renderer/utils/automationIR.ts` | Automation IR 权威 adapter：WPS/Flow→IR、稳定 SHA-256 projection fingerprint、runtime graph 提取、本地结构/参数/空间 target/evidence 检查、IR→WPS/Flow、导入归一化与格式验证。 | App、Studio、store、fragment helpers；automationIR/platform tests。 | 打开、保存、验证、运行与 fragment 校验。 |
+| `src/renderer/utils/automationIR.ts` | Automation IR 权威 adapter：WPS/Flow→IR、稳定 SHA-256 projection fingerprint、runtime graph 提取、最小结构/参数检查、IR→WPS/Flow、导入归一化与旧安全字段清理。 | App、Studio、store、fragment helpers；automationIR/platform tests。 | 打开、保存、运行与用户主动诊断。 |
 | `src/renderer/utils/constants.ts` | 节点尺寸、画布 zoom/grid、默认 flow/wait/similarity/LLM 元数据、storage key 与旧类别常量；`getNodeDimensions()` 区分 start/end/subflow。 | Canvas、store、definitions/tests。 | 编辑器布局和默认值。 |
 | `src/renderer/utils/displayLabels.ts` | 把搜索 token、来源、reason 机器字符串映射成人类中文；未知值原样保留。 | NodeLibrary、ScriptBrowser、UnifiedSearchDialog。 | 搜索结果渲染。 |
 | `src/renderer/utils/editorDrafts.ts` | 全局 `Set` 注册/注销 draft committer；`commitEditorDrafts()` 依次提交，首个错误立即返回。 | App、store save/replace、ARP JSON editor、FragmentComposer。 | 保存、打开、新建、关闭或 fragment 前。 |
@@ -415,8 +414,8 @@ CLAUDE.md 明令不得接回。
 | --- | --- | --- |
 | `src/renderer/test/appErrorBoundary.test.tsx` | 人为触发子树 render 异常，断言根界面不会空白，而出现可恢复错误 UI。 | `components/common/AppErrorBoundary.tsx`、`App.tsx` 的最外层兜底。 |
 | `src/renderer/test/appFileOpen.test.tsx` | 覆盖 dirty/draft 的 `beforeunload`；取消或无效文件选择不应弹确认；只有已得到有效替换内容时才紧邻替换动作确认。 | `App.tsx` 文件打开/新建/替换时序、`editorDrafts.ts`。 |
-| `src/renderer/test/apprenticeUx.test.tsx` | 覆盖宏录制 start/stop 结果不确定时的 reconcile、默认窗口宽度布局、runtime job 轮询丢失/错误上限，以及校验期间 graph snapshot 是否变化。 | `PlatformWorkbench.tsx` 的 Studio/学徒式交互与轮询容错。 |
-| `src/renderer/test/automationIR.test.ts` | WPS 与 Flow 的 IR 包装/往返、metadata 保真、transient state 处理、坏输入归一化、runtime graph 必需性、fingerprint、悬空边、本地验证、空间动作必须先有 focus target、非法参数拒绝。 | `utils/automationIR.ts`、`platform/flowToArpGraph.ts`、`utils/wpsToFlowScript.ts`。 |
+| `src/renderer/test/apprenticeUx.test.tsx` | 覆盖宏录制 start/stop 结果不确定时的 reconcile、默认窗口宽度布局、runtime job 轮询丢失/错误上限，以及运行时不再发起重复验证请求。 | `PlatformWorkbench.tsx` 的 Studio/学徒式交互与轮询容错。 |
+| `src/renderer/test/automationIR.test.ts` | WPS 与 Flow 的 IR 包装/往返、metadata 保真、transient state 处理、旧安全字段清理、runtime graph 必需性、fingerprint、悬空边、无窗口坐标动作和非法参数。 | `utils/automationIR.ts`、`platform/flowToArpGraph.ts`、`utils/wpsToFlowScript.ts`。 |
 | `src/renderer/test/canvasControlsNodeBoundary.test.tsx` | 右键菜单只暴露本地 compiler 支持节点，并通过 store 的受保护 add 路径创建。 | `CanvasControls.tsx`、`flowToArpGraph.ts`、`store/index.ts`。 |
 | `src/renderer/test/constants.test.ts` | 核对节点尺寸和默认名称等基础常量。 | `utils/constants.ts`。 |
 | `src/renderer/test/executionContext.test.ts` | Electron native 路径必须先 yield 前台再 capture；web 路径记录上下文；未成功 yield 时 fail closed。 | `platform/executionContext.ts`、preload 的 foreground/capture 合同。 |

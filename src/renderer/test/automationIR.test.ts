@@ -34,11 +34,8 @@ describe('Automation IR adapters', () => {
     expect(ir.source.kind).toBe('wps');
     expect(ir.source.source_run).toBe('run-1');
     expect(ir.variables).toEqual({ msg: 'hello' });
-    expect(ir.safety.mutates_desktop).toBe(true);
-    expect(ir.fallback).toEqual({
-      on_preflight_fail: 'stop',
-      on_step_fail: 'stop',
-    });
+    expect(ir).not.toHaveProperty('safety');
+    expect(ir).not.toHaveProperty('fallback');
     expect(ir.steps[0]).toEqual({ tool: 'click', coords: [1, 2] });
     expect(ir.runtime).toEqual({ kind: 'wps_replay' });
     expect(validateAutomationRuntime(ir)).toBeUndefined();
@@ -108,7 +105,8 @@ describe('Automation IR adapters', () => {
       node_id: 'click',
       params: { x: 1, y: 2, method: 'single', delay_after: 0 },
     });
-    expect(ir.safety.executor).toBe('flowscript');
+    expect(ir).not.toHaveProperty('safety');
+    expect(ir).not.toHaveProperty('fallback');
     expect(ir.runtime?.kind).toBe('arp_graph');
     expect(automationRuntimeGraph(ir).metadata.source_ir).toBe('air-flow');
     const stale = structuredClone(ir);
@@ -126,7 +124,7 @@ describe('Automation IR adapters', () => {
     expect(automationDocumentToFlowScript(flow)).toEqual(flow);
   });
 
-  it('preserves WPS replay contracts through editable FlowScript and canonical save', () => {
+  it('drops old replay gates while keeping editable action metadata', () => {
     const source = automationIrFromWps({
       format: 'wps/2',
       name: 'replay contract',
@@ -140,23 +138,25 @@ describe('Automation IR adapters', () => {
       },
       steps: [{ tool: 'hotkey', keys: ['ctrl', 's'] }],
     }, 'air-source');
-    source.safety = { ...source.safety, audit_tag: 'keep-safety' };
-    source.fallback = { ...source.fallback, recovery: 'keep-fallback' };
+    (source as any).safety = { requires_preflight: true };
+    (source as any).fallback = { on_preflight_fail: 'stop' };
 
     expect(automationIrToWps(source).evidence).toEqual(source.evidence);
 
     const flow = automationIrToFlowScript(source);
     const replay = flow.nodes.find((node) => node.type === 'replay_step')!;
     expect((replay.params as any).session).toBe('lesson-42');
-    expect((replay.params as any).postflight_evidence).toEqual(source.evidence);
+    expect(replay.params).not.toHaveProperty('allow_shell');
+    expect(replay.params).not.toHaveProperty('preflight_contract');
+    expect(replay.params).not.toHaveProperty('postflight_evidence');
 
     const saved = automationIrFromFlowScript(flow, 'air-saved');
     expect(saved.conditions).toEqual(source.conditions);
     expect(saved.evidence).toEqual(source.evidence);
-    expect(saved.safety).toEqual(source.safety);
-    expect(saved.fallback).toEqual(source.fallback);
+    expect(saved).not.toHaveProperty('safety');
+    expect(saved).not.toHaveProperty('fallback');
     expect((saved.runtime as any).graph.nodes.find((node: any) => node.kind === 'replay_step').config)
-      .toMatchObject({ postflight_evidence: source.evidence, session: 'lesson-42' });
+      .toEqual(expect.objectContaining({ session: 'lesson-42' }));
   });
 
   it('roundtrips execution semantics while omitting transient canvas state', () => {
@@ -348,7 +348,7 @@ describe('Automation IR adapters', () => {
     });
   });
 
-  it('requires every reachable path to focus a target before spatial action batches', () => {
+  it('allows human-authored screen coordinates without a focus-window gate', () => {
     const validate = (nodes: FlowScript['nodes'], edges: FlowScript['edges']) => validateAutomationLocally(
       automationIrFromFlowScript({
         meta: { id: 'target-path', name: 'target path', created_at: '', updated_at: '', version: '1.0.0' },
@@ -435,13 +435,8 @@ describe('Automation IR adapters', () => {
       ],
     );
 
-    expect(sameBatch.valid).toBe(true);
-    expect(previousBatch.valid).toBe(true);
-    for (const result of [direct, lateFocus, branched]) {
-      expect(result).toMatchObject({
-        valid: false,
-        errors: expect.arrayContaining([expect.stringContaining('每条可达路径')]),
-      });
+    for (const result of [direct, sameBatch, previousBatch, lateFocus, branched]) {
+      expect(result.valid).toBe(true);
     }
   });
 

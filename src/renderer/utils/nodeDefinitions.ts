@@ -79,7 +79,6 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
       step: { tool: 'ext.delay', seconds: 0 },
       session: 'default',
       pace_ms: 0,
-      allow_shell: false,
     },
     ports: {
       inputs: [{ id: 'input', type: 'flow' }],

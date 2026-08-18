@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // File read/write (via main process, bypasses nodeIntegration restriction)
   readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
+  readImage: (filePath: string) => ipcRenderer.invoke('file:read-image', filePath),
   writeFile: (filePath: string, content: string) => ipcRenderer.invoke('file:write', filePath, content),
 
   // Engine control
@@ -69,10 +70,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveBase64Image: (filename: string, dataURL: string) => ipcRenderer.invoke('screenshot:saveBase64Image', filename, dataURL),
   ocrRecognizeRegion: (region: { x: number; y: number; w: number; h: number }) =>
     ipcRenderer.invoke('ocr:recognizeRegion', region),
-
-  // AI generation (via main process to avoid CORS)
-  aiGenerate: (params: { apiKey: string; messages: { role: string; content: string }[] }) =>
-    ipcRenderer.invoke('ai:generate', params),
 
   // DSL conversion
   dslToFlow: (dslText: string) => ipcRenderer.invoke('dsl:toFlow', dslText),

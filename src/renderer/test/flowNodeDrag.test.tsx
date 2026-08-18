@@ -6,6 +6,10 @@ import { useStore } from '../store';
 describe('FlowNode drag history', () => {
   it('keeps selected nodes relative and commits the drag as one undo step', () => {
     useStore.getState().newScript();
+    useStore.getState().addNode('action_batch', 360, 180);
+    useStore.getState().addNode('human_gate', 360, 330);
+    useStore.getState().loadScript(JSON.parse(JSON.stringify(useStore.getState().script)));
+    useStore.getState().setUI({ canvas_transform: { x: 0, y: 0, scale: 1 } });
     const first = useStore.getState().script.nodes.find((node) => node.type === 'action_batch')!;
     const second = useStore.getState().script.nodes.find((node) => node.type === 'human_gate')!;
     const original = {

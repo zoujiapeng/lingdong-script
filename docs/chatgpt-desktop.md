@@ -120,7 +120,6 @@ begin_gui_task(完整原始任务)
 - `execute_visual_transaction` 的 post-frame 只证明观察到了动作后的当前状态；最终完成仍需按原始目标做语义核验。拖动发生了像素变化、按下过鼠标或出现局部动画，都不能单独替代目标状态。
 - `capture_visual_fallback` 是观察，不授权 mutation；只有 `execute_gui_subgoal`、`execute_action_batch` 与 `execute_visual_transaction` 等显式 Controller 工具能改变桌面。
 - 工具 annotations 把桌面 mutation 标为非幂等/可能破坏性操作。
-- `integrations.chatgpt_desktop.allow_desktop_mutation=false` 可把桥接面切成只读。
 - Agent、ARP、Replay 和 MCP Controller 共享 runtime/desktop 资源保护；真实鼠标键盘保持全局单写。
 - `run_arp_graph` 的人工门只能用 `decide_human_gate` 决定当前明确暂停的节点，不能批准另一条旧 run。
 

@@ -26,6 +26,7 @@ from pathlib import Path
 from ..utils.log import logger
 
 _CACHE_TTL_S = 300.0
+_LAUNCH_WINDOW_TIMEOUT_S = 10.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, list[dict]] | None = None
 
@@ -492,7 +493,11 @@ def launch_target(entry: dict) -> dict:
         return {"ok": False, "error": str(exc), "target": target}
 
 
-def _activate_existing_instance(exe_path: str) -> dict | None:
+def _activate_existing_instance(
+    exe_path: str,
+    *,
+    visible_only: bool = False,
+) -> dict | None:
     """Find windows owned by ``exe_path`` without guessing among peers.
 
     A non-``None`` result means an instance exists, even if Windows did not
@@ -521,7 +526,10 @@ def _activate_existing_instance(exe_path: str) -> dict | None:
         )
     except Exception:
         return None
-    return _existing_window_outcome(found_visible, found_hidden)
+    return _existing_window_outcome(
+        found_visible,
+        [] if visible_only else found_hidden,
+    )
 
 
 def _collect_existing_window(
@@ -763,7 +771,11 @@ def _window_process_name(hwnd: int) -> str:
         return ""
 
 
-def _activate_existing_by_process_name(process_name: str) -> dict | None:
+def _activate_existing_by_process_name(
+    process_name: str,
+    *,
+    visible_only: bool = False,
+) -> dict | None:
     """Activate a window owned by a running process file name.
 
     Process-name activation is stronger than title matching: it finds the
@@ -796,7 +808,10 @@ def _activate_existing_by_process_name(process_name: str) -> dict | None:
         )
     except Exception:
         return None
-    return _existing_window_outcome(found_visible, found_hidden)
+    return _existing_window_outcome(
+        found_visible,
+        [] if visible_only else found_hidden,
+    )
 
 
 def _collect_existing_by_process(
@@ -864,7 +879,11 @@ def _process_exe(pid: int) -> str:
         return ""
 
 
-def _activate_resolved_entry(entry: dict) -> dict | None:
+def _activate_resolved_entry(
+    entry: dict,
+    *,
+    visible_only: bool = False,
+) -> dict | None:
     """Find an existing instance by executable identity, never window title."""
     kind = str(entry.get("kind") or "")
     target = str(entry.get("target") or "")
@@ -875,7 +894,10 @@ def _activate_resolved_entry(entry: dict) -> dict | None:
         candidates.append(_shortcut_target(target))
     for candidate in candidates:
         if candidate:
-            existing = _activate_existing_instance(candidate)
+            existing = _activate_existing_instance(
+                candidate,
+                visible_only=visible_only,
+            )
             if existing is not None:
                 return existing
     # Store/UWP apps resolve to an AppID whose on-disk exe lives behind a
@@ -884,10 +906,31 @@ def _activate_resolved_entry(entry: dict) -> dict | None:
     # activated even though its title is a song name, not the display name.
     process_name = str(entry.get("process_name") or "")
     if process_name:
-        existing = _activate_existing_by_process_name(process_name)
+        existing = _activate_existing_by_process_name(
+            process_name,
+            visible_only=visible_only,
+        )
         if existing is not None:
             return existing
     return None
+
+
+def _wait_for_resolved_window(entry: dict) -> dict | None:
+    """Wait for a newly launched app's real window and bring it forward."""
+
+    deadline = time.monotonic() + _LAUNCH_WINDOW_TIMEOUT_S
+    latest = None
+    while time.monotonic() < deadline:
+        # A cold launch often creates hidden IME/compositor helpers before its
+        # actual application window.  Activating one makes the launch look
+        # successful while leaving the user on a blank surface.  Existing-app
+        # activation may still restore a tray-hidden window; a new launch waits
+        # for a genuinely visible top-level window.
+        latest = _activate_resolved_entry(entry, visible_only=True)
+        if latest is not None and latest.get("activated_hwnd"):
+            return latest
+        time.sleep(0.1)
+    return latest
 
 
 def _existing_launch_result(
@@ -1009,7 +1052,25 @@ def launch_application(
             )
         if arguments_list:
             entry["arguments"] = arguments_list
-        return launch_target(entry)
+        launched = launch_target(entry)
+        if launched.get("ok") is not True:
+            return launched
+        window = _wait_for_resolved_window(entry)
+        if window is None:
+            return launched
+        result = dict(launched)
+        result.update({
+            "candidate_count": int(window.get("candidate_count") or 0),
+            "candidates": list(window.get("candidates") or [])[:3],
+            "note": (
+                "launched application and activated its window"
+                if window.get("activated_hwnd")
+                else "launched application; window found but not foreground"
+            ),
+        })
+        if window.get("activated_hwnd"):
+            result["activated_hwnd"] = int(window["activated_hwnd"])
+        return result
     try:
         os.startfile(name)  # noqa: S606
         return {

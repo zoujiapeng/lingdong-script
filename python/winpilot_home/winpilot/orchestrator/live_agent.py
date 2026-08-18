@@ -561,9 +561,6 @@ def build_exact_live_vnext_graph(goal: str) -> ArpGraph:
         policy=ArpPolicy(
             max_node_visits=1,
             fail_fast=True,
-            require_evidence_on_done=False,
-            allow_shell=False,
-            allow_desktop_mutation=True,
         ),
         metadata={},
     )
@@ -640,9 +637,6 @@ def _validate_exact_graph(graph: ArpGraph) -> str:
     if (
         policy.max_node_visits != 1
         or policy.fail_fast is not True
-        or policy.require_evidence_on_done is not False
-        or policy.allow_shell is not False
-        or policy.allow_desktop_mutation is not True
     ):
         raise ValueError("vNext live Agent graph policy is not exact")
     expected_graph_id = f"vnext-live-agent-{_fnv1a_utf16(goal)}"
@@ -888,18 +882,27 @@ def _window_text_reader_factory() -> Any:
     return read
 
 
-def _capture_runner_factory() -> Any:
-    """vNext capture runner: pure-logic wrapper over the action backend."""
+def _copy_current_view_runner_factory(run_id: str) -> Any:
+    """Copy the current model frame and retain it briefly for flow export."""
 
-    from ..action.clipboard_ops import capture_screen_backend
-    from ..vnext.desktop_ops import capture_screen
+    from ..action.clipboard_ops import copy_seen_frame_backend
+    from ..utils.replay_frames import save_pending_view_frame
+    from ..vnext.desktop_ops import copy_current_view
 
-    def runner(*, path: str, window: bool) -> dict[str, Any]:
-        return capture_screen(
-            capture_screen_backend,
-            path=path,
-            window=window,
+    def runner(*, image_b64: str, decision_id: str) -> dict[str, Any]:
+        result = copy_current_view(
+            copy_seen_frame_backend,
+            image_b64=image_b64,
         )
+        if result.get("ok") is True:
+            replay_frame = save_pending_view_frame(
+                run_id=run_id,
+                decision_id=decision_id,
+                image_b64=image_b64,
+            )
+            if replay_frame:
+                result["_replay_frame"] = replay_frame
+        return result
 
     return runner
 
@@ -911,18 +914,6 @@ def _windows_reader_factory() -> Any:
     from ..vnext.desktop_ops import list_windows
 
     return lambda: list_windows(list_windows_backend)
-
-
-def _paste_runner_factory() -> Any:
-    """vNext image-paste runner: pure-logic wrapper over the backend."""
-
-    from ..action.clipboard_ops import paste_image_backend
-    from ..vnext.desktop_ops import paste_image
-
-    def runner(*, path: str) -> dict[str, Any]:
-        return paste_image(paste_image_backend, path=path)
-
-    return runner
 
 
 def _read_win32_foreground_root() -> int | None:
@@ -2547,6 +2538,12 @@ def _build_actor_resources(
                 return
             kind = str(activity.get("kind") or "activity")
             ok = activity.get("ok")
+            activity_arguments = activity.get("arguments")
+            replay_arguments = (
+                dict(activity_arguments)
+                if isinstance(activity_arguments, Mapping)
+                else None
+            )
             BUS.publish(
                 "live_agent_activity",
                 runtime_version=_RUNTIME_VERSION,
@@ -2564,6 +2561,11 @@ def _build_actor_resources(
                 content=str(activity.get("message") or "")[:4096],
                 command=str(activity.get("command") or "")[:16_384],
                 task_state=str(activity.get("task_state") or "")[:8192],
+                **(
+                    {"arguments": replay_arguments}
+                    if replay_arguments is not None
+                    else {}
+                ),
                 status=(
                     "failed"
                     if ok is False
@@ -2609,9 +2611,10 @@ def _build_actor_resources(
             if dependencies.shell_factory is not None:
                 role_kwargs["shell_runner"] = dependencies.shell_factory()
             role_kwargs["window_text_reader"] = _window_text_reader_factory()
-            role_kwargs["capture_runner"] = _capture_runner_factory()
+            role_kwargs["copy_current_view_runner"] = (
+                _copy_current_view_runner_factory(run_id)
+            )
             role_kwargs["windows_reader"] = _windows_reader_factory()
-            role_kwargs["paste_runner"] = _paste_runner_factory()
         actor = _BudgetedActor(role_factory(**role_kwargs), counter)
         return PreparedLiveActor(
             raw_client=raw_client,

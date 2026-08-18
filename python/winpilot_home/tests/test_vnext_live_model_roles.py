@@ -475,6 +475,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "repeat" in descriptions["press_key"]
     assert "volumedown" in descriptions["press_key"]
     assert "relative to the current system level" in descriptions["press_key"]
+    assert "PrintScreen" not in descriptions["press_key"]
     assert "without further mutation" in descriptions["claim_obligation_done"]
     assert "external blocker" in descriptions["blocked"]
     assert "response_format" not in actor_request
@@ -1337,7 +1338,7 @@ def test_failed_physical_action_gets_one_actionable_model_hint() -> None:
     ]["next_step"]
 
 
-def test_consecutive_visual_calls_keep_only_the_previous_native_action() -> None:
+def test_consecutive_visual_calls_keep_the_run_tool_history_text_only() -> None:
     _, clients = _build_clients([
         _tool_response(call_id="first"),
         _tool_response(call_id="second"),
@@ -1381,14 +1382,7 @@ def test_consecutive_visual_calls_keep_only_the_previous_native_action() -> None
     assert [message["role"] for message in second_messages] == [
         "system", "user", "assistant", "tool", "user",
     ]
-    assert second_messages[1]["content"] == [
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{_JPEG_B64}"
-            },
-        }
-    ]
+    assert isinstance(second_messages[1]["content"], str)
     assert second_messages[2]["tool_calls"][0]["id"] == "first-0"
     assert json.loads(
         second_messages[3]["content"]
@@ -1398,6 +1392,7 @@ def test_consecutive_visual_calls_keep_only_the_previous_native_action() -> None
     assert second_messages[4]["content"][0]["image_url"]["url"] == (
         f"data:image/jpeg;base64,{_JPEG_B64}"
     )
+    assert json.dumps(second_messages).count(_JPEG_B64) == 1
 
     actor.propose(
         completed,
@@ -1408,7 +1403,8 @@ def test_consecutive_visual_calls_keep_only_the_previous_native_action() -> None
     third_messages = clients[0].requests[2]["messages"]
     encoded = json.dumps(third_messages)
     assert "second-0" in encoded
-    assert "first-0" not in encoded
+    assert "first-0" in encoded
+    assert encoded.count(_JPEG_B64) == 1
 
 
 def test_drag_retry_keeps_one_native_action_and_the_current_jpeg() -> None:
@@ -1467,14 +1463,7 @@ def test_drag_retry_keeps_one_native_action_and_the_current_jpeg() -> None:
     assert [message["role"] for message in messages] == [
         "system", "user", "assistant", "tool", "user",
     ]
-    assert messages[1]["content"] == [
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{_JPEG_B64}"
-            },
-        }
-    ]
+    assert isinstance(messages[1]["content"], str)
     assert messages[2]["tool_calls"][0]["function"] == {
         "name": "drag",
         "arguments": json.dumps(
@@ -2889,6 +2878,7 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
         "tool": "run_shell",
         "message": "python -m pytest -q",
         "command": "python -m pytest -q",
+        "arguments": {"command": "python -m pytest -q"},
     }
     assert activities[3]["ok"] is True
     assert activities[3]["message"] == "notepad running"
@@ -3278,19 +3268,20 @@ def test_next_visual_turn_keeps_gui_action_but_drops_local_tool_transcript() -> 
     messages = clients[0].requests[-1]["messages"]
     encoded = json.dumps(messages, ensure_ascii=False)
     assert [message["role"] for message in messages] == [
-        "system", "user", "assistant", "tool", "user",
+        "system", "user", "assistant", "tool", "assistant", "tool", "user",
     ]
-    assert "unique-command" not in encoded
-    assert "UNIQUE-DIAGNOSTIC-BODY" not in encoded
-    assert "consumed-shell-0" not in encoded
+    assert "unique-command" in encoded
+    assert "UNIQUE-DIAGNOSTIC-BODY" in encoded
+    assert "consumed-shell-0" in encoded
     assert "old local narration" not in encoded
     assert "private old reasoning" not in encoded
     assert "final-gui-0" in encoded
     assert json.loads(
-        messages[2]["tool_calls"][0]["function"]["arguments"]
+        messages[4]["tool_calls"][0]["function"]["arguments"]
     ) == {"text": "hello"}
     assert _JPEG_B64 in encoded
-    current_context = json.loads(messages[4]["content"][1]["text"])
+    assert encoded.count(_JPEG_B64) == 1
+    current_context = json.loads(messages[6]["content"][1]["text"])
     assert current_context["mission"]["original_goal"] == (
         turn.mission.original_goal
     )
@@ -3680,20 +3671,20 @@ def test_propose_injects_rejection_feedback_into_native_context() -> None:
     )
 
 
-class _RecordingCaptureRunner:
+class _RecordingCurrentViewRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, *, path: str, window: bool) -> dict[str, Any]:
-        self.calls.append({"path": path, "window": window})
+    def __call__(self, *, image_b64: str, decision_id: str) -> dict[str, Any]:
+        self.calls.append({"image_b64": image_b64, "decision_id": decision_id})
         return {
-            "format": "capture-screen/1",
+            "format": "copy-image/1",
             "ok": True,
-            "path": path,
-            "width": 1920,
-            "height": 1080,
+            "source": "current_model_view",
+            "width": 640,
+            "height": 480,
             "size_bytes": 1234,
-            "scope": "window" if window else "screen",
+            "_replay_frame": "run/view_frame_decision.jpg",
         }
 
 
@@ -3732,32 +3723,17 @@ class _RecordingWindowsReader:
         }
 
 
-class _RecordingPasteRunner:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def __call__(self, *, path: str) -> dict[str, Any]:
-        self.calls.append(path)
-        return {
-            "format": "paste-image/1",
-            "ok": True,
-            "path": path,
-            "width": 1920,
-            "height": 1080,
-            "via": "clipboard_dib",
-        }
-
-
-def test_visual_turn_can_capture_screen_before_gui_action() -> None:
+def test_visual_turn_can_copy_current_view_before_gui_action() -> None:
     _, clients = _build_clients(
         [
             _tool_response(
-                name="capture_screen",
+                name="copy_screen_to_clipboard",
                 arguments={
-                    "path": r"C:\tmp\shot.png",
-                    "window": True,
+                    "task_state_update": {
+                        "scratchpad": "music selected; image is on clipboard",
+                    },
                 },
-                call_id="capture-call",
+                call_id="copy-call",
             ),
             _tool_response(
                 arguments={
@@ -3768,12 +3744,14 @@ def test_visual_turn_can_capture_screen_before_gui_action() -> None:
             ),
         ]
     )
-    runner = _RecordingCaptureRunner()
+    runner = _RecordingCurrentViewRunner()
+    activities: list[dict[str, Any]] = []
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
-        capture_runner=runner,
+        copy_current_view_runner=runner,
+        on_activity=activities.append,
     )
 
     decision = actor.propose(
@@ -3784,36 +3762,49 @@ def test_visual_turn_can_capture_screen_before_gui_action() -> None:
     )
 
     assert decision.proposal["action"] == "type_text"
-    assert runner.calls == [{"path": r"C:\tmp\shot.png", "window": True}]
+    assert decision.task_state_update.scratchpad == (
+        "music selected; image is on clipboard"
+    )
+    assert runner.calls[0]["image_b64"] == _JPEG_B64
+    assert runner.calls[0]["decision_id"].startswith("visual-actor-")
     assert len(clients[0].requests) == 2
-    capture_result_messages = [
+    copy_result_messages = [
         m
         for m in clients[0].requests[1]["messages"]
         if m.get("role") == "tool"
     ]
-    assert len(capture_result_messages) == 1
-    tool_result = json.loads(capture_result_messages[0]["content"])
+    assert len(copy_result_messages) == 1
+    tool_result = json.loads(copy_result_messages[0]["content"])
     assert tool_result["ok"] is True
-    assert tool_result["path"] == r"C:\tmp\shot.png"
+    assert tool_result["source"] == "current_model_view"
+    assert "_replay_frame" not in tool_result
+    result_activity = next(
+        item for item in activities
+        if item.get("kind") == "tool_result"
+        and item.get("tool") == "copy_current_view"
+    )
+    assert result_activity["arguments"] == {
+        "replay_frame": "run/view_frame_decision.jpg",
+    }
 
 
-def test_capture_result_is_not_replayed_after_gui_action() -> None:
-    capture_path = r"C:\Users\zou\Desktop\playing.png"
+def test_copy_current_view_result_remains_in_this_run_without_old_image() -> None:
+    replay_path = "run/view_frame_decision.jpg"
     _, clients = _build_clients([
         _tool_response(
-            name="capture_screen",
-            arguments={"path": capture_path, "window": False},
-            call_id="capture-call",
+            name="copy_screen_to_clipboard",
+            arguments={},
+            call_id="copy-call",
         ),
         _tool_response(call_id="first-gui"),
         _tool_response(call_id="second-gui"),
     ])
-    runner = _RecordingCaptureRunner()
+    runner = _RecordingCurrentViewRunner()
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
-        capture_runner=runner,
+        copy_current_view_runner=runner,
     )
     turn = _actor_turn()
 
@@ -3839,12 +3830,16 @@ def test_capture_result_is_not_replayed_after_gui_action() -> None:
 
     next_messages = clients[0].requests[2]["messages"]
     assert [message["role"] for message in next_messages] == [
-        "system", "user", "assistant", "tool", "user",
+        "system", "user", "assistant", "tool", "assistant", "tool", "user",
     ]
-    assert capture_path not in json.dumps(next_messages)
+    encoded = json.dumps(next_messages)
+    assert "copy_screen_to_clipboard" in encoded
+    assert "current_model_view" in encoded
+    assert replay_path not in json.dumps(next_messages)
+    assert encoded.count(_JPEG_B64) == 1
 
 
-def test_visual_utility_history_is_not_replayed_across_frames() -> None:
+def test_visual_utility_history_remains_available_across_frames() -> None:
     utility_calls = [
         _tool_response(
             name="run_shell",
@@ -3889,8 +3884,9 @@ def test_visual_utility_history_is_not_replayed_across_frames() -> None:
 
     encoded = json.dumps(clients[0].requests[6]["messages"])
     for index in range(5):
-        assert f"inspect-{index}" not in encoded
-        assert f"shell-{index}-0" not in encoded
+        assert f"inspect-{index}" in encoded
+        assert f"shell-{index}-0" in encoded
+    assert encoded.count(_JPEG_B64) == 1
 
 
 def test_visual_turn_can_list_windows_before_gui_action() -> None:
@@ -3981,51 +3977,7 @@ def test_background_inventory_failure_never_blocks_visual_action() -> None:
     assert "background_applications" not in context
 
 
-def test_visual_turn_can_paste_image_before_gui_action() -> None:
-    _, clients = _build_clients(
-        [
-            _tool_response(
-                name="paste_image_file",
-                arguments={"path": r"C:\tmp\shot.png"},
-                call_id="paste-call",
-            ),
-            _tool_response(
-                arguments={
-                    "text": "hello",
-                    "local_intent": "enter the requested text once",
-                },
-                call_id="gui-call",
-            ),
-        ]
-    )
-    runner = _RecordingPasteRunner()
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        paste_runner=runner,
-    )
-
-    decision = actor.propose(
-        _actor_turn(),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    assert decision.proposal["action"] == "type_text"
-    assert runner.calls == [r"C:\tmp\shot.png"]
-    assert len(clients[0].requests) == 2
-    result_messages = [
-        m
-        for m in clients[0].requests[1]["messages"]
-        if m.get("role") == "tool"
-    ]
-    tool_result = json.loads(result_messages[0]["content"])
-    assert tool_result["ok"] is True
-
-
-def test_capture_window_tools_are_absent_without_runners() -> None:
+def test_optional_desktop_utility_tools_are_absent_without_runners() -> None:
     _, clients = _build_clients(_tool_response())
     actor = LiveVisualActor(
         client=clients[0],
@@ -4042,49 +3994,37 @@ def test_capture_window_tools_are_absent_without_runners() -> None:
         tool["function"]["name"]
         for tool in clients[0].requests[0]["tools"]
     ]
+    assert "copy_screen_to_clipboard" not in names
     assert "capture_screen" not in names
     assert "list_windows" not in names
     assert "paste_image_file" not in names
 
 
-def test_capture_screen_accepts_omitted_optional_window_field() -> None:
-    """The tool schema declares ``window`` optional with default false; the
-    runtime validator must not reject a call that omits it (a regression that
-    burned 41 turns in a real QQ screenshot run)."""
-    _, clients = _build_clients(
-        [
-            _tool_response(
-                name="capture_screen",
-                arguments={"path": r"C:\tmp\shot.png"},
-                call_id="capture-call",
-            ),
-            _tool_response(
-                arguments={
-                    "text": "hello",
-                    "local_intent": "enter the requested text once",
-                },
-                call_id="gui-call",
-            ),
-        ]
-    )
-    runner = _RecordingCaptureRunner()
+def test_online_image_tool_has_no_path_or_recapture_surface() -> None:
+    _, clients = _build_clients(_tool_response())
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
-        capture_runner=runner,
+        copy_current_view_runner=_RecordingCurrentViewRunner(),
     )
-
-    decision = actor.propose(
+    actor.propose(
         _actor_turn(),
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     )
 
-    assert decision.proposal["action"] == "type_text"
-    assert runner.calls == [{"path": r"C:\tmp\shot.png", "window": False}]
-    assert len(clients[0].requests) == 2
+    tools = {
+        tool["function"]["name"]: tool["function"]
+        for tool in clients[0].requests[0]["tools"]
+    }
+    assert "copy_screen_to_clipboard" in tools
+    assert "capture_screen" not in tools
+    assert "paste_image_file" not in tools
+    assert set(tools["copy_screen_to_clipboard"]["parameters"]["properties"]) == {
+        "task_state_update",
+    }
 
 
 def test_read_window_text_ignores_extra_arguments() -> None:

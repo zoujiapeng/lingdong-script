@@ -14,22 +14,6 @@ from typing import Any
 
 AUTOMATION_IR_FORMAT = "automation-ir/1"
 
-_DESKTOP_MUTATION_TOOLS = frozenset({
-    "click",
-    "type_text",
-    "hotkey",
-    "launch",
-    "focus_window",
-    "scroll",
-    "drag",
-    "draw_strokes",
-    "run_detached",
-    "tray_click",
-    "ext.clipboard_set",
-})
-_SHELL_TOOLS = frozenset({"run_shell", "run_detached", "ext.run_shell"})
-
-
 def _clone(value: Any) -> Any:
     return copy.deepcopy(value)
 
@@ -56,31 +40,6 @@ def _target_window_from_wps(script: dict[str, Any]) -> Any:
             if conditions.get(key) not in (None, "", {}):
                 return _clone(conditions.get(key))
     return None
-
-
-def _walk_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for step in steps:
-        if isinstance(step, dict):
-            out.append(step)
-            for key in ("then", "else", "body"):
-                nested = step.get(key)
-                if isinstance(nested, list):
-                    out.extend(_walk_steps(nested))
-    return out
-
-
-def _default_safety(steps: list[dict[str, Any]]) -> dict[str, Any]:
-    flat = _walk_steps(steps)
-    has_desktop_mutation = any(step.get("tool") in _DESKTOP_MUTATION_TOOLS for step in flat)
-    has_shell = any(step.get("tool") in _SHELL_TOOLS for step in flat)
-    return {
-        "requires_preflight": has_desktop_mutation or has_shell,
-        "mutates_desktop": has_desktop_mutation,
-        "uses_shell": has_shell,
-        "desktop_action_queue_required": has_desktop_mutation,
-        "shell_requires_explicit_runtime": has_shell,
-    }
 
 
 def automation_ir_from_wps(
@@ -135,11 +94,6 @@ def automation_ir_from_wps(
         "evidence": evidence,
         "steps": steps,
         "variables": _clone(script.get("vars") or script.get("variables") or {}),
-        "safety": _default_safety(steps),
-        "fallback": {
-            "on_preflight_fail": "stop",
-            "on_step_fail": "stop",
-        },
         "runtime": {"kind": "wps_replay"},
     }
 
@@ -163,8 +117,6 @@ def wps_from_automation_ir(ir: dict[str, Any]) -> dict[str, Any]:
         "created": _created_at(ir.get("created")),
         "vars": _clone(ir.get("variables") or {}),
         "steps": _clone(ir.get("steps") or []),
-        "safety": _clone(ir.get("safety") or {}),
-        "fallback": _clone(ir.get("fallback") or {}),
     }
     target_window = conditions.get("target_window")
     if target_window not in (None, "", {}):
@@ -195,7 +147,7 @@ def validate_automation_ir(data: Any) -> str | None:
         return "Automation IR requires id"
     if not _nonempty_str(data.get("name")):
         return "Automation IR requires name"
-    for key in ("source", "conditions", "evidence", "safety", "fallback"):
+    for key in ("source", "conditions", "evidence"):
         if not isinstance(data.get(key), dict):
             return f"Automation IR {key} must be an object"
     if not isinstance(data.get("variables"), dict):
@@ -355,11 +307,6 @@ def validate_automation_runtime(ir: dict[str, Any]) -> str | None:
     kind = automation_runtime_kind(ir)
     if kind == "wps_replay":
         try:
-            expected_safety = _default_safety(ir.get("steps") or [])
-            safety = ir.get("safety") or {}
-            for field, required in expected_safety.items():
-                if required is True and safety.get(field) is not True:
-                    return f"Automation IR safety.{field} must be true for its WPS steps"
             script = wps_from_automation_ir(ir)
             from .recorder.trace import validate_script
 

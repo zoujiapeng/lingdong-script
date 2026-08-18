@@ -239,10 +239,9 @@ binder 与 Atomic 不再重复完整 schema。
 `submitted_size` 重验坐标，Atomic只对有限数做一次线性映射，最终 OS 表示范围由
 RawDevice 的 SendInput 边界处理。
 
-视觉轮还可由同一个 Actor 调用 `capture_screen`、`list_windows` 与
-`paste_image_file` 等通用 owned tool。`capture_screen.path` 可以是相对路径；vNext原样
-交给物理 backend，由 backend按 Runtime cwd 和图片格式处理，不在上层重复做绝对路径、
-扩展名或文件存在性验证。
+视觉轮还可由同一个 Actor 调用 `copy_current_view` 与 `list_windows` 等通用 owned tool。
+`copy_current_view` 没有路径参数；Runtime 只把本轮已交给模型的 JPEG 写入 Windows 图片剪贴板。
+它不重新截图也不自动粘贴；后续 `Ctrl+V` 是独立的普通物理动作。
 
 ## 8. Actor Decision Envelope
 
@@ -352,7 +351,10 @@ ArpGraph:
   metadata: JSON object
 ```
 
-通用 validator 检查入口、可达性、重复 ID、边端点、node config、空间动作 target 前置、retry/timeout、证据门等。产品 goal 还要通过更严格的 exact graph 校验：总图恰为 `start → full-goal AGENT_GOAL → end` 三节点、两边，只有一个语义节点。
+通用 validator 只守住脚本能否被读取和调度：入口、可达性、重复 ID、边端点、node config
+与 retry/timeout 形状。离线坐标动作不强制 target，结束不强制证据；人类若显式添加
+`evidence_gate`，只校验该节点自身参数。产品在线 goal 仍通过独立的 exact graph 校验：
+总图恰为 `start → full-goal AGENT_GOAL → end` 三节点、两边，只有一个语义节点。
 
 ### 12.3 Runtime version
 
@@ -503,7 +505,6 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 | 文件 | `dialog:openFile`, `dialog:saveFile`, `file:read`, `file:write` |
 | 旧 Flow engine | `engine:start`, `engine:stop`, `engine:pause`, `engine:resume`, `engine:status` |
 | 托管 Runtime | `winpilot:url`, `winpilot:connection`, `winpilot:ensure`, `winpilot:restart` |
-| 模型兼容调用 | `ai:generate` |
 | 截图/选择 | `screenshot:capture`, `screenshot:selectRegion`, `screenshot:saveBase64Image` |
 | 感知/交互 | `ocr:recognizeRegion`, `interaction:wheelSelect` |
 | DSL/feature | `dsl:toFlow`, `features:list`, `feature:call` |

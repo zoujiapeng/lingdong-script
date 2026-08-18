@@ -48,6 +48,18 @@ describe('wpsToFlowScript exact offline import', () => {
     expect(flow.nodes.some((node) => node.type === 'condition')).toBe(false);
   });
 
+  it('uses the last sentence of a visible action note as the node label', () => {
+    const flow = wpsToFlowScript({
+      steps: [{
+        tool: 'click',
+        coords: [10, 20],
+        note: 'The result is visible. Click the Save button.',
+      }],
+    });
+
+    expect(replayNodes(flow)[0].label).toBe('1. click: Click the Save button.');
+  });
+
   it('shares one session and copies the stable target hint onto each step', () => {
     const flow = wpsToFlowScript({
       source_run: 'agent-run-42',
@@ -71,7 +83,7 @@ describe('wpsToFlowScript exact offline import', () => {
     expect((replayNodes(flow)[0].params as any).target_window).toBe('Calculator');
   });
 
-  it('runs canonical preflight once and postflight only after the final step', () => {
+  it('drops legacy safety and verification gates from editable replay steps', () => {
     const conditions = { checks: [{ file_exists: 'C:\\ready.txt' }] };
     const safety = { requires_preflight: true, mutates_desktop: false };
     const evidence = {
@@ -88,10 +100,13 @@ describe('wpsToFlowScript exact offline import', () => {
     });
     const replay = replayNodes(flow).map((node) => node.params as any);
 
-    expect(replay[0].preflight_contract).toEqual({ conditions, safety });
-    expect(replay[1]).not.toHaveProperty('preflight_contract');
-    expect(replay[0]).not.toHaveProperty('postflight_evidence');
-    expect(replay[1].postflight_evidence).toEqual(evidence);
+    for (const params of replay) {
+      expect(params).not.toHaveProperty('allow_shell');
+      expect(params).not.toHaveProperty('preflight_contract');
+      expect(params).not.toHaveProperty('postflight_evidence');
+    }
+    expect(flow.source?.raw).not.toHaveProperty('safety');
+    expect(flow.source?.raw).not.toHaveProperty('fallback');
   });
 
   it('produces an offline-mode FlowScript envelope', () => {

@@ -1,6 +1,8 @@
 """Unit tests for hotkey argument normalization in the keyboard contracts."""
 from __future__ import annotations
 
+import pytest
+
 from winpilot.visual_runtime.keyboard_contracts import (
     HotkeyChord,
     canonical_hotkey_args,
@@ -55,8 +57,13 @@ def test_canonical_folds_natural_named_system_keys() -> None:
     assert canonical_hotkey_args(["volume_up"]) == ["volumeup"]
     assert canonical_hotkey_args(["volume_mute"]) == ["volumemute"]
     assert canonical_hotkey_args(["page_down"]) == ["pagedown"]
-    assert canonical_hotkey_args(["print_screen"]) == ["printscreen"]
     assert canonical_hotkey_args(["browser_back"]) == ["browserback"]
+
+
+@pytest.mark.parametrize("key", ("printscreen", "print_screen"))
+def test_printscreen_is_not_a_physical_key_capability(key: str) -> None:
+    with pytest.raises(ValueError):
+        HotkeyChord(tuple(canonical_hotkey_args([key])))
 
 
 def test_canonicalized_left_right_chord_passes_hotkey_contract() -> None:

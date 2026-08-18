@@ -77,7 +77,8 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(
         "title": "Chat",
         "process": "chat.exe",
     }
-    assert canonical["safety"]["requires_preflight"] is True
+    assert "safety" not in canonical
+    assert "fallback" not in canonical
     assert saved["task"] == "Send a message"
     assert saved["source"] == "apprentice"
     assert saved["evidence"]["required"] == [
@@ -93,16 +94,15 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(
     assert manager.status()["recording"] is False
 
 
-def test_apprentice_requires_named_task(tmp_path):
+def test_apprentice_allows_unnamed_task(tmp_path):
     from winpilot.recorder import apprentice
 
-    manager = apprentice.ApprenticeManager(FakeRecorder(tmp_path))
-    try:
-        manager.start("  ")
-    except ValueError as exc:
-        assert "requires a task" in str(exc)
-    else:
-        raise AssertionError("blank apprentice task should fail")
+    fake = FakeRecorder(tmp_path)
+    manager = apprentice.ApprenticeManager(fake)
+    started = manager.start("  ")
+    assert started["task"] == "未命名录制"
+    assert started["recording"] is True
+    fake.recording = False
 
 
 @pytest.mark.parametrize("name", ["CON", "../lesson", "lesson."])

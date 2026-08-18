@@ -1904,11 +1904,6 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
       setValidation(local);
       if (!local.valid) return;
       if (!runtimeReady) throw new Error('本机运行时尚未连接；当前流程仍可离线编辑和保存。');
-      const result = await plane.validateAutomation(automation);
-      assertCurrentDocument();
-      setValidationSource('runtime');
-      setValidation(result);
-      if (!result.valid) return;
       await plane.startAutomation(automation);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : String(runError));
@@ -2366,14 +2361,6 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   };
 
   const toggleRecording = async () => {
-    if (!recording && !recordingTask.trim()) {
-      setError('请输入本次宏录制要完成的任务。');
-      return;
-    }
-    if (!recording && !evidenceValue.trim()) {
-      setError('请填写可机器检查的终态证据。');
-      return;
-    }
     setBusy(true);
     try {
       if (recording) {
@@ -2384,9 +2371,9 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         return;
       }
       await plane.getClient().apprenticeStart(
-        recordingTask.trim(),
+        recordingTask.trim() || '未命名录制',
         '',
-        [{ predicate: evidencePredicate, value: evidenceValue.trim() }],
+        evidenceValue.trim() ? [{ predicate: evidencePredicate, value: evidenceValue.trim() }] : [],
         recordingName.trim(),
       );
       await refresh();
@@ -2466,15 +2453,15 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         {replayMode === 'macro' && (
           <div className="arp-apprentice-control">
             <input value={recordingName} onChange={(event) => setRecordingName(event.target.value)} placeholder="宏名称（可选）" disabled={recording || busy} aria-label="宏名称" />
-            <input value={recordingTask} onChange={(event) => setRecordingTask(event.target.value)} placeholder="描述本次录制要完成的任务" disabled={recording || busy} aria-label="宏录制任务" />
+            <input value={recordingTask} onChange={(event) => setRecordingTask(event.target.value)} placeholder="录制任务（可选）" disabled={recording || busy} aria-label="宏录制任务" />
             <select value={evidencePredicate} onChange={(event) => setEvidencePredicate(event.target.value)} disabled={recording || busy} aria-label="终态证据类型">
               <option value="visible.text">可见文本</option>
               <option value="window.visible">可见窗口</option>
               <option value="file.exists">文件存在</option>
               <option value="process.running">进程运行</option>
             </select>
-            <input value={evidenceValue} onChange={(event) => setEvidenceValue(event.target.value)} placeholder="终态证据值" disabled={recording || busy} aria-label="终态证据值" />
-            <button className={`arp-button ${recording ? 'arp-button-danger' : 'arp-button-primary'}`} onClick={toggleRecording} disabled={busy || (!recording && (!recordingTask.trim() || !evidenceValue.trim()))}>{recording ? <CircleStop size={14} /> : <Radio size={14} />}{recording ? '停止录制并生成流程' : '开始宏录制'}</button>
+            <input value={evidenceValue} onChange={(event) => setEvidenceValue(event.target.value)} placeholder="终态证据值（可选）" disabled={recording || busy} aria-label="终态证据值" />
+            <button className={`arp-button ${recording ? 'arp-button-danger' : 'arp-button-primary'}`} onClick={toggleRecording} disabled={busy}>{recording ? <CircleStop size={14} /> : <Radio size={14} />}{recording ? '停止录制并生成流程' : '开始宏录制'}</button>
           </div>
         )}
       </div>
@@ -2660,7 +2647,7 @@ function SystemView({ plane }: { plane: Plane }) {
     if (!config) return;
     setSaving(true); setError('');
     try {
-      const next = await plane.getClient().patchConfig({ api: config.api, vlm: config.vlm, perception: config.perception, fusion: config.fusion, controller: config.controller, agent: config.agent, ocr: config.ocr, integrations: config.integrations });
+      const next = await plane.getClient().patchConfig({ api: config.api, vlm: config.vlm, perception: config.perception, fusion: config.fusion, controller: config.controller, agent: config.agent, ocr: config.ocr, integrations: config.integrations, vnext: config.vnext });
       setConfig(next);
       setSaved(true); setTimeout(() => setSaved(false), 1800);
     } catch (saveError) { setError(saveError instanceof Error ? saveError.message : String(saveError)); }
@@ -2700,6 +2687,9 @@ function SystemView({ plane }: { plane: Plane }) {
         </section>
         <section className="arp-panel arp-config-panel">
           <div className="arp-panel-heading"><div><Gauge size={15} /><strong>运行时</strong></div><StatusPill status={plane.connection === 'online' ? 'running' : 'failed'} label={plane.connection === 'online' ? '在线' : '离线'} /></div>
+          {config && <div className="arp-toggle-list">
+            <Toggle checked={Boolean(config.vnext?.save_click_reference_frames)} onChange={(value) => patch('vnext', 'save_click_reference_frames', value)} label="点击步骤保存参考图片（下次任务生效）" />
+          </div>}
           <dl className="arp-diagnostics">
             <div><dt>控制平面</dt><dd>{plane.baseUrl || '未连接'}</dd></div>
             <div><dt>API 协议</dt><dd>{plane.overview?.contracts?.arp || '-'}</dd></div>

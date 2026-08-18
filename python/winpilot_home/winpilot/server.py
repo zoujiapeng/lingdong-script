@@ -339,7 +339,7 @@ class ScriptSaveRequest(BaseModel):
 
 
 class ApprenticeStartRequest(BaseModel):
-    task: str
+    task: str = ""
     name: str = ""
     app: str = ""
     verification: list[dict[str, Any]] = Field(default_factory=list)
@@ -1312,7 +1312,6 @@ async def chatgpt_integration(request: Request) -> dict[str, Any]:
         "request_count": 0,
         "last_client": "",
         "security_mode": "loopback_only",
-        "allow_desktop_mutation": False,
         "runtime": {},
         "world_model_enabled": False,
         "current_run": None,

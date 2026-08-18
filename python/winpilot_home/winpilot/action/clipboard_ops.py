@@ -8,6 +8,7 @@ through legacy owned code.
 """
 from __future__ import annotations
 
+import base64
 import ctypes
 import ntpath
 import time
@@ -16,11 +17,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from ..utils.log import logger
-
 CAPTURE_FORMAT = "capture-screen/1"
 WINDOWS_FORMAT = "windows-list/1"
 PASTE_FORMAT = "paste-image/1"
+COPY_IMAGE_FORMAT = "copy-image/1"
 
 _CAPTURE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
@@ -228,11 +228,11 @@ def list_windows_backend() -> dict[str, Any]:
     }
 
 
-def _image_file_to_dib(path: Path) -> tuple[bytes, int, int]:
-    """Read a raster image into the CF_DIB payload accepted by Windows apps."""
+def _image_bytes_to_dib(payload: bytes) -> tuple[bytes, int, int]:
+    """Decode raster bytes into the CF_DIB payload accepted by Windows apps."""
     from PIL import Image
 
-    with Image.open(path) as source:
+    with Image.open(BytesIO(payload)) as source:
         image = source.convert("RGB")
         width, height = image.size
         buffer = BytesIO()
@@ -240,6 +240,12 @@ def _image_file_to_dib(path: Path) -> tuple[bytes, int, int]:
     # CF_DIB contains a BITMAPINFOHEADER, while BMP files prefix it with file
     # metadata that clipboard consumers do not expect.
     return buffer.getvalue()[14:], int(width), int(height)
+
+
+def _image_file_to_dib(path: Path) -> tuple[bytes, int, int]:
+    """Read a raster image into the CF_DIB payload accepted by Windows apps."""
+
+    return _image_bytes_to_dib(path.read_bytes())
 
 
 def set_clipboard_dib(dib: bytes) -> None:
@@ -266,16 +272,40 @@ def set_clipboard_dib(dib: bytes) -> None:
         win32clipboard.CloseClipboard()
 
 
-def paste_image_backend(*, path: str) -> dict[str, Any]:
-    """Put one image file onto the clipboard and press Ctrl+V."""
-    import win32con
+def copy_seen_frame_backend(*, image_b64: str) -> dict[str, Any]:
+    """Put the exact JPEG already submitted to the model on the clipboard."""
+
+    try:
+        payload = base64.b64decode(str(image_b64 or ""), validate=True)
+        if not payload.startswith(b"\xff\xd8"):
+            raise ValueError("model frame is not JPEG")
+        dib, width, height = _image_bytes_to_dib(payload)
+        set_clipboard_dib(dib)
+    except Exception as exc:
+        return {
+            "format": COPY_IMAGE_FORMAT,
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}"[:400],
+        }
+    return {
+        "format": COPY_IMAGE_FORMAT,
+        "ok": True,
+        "source": "current_model_view",
+        "width": width,
+        "height": height,
+        "size_bytes": len(payload),
+    }
+
+
+def copy_image_file_backend(*, path: str) -> dict[str, Any]:
+    """Put one existing raster image file on the clipboard without pasting."""
 
     image_path = Path(str(path or "")).expanduser()
     if not image_path.is_absolute():
         image_path = Path.cwd() / image_path
     if not image_path.is_file():
         return {
-            "format": PASTE_FORMAT,
+            "format": COPY_IMAGE_FORMAT,
             "ok": False,
             "error": f"image file not found: {image_path}",
         }
@@ -283,12 +313,35 @@ def paste_image_backend(*, path: str) -> dict[str, Any]:
         ".png", ".jpg", ".jpeg", ".bmp", ".webp",
     }:
         return {
-            "format": PASTE_FORMAT,
+            "format": COPY_IMAGE_FORMAT,
             "ok": False,
-            "error": "paste_image requires a PNG, JPEG, BMP, or WebP file",
+            "error": "image copy requires a PNG, JPEG, BMP, or WebP file",
         }
-    dib, width, height = _image_file_to_dib(image_path)
-    set_clipboard_dib(dib)
+    try:
+        dib, width, height = _image_file_to_dib(image_path)
+        set_clipboard_dib(dib)
+    except Exception as exc:
+        return {
+            "format": COPY_IMAGE_FORMAT,
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}"[:400],
+        }
+    return {
+        "format": COPY_IMAGE_FORMAT,
+        "ok": True,
+        "path": str(image_path),
+        "width": width,
+        "height": height,
+        "size_bytes": int(image_path.stat().st_size),
+        "modified_at": int(image_path.stat().st_mtime),
+    }
+
+
+def paste_image_backend(*, path: str) -> dict[str, Any]:
+    """Put one image file onto the clipboard and press Ctrl+V."""
+    copied = copy_image_file_backend(path=path)
+    if copied.get("ok") is not True:
+        return {**dict(copied), "format": PASTE_FORMAT}
 
     # Ctrl+V through SendInput to the foreground window.  This is the vNext
     # input path: raw physical keyboard events, no legacy executor.
@@ -300,20 +353,23 @@ def paste_image_backend(*, path: str) -> dict[str, Any]:
     user32.keybd_event(vk_v, 0, 0, 0)
     user32.keybd_event(vk_v, 0, KEYEVENTF_KEYUP, 0)
     user32.keybd_event(vk_ctrl, 0, KEYEVENTF_KEYUP, 0)
-    return {
+    result = {
         "format": PASTE_FORMAT,
         "ok": True,
-        "path": str(image_path),
-        "width": int(width),
-        "height": int(height),
-        "size_bytes": int(image_path.stat().st_size),
-        "modified_at": int(image_path.stat().st_mtime),
+        "path": copied["path"],
         "via": "clipboard_dib",
+        "width": copied["width"],
+        "height": copied["height"],
+        "size_bytes": copied["size_bytes"],
+        "modified_at": copied["modified_at"],
     }
+    return result
 
 
 __all__ = [
     "capture_screen_backend",
+    "copy_image_file_backend",
+    "copy_seen_frame_backend",
     "list_windows_backend",
     "paste_image_backend",
 ]

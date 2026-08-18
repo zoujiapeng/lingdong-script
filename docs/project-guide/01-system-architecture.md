@@ -69,14 +69,14 @@ flowchart TB
 
 `src/main/main.ts` 是桌面应用进程级入口。它负责：
 
-- 单实例锁、窗口创建、菜单、全局 F9 和退出清理；
+- 单实例锁、窗口创建、菜单、全局 F8/F9 和退出清理；
 - `contextIsolation=true`、`nodeIntegration=false` 的 BrowserWindow；
 - 通过 `preload.ts` 暴露受限 IPC；
 - 按需隐藏/恢复自身，从而把真实前台交给外部目标；
 - 启动托管 WinPilot、旧 `:7880` API、scheduler 与按需 feature；
 - 通知、文件对话框、截图、宏和旧 Flow engine IPC。
 
-这里同时托管新旧消费者，但当前产品语义不在 Electron 中。`F9` 控制的是旧 Flow engine；菜单中的 DSL、宏、feature 与 scheduler 也不能写成 vNext Actor 的隐藏工具。
+这里同时托管新旧消费者，但当前产品语义不在 Electron 中。活跃 vNext Agent 存在时，`F8`/`F9` 由主进程直接请求 Runtime cancel；没有活跃 Agent 时，`F9` 才保留旧 Flow engine 的启停语义。菜单中的 DSL、宏、feature 与 scheduler 也不能写成 vNext Actor 的隐藏工具。
 
 ### 2.2 Renderer
 
@@ -332,11 +332,12 @@ Actor恢复。瞬态清理成功后只保留“输入结果未知”并交回新
 
 `drag(..., keep_holding=true)` 是唯一允许跨帧保留物理按住的当前模型入口。Broker 在 pointer held 时只投影 `drag`；lease 有过期时间，取消、异常、失焦或 close 都尝试强制 `mouse_up`。旧帧坐标不能跨帧复用，下一段路径仍由新 JPEG 决定。
 
-### 9.4 通用窗口与截图工具
+### 9.4 通用窗口与画面剪贴板工具
 
 `launch_application` 只做通用候选窗排序：普通窗优先于 `WS_EX_TOOLWINDOW`，再按可见、
 隐藏和 hidden-topmost 排序；只恢复选中的一个候选，不含应用名、标题或进程配方。
-`capture_screen` 接受相对路径并原样交给物理 backend，由 backend按 Runtime cwd和图片格式处理。
+`copy_current_view` 把当前模型轮已收到的同一张 JPEG 放入系统剪贴板；它不再截图、
+不接受文件路径，也不替模型切窗口或粘贴。这张图会暂存为可选流程素材，用户两次会话都未提取时清理。
 
 ## 10. 完成与诊断
 

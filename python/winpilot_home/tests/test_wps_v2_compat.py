@@ -212,6 +212,78 @@ def test_replayer_runs_detached_leaf(tmp_path, monkeypatch):
     assert calls == [("Start-Sleep 1", "demo")]
 
 
+def test_replayer_executes_recorded_agent_utility_and_device_actions(monkeypatch):
+    from winpilot.action import clipboard_ops, shell
+    from winpilot.perception import apps
+
+    calls = []
+    monkeypatch.setattr(
+        apps, "launch_application",
+        lambda app, arguments="": calls.append(("launch", app, arguments)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        trace_mod.executor, "move_mouse",
+        lambda x, y, hwnd=None: calls.append(("move", x, y, hwnd)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        trace_mod.executor, "execute_admitted_physical_sequence",
+        lambda events, hwnd=None, stop_event=None: (
+            calls.append(("sequence", events, hwnd, stop_event))
+            or SimpleNamespace(facts={"ok": True, "event_count": len(events)})
+        ),
+    )
+    monkeypatch.setattr(
+        shell, "run",
+        lambda command, **kwargs: calls.append(("shell", command, kwargs)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        shell, "write_file",
+        lambda path, content: calls.append(("write", path, content)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        clipboard_ops, "capture_screen_backend",
+        lambda **kwargs: calls.append(("capture", kwargs)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        clipboard_ops, "paste_image_backend",
+        lambda **kwargs: calls.append(("paste", kwargs)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        clipboard_ops, "copy_image_file_backend",
+        lambda **kwargs: calls.append(("copy", kwargs)) or {"ok": True},
+    )
+    replay = trace_mod.Replayer()
+    replay.hwnd = 123
+
+    results = [
+        replay._run_step("1", {"tool": "launch_application", "app": "notepad",
+                               "arguments": "note.txt"}),
+        replay._run_step("2", {"tool": "move_mouse", "coords": [11, 12]}),
+        replay._run_step("3", {"tool": "input_sequence", "events": [
+            {"kind": "key_down", "key": "shift"},
+            {"kind": "key_up", "key": "shift"},
+        ]}),
+        replay._run_step("4", {"tool": "run_shell", "command": "Get-Date",
+                               "cwd": "C:/tmp"}),
+        replay._run_step("5", {"tool": "write_file", "path": "C:/tmp/a.txt",
+                               "content": "hello"}),
+        replay._run_step("6", {"tool": "capture_screen", "path": "C:/tmp/a.jpg",
+                               "window": True}),
+        replay._run_step("7", {"tool": "paste_image_file", "path": "C:/tmp/a.jpg"}),
+        replay._run_step("8", {
+            "tool": "copy_current_view",
+            "reference_frame": {"path": "C:/tmp/view.jpg"},
+        }),
+    ]
+
+    assert all(result["ok"] is True for result in results)
+    assert [call[0] for call in calls] == [
+        "launch", "move", "sequence", "shell", "write", "capture", "paste", "copy",
+    ]
+    assert [event.kind.value for event in calls[2][1]] == ["key_down", "key_up"]
+    assert calls[3][2]["cwd"] == "C:/tmp"
+
+
 def test_relocate_text_uses_existing_window_anchor(monkeypatch):
     monkeypatch.setattr(trace_mod.uia, "find_by_text", lambda hwnd, text: [])
     monkeypatch.setattr(
@@ -1072,18 +1144,20 @@ def test_replay_rejects_malformed_declared_postflight_evidence():
     assert "must be an array" in result["postflight"]["error"]
 
 
-def test_automation_ir_desktop_replay_requires_explicit_target_window(tmp_path):
+def test_automation_ir_desktop_replay_allows_human_screen_coordinates(tmp_path):
     from winpilot.automation_ir import automation_ir_from_wps
 
     ir = automation_ir_from_wps({
         "format": "wps/2",
-        "name": "unsafe coordinates",
+        "name": "human screen coordinates",
         "steps": [{"tool": "click", "coords": [10, 20]}],
     })
-    result = SpyReplayer().run(_write(tmp_path, ir))
+    replayer = SpyReplayer()
+    result = replayer.run(_write(tmp_path, ir))
 
-    assert result["ok"] is False
-    assert "explicit target_window" in result["preflight"]["error"]
+    assert result["ok"] is True
+    assert result["preflight"]["required"] is False
+    assert [call["tool"] for call in replayer.leaf_calls] == ["click"]
 
 
 def test_replay_preflight_enforces_structured_conditions(tmp_path):

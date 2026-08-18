@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from ..utils.log import BUS, logger
 from .contracts import ArpGraph, ArpNode, ArpNodeKind, ArpRunStatus, validate_graph
-from .evidence import evidence_matches, has_verified_evidence, normalize_evidence, parse_requirement
+from .evidence import evidence_matches, normalize_evidence, parse_requirement
 
 
 @dataclass
@@ -578,8 +578,6 @@ class ArpExecution:
                     branch="reply",
                     output=last.output,
                 )
-            if self.graph.policy.require_evidence_on_done and not has_verified_evidence(self.evidence):
-                return NodeResult(ok=False, error="run reached end without verified evidence")
             return NodeResult(ok=True)
         if node.kind == ArpNodeKind.CONDITION:
             return self._condition(node, last)

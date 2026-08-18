@@ -75,6 +75,31 @@ function meta(name: string, description: string) {
 
 export const PRESET_TEMPLATES: ScriptTemplate[] = [
   {
+    id: 'blank-flow',
+    name: 'Blank flow',
+    description: 'Start and end only; add the steps you need.',
+    category: 'general',
+    aliases: ['blank', 'empty flow', 'minimal flow'],
+    keywords: ['flow', 'blank', 'offline'],
+    tags: ['flow', 'minimal'],
+    createScript: () => {
+      const start = nanoid();
+      const end = nanoid();
+      return {
+        meta: meta('Blank flow', 'Start and end only; add the steps you need.'),
+        nodes: [
+          { id: start, type: 'start', x: 360, y: 40, params: { label: 'Start' }, label: 'Start', status: 'idle' },
+          { id: end, type: 'end', x: 360, y: 180, params: { label: 'End' }, label: 'End', status: 'idle' },
+        ],
+        edges: [
+          { id: nanoid(), from_node: start, from_port: 'output', to_node: end, to_port: 'input' },
+        ],
+        variables: {},
+        settings: { ...DEFAULT_SETTINGS },
+      };
+    },
+  },
+  {
     id: 'arp-quickstart',
     name: 'ARP 低延迟起步流程',
     description: '控制器批处理、人工批准和类型化证据门组成的通用起步流程',

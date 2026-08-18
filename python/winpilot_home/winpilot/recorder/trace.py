@@ -9,12 +9,12 @@
 """
 from __future__ import annotations
 
-import base64
 import json
 import inspect
 import os
 import queue
 import re
+import shutil
 import threading
 import time
 from collections.abc import Mapping
@@ -31,6 +31,7 @@ from ..memory import replay_anchors
 from ..perception import fusion, groundtruth, ocr, uia, vision_cv, win32
 from ..perception.model import UIElement
 from ..utils.log import BUS, logger
+from ..utils.replay_frames import save_pending_click_frame
 from ..utils.screenshot import Region, capture, window_region
 from ..utils.trace_payload import sanitize_trace_payload
 from . import replay_control
@@ -58,6 +59,10 @@ _BATCH_SCREENSHOT_TOOLS = {
 }
 _SCREENSHOT_MAX_W = 960
 _POST_ACTION_CAPTURE_SETTLE_S = 0.035
+_REPLAY_FRAME_MANIFEST = "replay_frames.json"
+_REPLAY_FRAME_PREFIX = "click_frame_"
+_REPLAY_VIEW_FRAME_PREFIX = "view_frame_"
+_REPLAY_FRAME_RETENTION_RUNS = 2
 
 # Volatile tokens that make a text selector unstable across runs (unread
 # counts, badges) — strip them so "计技25A葛瑞念 消息: 132" → "计技25A葛瑞念".
@@ -88,6 +93,7 @@ class TraceRecorder:
         self._callbacks_idle = threading.Condition(self._lock)
         self._callbacks_in_flight = 0
         self._run_id: str | None = None
+        self._thread_id: str | None = None
         self._file = None
         self._step = 0
         self._evidence_step = 0
@@ -116,6 +122,7 @@ class TraceRecorder:
             (TRACES_DIR / run_id).mkdir(exist_ok=True)
             self._file = open(TRACES_DIR / f"{run_id}.jsonl", "a", encoding="utf-8")
             self._run_id = run_id
+            self._thread_id = None
             self._step = 0
             self._evidence_step = 0
             self._action_steps = {}
@@ -157,6 +164,7 @@ class TraceRecorder:
                 pass
         self._file = None
         self._run_id = None
+        self._thread_id = None
         self._accepting = False
 
     def _on_event(self, event: dict[str, Any]) -> None:
@@ -173,6 +181,7 @@ class TraceRecorder:
                     self._callbacks_idle.notify_all()
 
     def _record_accepted_event(self, event: dict[str, Any]) -> None:
+        self._remember_replay_thread(event)
         with self._lock:
             run_id = self._run_id
             step: int | None = None
@@ -290,6 +299,77 @@ class TraceRecorder:
             with self._lock:
                 if self._run_id == run_id:
                     self._accepted_events += 1
+
+    def _remember_replay_thread(self, event: Mapping[str, Any]) -> None:
+        """Bind the pending click-frame cache and discard runs older than two."""
+
+        thread_id = str(event.get("thread_id") or "").strip()
+        if not thread_id:
+            return
+        with self._lock:
+            run_id = self._run_id
+            if (
+                not run_id
+                or not self._accepting
+                or self._thread_id == thread_id
+                or self._thread_id is not None
+            ):
+                return
+            self._thread_id = thread_id
+        manifest = TRACES_DIR / run_id / _REPLAY_FRAME_MANIFEST
+        try:
+            manifest.write_text(
+                json.dumps({
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "created": float(event.get("ts") or time.time()),
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+        self._prune_replay_frames()
+
+    @staticmethod
+    def _prune_replay_frames() -> None:
+        manifests: list[tuple[float, Path]] = []
+        for path in TRACES_DIR.glob(f"*/{_REPLAY_FRAME_MANIFEST}"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                manifests.append((float(payload.get("created") or 0), path))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        manifests.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
+        for _created, manifest in manifests[_REPLAY_FRAME_RETENTION_RUNS:]:
+            try:
+                for prefix in (_REPLAY_FRAME_PREFIX, _REPLAY_VIEW_FRAME_PREFIX):
+                    for frame in manifest.parent.glob(f"{prefix}*.jpg"):
+                        frame.unlink(missing_ok=True)
+                manifest.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+    def save_replay_click_frame(
+        self,
+        *,
+        run_id: str,
+        decision_id: str,
+        image_b64: str,
+    ) -> str | None:
+        """Persist the exact JPEG submitted to the model before one click."""
+
+        with self._lock:
+            if (
+                not self._accepting
+                or self._file is None
+                or self._run_id != run_id
+            ):
+                return None
+        return save_pending_click_frame(
+            run_id=run_id,
+            decision_id=decision_id,
+            image_b64=image_b64,
+        )
 
     @staticmethod
     def _action_key(event: dict[str, Any]) -> str:
@@ -521,6 +601,7 @@ def list_traces() -> list[dict[str, Any]]:
         legacy_anonymous = 0
         vnext_action_ids: set[str] = set()
         vnext_anonymous = 0
+        vnext_utilities = 0
         try:
             with open(path, encoding="utf-8") as fh:
                 for line in fh:
@@ -555,6 +636,11 @@ def list_traces() -> list[dict[str, Any]]:
                             vnext_action_ids.add(decision_id)
                         else:
                             vnext_anonymous += 1
+                    elif (
+                        event.get("type") == "live_agent_activity"
+                        and _activity_to_wps(event) is not None
+                    ):
+                        vnext_utilities += 1
                     elif event.get("type") == "agent_done":
                         info["status"] = event.get("status", "")
                     elif event.get("type") == "arp_run_done":
@@ -569,8 +655,8 @@ def list_traces() -> list[dict[str, Any]]:
         except (json.JSONDecodeError, OSError):
             pass
         info["steps"] = (
-            len(vnext_action_ids) + vnext_anonymous
-            if vnext_action_ids or vnext_anonymous
+            len(vnext_action_ids) + vnext_anonymous + vnext_utilities
+            if vnext_action_ids or vnext_anonymous or vnext_utilities
             else len(legacy_action_ids) + legacy_anonymous
         )
         out.append(info)
@@ -907,6 +993,35 @@ def _physical_attempt_to_wps(
         }
         if action == "double_click":
             step["double"] = True
+        button = str(arguments.get("button") or "left")
+        if button != "left":
+            step["button"] = button
+        replay_frame = str(attempt.get("replay_frame") or "").strip()
+        image_coordinates = attempt.get("image_coordinates")
+        if replay_frame and isinstance(image_coordinates, Mapping):
+            image_x = image_coordinates.get("image_x")
+            image_y = image_coordinates.get("image_y")
+            reference: dict[str, Any] = {"pending_path": replay_frame}
+            if all(type(value) in {int, float} for value in (image_x, image_y)):
+                reference["target"] = [image_x, image_y]
+            for source, target in (
+                ("submitted_image_size", "image_size"),
+                ("frame_region", "screen_region"),
+            ):
+                value = attempt.get(source)
+                if isinstance(value, (list, tuple)):
+                    reference[target] = list(value)
+            if type(attempt.get("frame_id")) is int:
+                reference["frame_id"] = attempt["frame_id"]
+            step["reference_frame"] = reference
+        return step
+    if action == "move_mouse" and arguments.get("kind") == "pointer_move":
+        step = {
+            "tool": "move_mouse",
+            "coords": [arguments.get("x"), arguments.get("y")],
+        }
+        if arguments.get("duration_ms"):
+            step["duration_ms"] = arguments["duration_ms"]
         return step
     if action == "scroll" and arguments.get("kind") == "wheel":
         return {
@@ -915,19 +1030,114 @@ def _physical_attempt_to_wps(
             "amount": arguments.get("signed_wheel_amount"),
         }
     if action == "drag" and arguments.get("kind") == "pointer_drag":
-        # Drag is not replayed offline: project it onto the existing click
-        # step at the drop point so held drags no longer void the export.
-        return {
-            "tool": "click",
-            "coords": [arguments.get("x2"), arguments.get("y2")],
+        step = {
+            "tool": "drag",
+            "from": [arguments.get("x1"), arguments.get("y1")],
+            "to": [arguments.get("x2"), arguments.get("y2")],
         }
+        for key in ("points", "button", "held_keys", "keep_holding", "started_held"):
+            if key in arguments:
+                step[key] = arguments[key]
+        if arguments.get("duration_ms") is not None:
+            step["duration"] = float(arguments["duration_ms"]) / 1000.0
+        return step
     if action == "type_text" and arguments.get("kind") == "type_text":
         return {"tool": "type_text", "text_input": arguments.get("text")}
     if action == "hotkey" and arguments.get("kind") == "hotkey":
         modifiers = arguments.get("modifiers")
         if not isinstance(modifiers, (list, tuple)):
             return None
-        return {"tool": "hotkey", "keys": [*modifiers, arguments.get("key")]}
+        step = {"tool": "hotkey", "keys": [*modifiers, arguments.get("key")]}
+        if arguments.get("repeat") is not None:
+            step["repeat"] = arguments["repeat"]
+        return step
+    if action == "input_sequence" and arguments.get("kind") == "input_sequence":
+        events = arguments.get("events")
+        if not isinstance(events, list) or not events:
+            return None
+        return {"tool": "input_sequence", "events": events}
+    if action == "launch_application" and arguments.get("kind") == "launch_application":
+        return {
+            "tool": "launch_application",
+            "app": arguments.get("app"),
+            "arguments": arguments.get("arguments") or "",
+        }
+    return None
+
+
+_REPLAYABLE_ACTIVITY_TOOLS = frozenset({
+    "run_shell",
+    "run_detached",
+    "write_file",
+    "capture_screen",
+    "paste_image_file",
+})
+
+
+def _activity_to_wps(event: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project one model-invoked local utility onto an editable replay step."""
+
+    tool = str(event.get("tool") or "")
+    raw_arguments = event.get("arguments")
+    arguments = dict(raw_arguments) if isinstance(raw_arguments, Mapping) else {}
+    if event.get("kind") == "tool_result" and tool == "copy_current_view":
+        replay_frame = str(arguments.get("replay_frame") or "").strip()
+        if replay_frame:
+            return {
+                "tool": "copy_current_view",
+                "reference_frame": {"pending_path": replay_frame},
+            }
+        return None
+    if event.get("kind") != "tool_start":
+        return None
+    if tool not in _REPLAYABLE_ACTIVITY_TOOLS:
+        return None
+    if not arguments:
+        content = str(event.get("content") or "").strip()
+        if tool == "run_shell":
+            command = str(event.get("command") or content).strip()
+            if command:
+                arguments = {"command": command}
+        elif content.startswith("{"):
+            try:
+                decoded = json.loads(content)
+                if isinstance(decoded, dict):
+                    arguments = decoded
+            except json.JSONDecodeError:
+                pass
+    if tool == "run_shell" and str(arguments.get("command") or "").strip():
+        step = {
+            "tool": "run_shell",
+            "command": str(arguments["command"]),
+            "shell": str(arguments.get("shell") or "powershell"),
+        }
+        for key in ("cwd", "timeout_s"):
+            if arguments.get(key) is not None:
+                step[key] = arguments[key]
+        return step
+    if tool == "run_detached" and str(arguments.get("script") or "").strip():
+        return {
+            "tool": "run_detached",
+            "script": str(arguments["script"]),
+            "name": str(arguments.get("name") or "task"),
+        }
+    if tool == "write_file" and str(arguments.get("path") or "").strip():
+        return {
+            "tool": "write_file",
+            "path": str(arguments["path"]),
+            "content": str(arguments.get("content") or ""),
+        }
+    if tool == "capture_screen" and str(arguments.get("path") or "").strip():
+        return {
+            "tool": "capture_screen",
+            "path": str(arguments["path"]),
+            "window": bool(arguments.get("window")),
+        }
+    if tool == "paste_image_file" and "path" in arguments:
+        return {
+            "tool": "paste_image_file",
+            "path": str(arguments.get("path") or ""),
+        }
     return None
 
 
@@ -939,7 +1149,9 @@ def _vnext_trace_steps(
 
     trace_receipts: dict[str, list[dict[str, Any]]] = {}
     attempts: dict[str, list[dict[str, Any]]] = {}
+    activity_steps: list[tuple[int, int, dict[str, Any]]] = []
     reasons: list[str] = []
+    latest_note = ""
     explicit_vnext = any(
         event.get("runtime_version") == "vnext"
         and event.get("type") in {
@@ -949,8 +1161,28 @@ def _vnext_trace_steps(
         }
         for event in events
     )
-    for event in events:
+    for event_order, event in enumerate(events):
         event_type = event.get("type")
+        if (
+            event_type == "live_agent_activity"
+            and event.get("kind") == "message"
+        ):
+            content = str(event.get("content") or "").strip()
+            if content:
+                latest_note = content[:240]
+        if event_type == "live_agent_activity":
+            replay = _activity_to_wps(event)
+            if replay is not None:
+                if latest_note:
+                    replay["note"] = latest_note
+                timestamp = event.get("ts")
+                activity_steps.append((
+                    int(float(timestamp) * 1_000_000_000)
+                    if isinstance(timestamp, (int, float))
+                    else 0,
+                    event_order,
+                    replay,
+                ))
         decision_id = str(event.get("decision_id") or "").strip()
         if not decision_id:
             if event_type in {"vnext_raw_receipt", "vnext_physical_attempt"}:
@@ -964,9 +1196,13 @@ def _vnext_trace_steps(
         if event_type == "vnext_raw_receipt":
             trace_receipts.setdefault(decision_id, []).append(event)
         elif event_type == "vnext_physical_attempt":
-            attempts.setdefault(decision_id, []).append(event)
+            attempt_event = dict(event)
+            attempt_event["_trace_order"] = event_order
+            if latest_note:
+                attempt_event["_replay_note"] = latest_note
+            attempts.setdefault(decision_id, []).append(attempt_event)
 
-    if not trace_receipts and not attempts and not reasons:
+    if not trace_receipts and not attempts and not activity_steps and not reasons:
         if not explicit_vnext:
             return [], [], False
         legacy_steps, legacy_reasons = _extract_replay_steps(events)
@@ -974,7 +1210,7 @@ def _vnext_trace_steps(
             reasons.append("vnext_trace_contains_legacy_replay")
         return [], reasons, True
 
-    ordered_steps: list[tuple[int, int, dict[str, Any]]] = []
+    ordered_steps: list[tuple[int, int, dict[str, Any]]] = list(activity_steps)
     all_decisions = list(dict.fromkeys([
         *trace_receipts,
         *attempts,
@@ -1022,7 +1258,15 @@ def _vnext_trace_steps(
             "physical_arguments": attempt_event.get("physical_arguments"),
             "target_identity": attempt_event.get("target_identity"),
             "timestamp_ns": attempt_event.get("timestamp_ns"),
+            "frame_id": attempt_event.get("frame_id"),
+            "submitted_image_size": attempt_event.get("submitted_image_size"),
+            "frame_region": attempt_event.get("frame_region"),
+            "image_coordinates": attempt_event.get("image_coordinates"),
+            "replay_frame": attempt_event.get("replay_frame"),
         }
+        note = str(attempt_event.get("_replay_note") or "").strip()
+        if note:
+            attempt["note"] = note
         if (
             attempt["run_id"] != run_id
             or attempt["decision_id"] != decision_id
@@ -1051,6 +1295,8 @@ def _vnext_trace_steps(
             )
             continue
         step = dict(replay)
+        if note:
+            step["note"] = note
         trace_target = _event_target_window(trace_receipt) or {}
         identity = attempt.get("target_identity")
         executable = str(
@@ -1076,12 +1322,10 @@ def _vnext_trace_steps(
             target["title"] = trace_title
         if target:
             step["target_window"] = target
-        else:
-            reasons.append(f"physical_action_target_missing:{decision_id}")
         timestamp = attempt.get("timestamp_ns")
         ordered_steps.append((
             timestamp if type(timestamp) is int else 0,
-            order,
+            int(attempt_event.get("_trace_order") or order),
             step,
         ))
     ordered_steps.sort(key=lambda item: (item[0], item[1]))
@@ -1455,7 +1699,7 @@ def ensure_script_name_available(
     existing = {entry.name.casefold(): entry.name for entry in directory.iterdir()}
     conflict = next((
         existing.get(f"{checked}{suffix}".casefold())
-        for suffix in (".wps.json", ".automation.json")
+        for suffix in (".wps.json", ".automation.json", ".assets")
         if f"{checked}{suffix}".casefold() in existing
     ), None)
     if conflict:
@@ -1484,7 +1728,7 @@ def _unique_export_basename(value: str, *, directory: Path) -> str:
     sequence = 2
     while any(
         f"{candidate}{suffix}".casefold() in existing
-        for suffix in (".wps.json", ".automation.json")
+        for suffix in (".wps.json", ".automation.json", ".assets")
     ):
         suffix = f"-{sequence}"
         if len(checked) + len(suffix) > 160:
@@ -1497,6 +1741,82 @@ def _unique_export_basename(value: str, *, directory: Path) -> str:
     return candidate
 
 
+def _materialize_reference_frames(
+    script: dict[str, Any],
+    *,
+    basename: str,
+    directory: Path,
+) -> tuple[list[Path], list[Path]]:
+    """Move pending model-view frames into this exported flow's assets."""
+
+    created: list[Path] = []
+    pending: list[Path] = []
+    steps = script.get("steps")
+    if not isinstance(steps, list):
+        return created, pending
+    asset_dir = directory / f"{basename}.assets"
+    frame_index = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        reference = step.get("reference_frame")
+        if not isinstance(reference, dict):
+            continue
+        relative = str(reference.pop("pending_path", "") or "").strip()
+        if not relative:
+            continue
+        source = TRACES_DIR / relative
+        if not source.is_file():
+            reference["available"] = False
+            continue
+        frame_index += 1
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        frame_kind = (
+            "view" if step.get("tool") == "copy_current_view" else "click"
+        )
+        target = asset_dir / f"{frame_kind}-{frame_index:03d}.jpg"
+        try:
+            shutil.copyfile(source, target)
+        except OSError:
+            reference["available"] = False
+            continue
+        reference.update({
+            "available": True,
+            "asset": f"{basename}.assets/{target.name}",
+            "path": str(target.resolve()),
+        })
+        created.append(target)
+        pending.append(source)
+    if not created:
+        try:
+            asset_dir.rmdir()
+        except OSError:
+            pass
+    return created, pending
+
+
+def _discard_materialized_frames(paths: list[Path]) -> None:
+    directories = {path.parent for path in paths}
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for directory in directories:
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+
+def _consume_pending_frames(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _write_export_pair(
     script: dict[str, Any],
     *,
@@ -1507,11 +1827,16 @@ def _write_export_pair(
 
     SCRIPTS_DIR.mkdir(exist_ok=True)
     unique_basename = _unique_export_basename(basename, directory=SCRIPTS_DIR)
+    created_frames, pending_frames = _materialize_reference_frames(
+        script,
+        basename=unique_basename,
+        directory=SCRIPTS_DIR,
+    )
     path = SCRIPTS_DIR / f"{unique_basename}.wps.json"
     payload = json.dumps(script, ensure_ascii=False, indent=1)
-    with path.open("x", encoding="utf-8") as fh:
-        fh.write(payload)
     try:
+        with path.open("x", encoding="utf-8") as fh:
+            fh.write(payload)
         write_automation_ir(
             script,
             name=name,
@@ -1522,7 +1847,9 @@ def _write_export_pair(
             path.unlink()
         except OSError:
             pass
+        _discard_materialized_frames(created_frames)
         raise
+    _consume_pending_frames(pending_frames)
     return path
 
 
@@ -1589,9 +1916,17 @@ def export_automation_ir(run_id: str, name: str | None = None) -> Path:
     script = build_script(run_id, name=checked_name)
     SCRIPTS_DIR.mkdir(exist_ok=True)
     basename = _unique_export_basename(basename, directory=SCRIPTS_DIR)
-    path = write_automation_ir(
-        script, name=checked_name, basename=basename,
+    created_frames, pending_frames = _materialize_reference_frames(
+        script, basename=basename, directory=SCRIPTS_DIR,
     )
+    try:
+        path = write_automation_ir(
+            script, name=checked_name, basename=basename,
+        )
+    except Exception:
+        _discard_materialized_frames(created_frames)
+        raise
+    _consume_pending_frames(pending_frames)
     BUS.publish("trace", state="exported_ir", run_id=run_id, ir=str(path))
     return path
 
@@ -1606,9 +1941,17 @@ def export_thread_automation_ir(
     script = build_thread_script(thread_id, name=checked_name, run_ids=run_ids)
     SCRIPTS_DIR.mkdir(exist_ok=True)
     basename = _unique_export_basename(basename, directory=SCRIPTS_DIR)
-    path = write_automation_ir(
-        script, name=checked_name, basename=basename,
+    created_frames, pending_frames = _materialize_reference_frames(
+        script, basename=basename, directory=SCRIPTS_DIR,
     )
+    try:
+        path = write_automation_ir(
+            script, name=checked_name, basename=basename,
+        )
+    except Exception:
+        _discard_materialized_frames(created_frames)
+        raise
+    _consume_pending_frames(pending_frames)
     BUS.publish(
         "trace",
         state="thread_exported_ir",
@@ -2760,18 +3103,6 @@ class Replayer:
         target = self._preflight_target_window(script, focus=focus_target)
         if not target.get("ok", False):
             return target
-        safety = script.get("safety") if isinstance(script.get("safety"), dict) else {}
-        hint = _target_window_hint(script)
-        if (
-            safety.get("requires_preflight")
-            and safety.get("mutates_desktop")
-            and not hint
-        ):
-            error = "desktop Automation IR requires an explicit target_window preflight"
-            result = {"ok": False, "error": error, "safety": safety}
-            self._emit_step("preflight", "preflight.target_window", False, result)
-            return {"ok": False, "required": True, "error": error, "safety": safety}
-
         checks, ignored = self._condition_checks(script)
         results: list[dict[str, Any]] = []
         for index, check in enumerate(checks, start=1):
@@ -2812,7 +3143,7 @@ class Replayer:
                 }
         return {
             "ok": True,
-            "required": bool(target.get("required") or checks or safety.get("requires_preflight")),
+            "required": bool(target.get("required") or checks),
             "target": target,
             "checks": results,
             "ignored": ignored,
@@ -2869,27 +3200,6 @@ class Replayer:
                     "advisory": advisory,
                 }
         return {"ok": True, "required": bool(checks), "checks": results, "advisory": advisory}
-
-    def verify_postflight(self, evidence: Any) -> dict[str, Any]:
-        """Run the canonical WPS postflight contract for an ARP replay segment."""
-        return self._postflight_evidence({"evidence": evidence})
-
-    def verify_preflight(
-        self,
-        *,
-        target_window: Any = None,
-        conditions: Any = None,
-        safety: Any = None,
-    ) -> dict[str, Any]:
-        """Run the canonical WPS preflight contract for an ARP replay segment."""
-        script: dict[str, Any] = {"format": "wps/2", "steps": []}
-        if target_window not in (None, "", {}):
-            script["target_window"] = target_window
-        if conditions is not None:
-            script["conditions"] = conditions
-        if safety is not None:
-            script["safety"] = safety
-        return self._preflight(script)
 
     def _run_step(self, idx: int, step: dict) -> dict[str, Any]:
         tool = step.get("tool", "")
@@ -2964,12 +3274,22 @@ class Replayer:
                 if launch_before is not None and self.hwnd:
                     result["launch_settle"] = self._wait_for_url_launch_settle(launch_before)
             return result
+        if tool == "launch_application":
+            from ..perception.apps import launch_application
+
+            return launch_application(
+                str(step.get("app") or ""),
+                str(step.get("arguments") or ""),
+            )
         if tool == "focus_window":
             found = win32.find_window(step.get("title", ""))
             if not found:
                 return {"ok": False, "error": f'窗口 "{step.get("title")}" 不存在'}
             self.hwnd = found["hwnd"]
             return executor.focus_window(self.hwnd)
+        if tool == "move_mouse":
+            coords = step.get("coords", [0, 0])
+            return executor.move_mouse(int(coords[0]), int(coords[1]), hwnd=self.hwnd)
         if tool == "click":
             anchor_key = str(idx)
             point = self._relocate(step, anchor_key)
@@ -3111,14 +3431,47 @@ class Replayer:
                 result["resolved"] = dict(self._last_relocation)
             return result
         if tool == "hotkey":
-            return verify.run_with_verify(
-                "hotkey",
-                lambda: executor.press_keys(
-                    _normalize_hotkeys(step.get("keys", [])),
-                    hwnd=self.hwnd,
-                ),
-                expect=expect, hwnd=self.hwnd, retryable=False,
-                stop_event=self.stop_event)
+            result: dict[str, Any] = {"ok": True}
+            repeat = max(1, int(step.get("repeat") or 1))
+            for _index in range(repeat):
+                result = verify.run_with_verify(
+                    "hotkey",
+                    lambda: executor.press_keys(
+                        _normalize_hotkeys(step.get("keys", [])),
+                        hwnd=self.hwnd,
+                    ),
+                    expect=expect, hwnd=self.hwnd, retryable=False,
+                    stop_event=self.stop_event)
+                if not result.get("ok"):
+                    break
+            result["requested_repetitions"] = repeat
+            return result
+        if tool == "input_sequence":
+            from ..action.raw_device import (
+                InputEventKind,
+                MouseButton,
+                PhysicalInputEvent,
+            )
+
+            events = []
+            for raw in step.get("events", []):
+                if not isinstance(raw, Mapping):
+                    continue
+                kind = InputEventKind(str(raw.get("kind") or ""))
+                button = raw.get("button")
+                events.append(PhysicalInputEvent(
+                    kind=kind,
+                    x=raw.get("x"),
+                    y=raw.get("y"),
+                    duration_ms=int(raw.get("duration_ms") or 0),
+                    button=MouseButton(str(button)) if button else None,
+                    key=raw.get("key"),
+                    amount=raw.get("amount"),
+                ))
+            receipt = executor.execute_admitted_physical_sequence(
+                tuple(events), hwnd=self.hwnd, stop_event=self.stop_event,
+            )
+            return dict(receipt.facts)
         if tool == "scroll":
             coords = step.get("coords", [0, 0])
             return executor.scroll(
@@ -3144,11 +3497,36 @@ class Replayer:
             return shell.run(step.get("command", ""),
                              shell=step.get("shell", "powershell"),
                              timeout_s=float(step.get("timeout_s", 30)),
+                             cwd=step.get("cwd"),
                              stop_event=self.stop_event)
         if tool == "run_detached":
             from ..action import shell
             return shell.run_detached(str(step.get("script", "")),
                                       name=str(step.get("name", "task")))
+        if tool == "write_file":
+            from ..action import shell
+            return shell.write_file(
+                str(step.get("path") or ""),
+                str(step.get("content") or ""),
+            )
+        if tool == "copy_current_view":
+            from ..action.clipboard_ops import copy_image_file_backend
+            reference = step.get("reference_frame")
+            path = (
+                str(reference.get("path") or "")
+                if isinstance(reference, Mapping)
+                else ""
+            )
+            return copy_image_file_backend(path=path)
+        if tool == "capture_screen":
+            from ..action.clipboard_ops import capture_screen_backend
+            return capture_screen_backend(
+                path=str(step.get("path") or ""),
+                window=bool(step.get("window")),
+            )
+        if tool == "paste_image_file":
+            from ..action.clipboard_ops import paste_image_backend
+            return paste_image_backend(path=str(step.get("path") or ""))
         if tool == "tray_click":
             from ..perception import tray
             return tray.click_tray_icon(

@@ -598,7 +598,7 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
             == "ExecuteDesktopTask"
         ), task_node
         assert graph.get("metadata", {}).get("experience_policy") == "disabled", graph
-        assert (graph.get("policy") or {}).get("allow_shell") is False
+        assert set(graph.get("policy") or {}) <= {"max_node_visits", "fail_fast"}
 
         # Reproduce the native client's handoff/capture/start sequence. The
         # endpoint supplies a neutral desktop anchor; the real full-screen
