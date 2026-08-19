@@ -139,34 +139,6 @@ def _merge(base: dict, override: dict) -> dict:
     return result
 
 
-def _canonicalize_live_agent_config(raw: dict[str, Any]) -> dict[str, Any]:
-    """Migrate the retired live-agent key at the config input boundary."""
-    normalized = deepcopy(raw)
-    vnext = normalized.get("vnext")
-    if not isinstance(vnext, dict):
-        return normalized
-
-    legacy_key = "live_canary_enabled"
-    canonical_key = "live_agent_enabled"
-    if legacy_key not in vnext:
-        return normalized
-    if canonical_key in vnext:
-        canonical_value = vnext[canonical_key]
-        legacy_value = vnext[legacy_key]
-        same_value = (
-            type(canonical_value) is type(legacy_value)
-            and canonical_value == legacy_value
-        )
-        if not same_value:
-            raise ValueError(
-                "config.vnext.live_agent_enabled conflicts with the retired "
-                "config.vnext.live_canary_enabled value"
-            )
-    vnext.setdefault(canonical_key, vnext[legacy_key])
-    del vnext[legacy_key]
-    return normalized
-
-
 class Config:
     """Thread-safe config holder backed by config.json."""
 
@@ -181,7 +153,6 @@ class Config:
                     on_disk = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, OSError) as exc:
                     raise RuntimeError(f"config.json 解析失败: {exc}") from exc
-                on_disk = _canonicalize_live_agent_config(on_disk)
                 self._data = _merge(_DEFAULTS, on_disk)
         else:
             self.save()
@@ -220,7 +191,6 @@ class Config:
 
     def update(self, patch: dict[str, Any]) -> dict[str, Any]:
         """Deep-merge a patch dict (from the web UI) and persist."""
-        patch = _canonicalize_live_agent_config(patch)
         with _lock:
             self._data = _merge(self._data, patch)
         self.save()
