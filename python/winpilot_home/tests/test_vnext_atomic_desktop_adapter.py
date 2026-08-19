@@ -804,8 +804,6 @@ def test_exact_atomic_surface_completes_once_with_model_visible_post_frame(
     assert transition.input_completed is True
     assert transition.post_frame_id == 2
     assert len(transition.post_frame_evidence) == 1
-    assert transition.action_effect is None
-    assert transition.action_effect_evidence is None
     assert len(harness.raw.calls) == 1
     assert harness.wait_calls == [0.12]
     assert harness.raw.calls[0][0] == raw_name
@@ -1531,8 +1529,6 @@ def test_completed_transition_uses_post_frame_without_separate_effect_verifier()
     transition = attempt.transition
     assert transition is not None
     wire = transition.to_dict()
-    assert wire["action_effect"] is None
-    assert wire["action_effect_evidence"] is None
     assert wire["post_frame_id"] == 2
     assert len(wire["post_frame_evidence"]) == 1
 
@@ -2597,7 +2593,7 @@ def test_closed_adapter_rejects_new_input() -> None:
     assert harness.raw.calls == []
 
 
-def test_deterministic_replay_produces_identical_evidence_and_effect() -> None:
+def test_deterministic_replay_produces_identical_post_frame_evidence() -> None:
     first = _harness("click").run().transition
     second = _harness("click").run().transition
 
@@ -2606,8 +2602,6 @@ def test_deterministic_replay_produces_identical_evidence_and_effect() -> None:
     assert first.outcome is ControllerOutcome.COMPLETED
     assert second.outcome is ControllerOutcome.COMPLETED
     assert first.post_frame_evidence == second.post_frame_evidence
-    assert first.action_effect == second.action_effect
-    assert first.action_effect_evidence == second.action_effect_evidence
 
 
 def test_adapter_package_is_one_narrow_single_composition_owner() -> None:

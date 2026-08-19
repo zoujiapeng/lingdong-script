@@ -7,8 +7,6 @@ from dataclasses import replace
 from typing import Any, Iterable, Mapping
 
 from .contracts import (
-    ACTION_EFFECT_EVIDENCE_KIND,
-    ActionEffectSummary,
     ArtifactRef,
     EvidenceRef,
     EvidenceScope,
@@ -23,7 +21,6 @@ from .contracts import (
     ObligationSpec,
     ObligationProjection,
     ObligationStatus,
-    LocalVisualChange,
     TargetBinding,
     TransitionSummary,
     VerifiedFact,
@@ -269,9 +266,6 @@ def _parse_transition(
         raise InvalidMissionEvent(
             "transition frame_id must be a non-negative integer or null"
         )
-    raw_effect = payload.get("action_effect")
-    if raw_effect is not None and not isinstance(raw_effect, Mapping):
-        raise InvalidMissionEvent("transition action_effect must be an object")
     error_kind = payload.get("error_kind")
     if error_kind is not None and type(error_kind) is not str:
         raise InvalidMissionEvent("transition error_kind must be a string or null")
@@ -287,74 +281,8 @@ def _parse_transition(
             if payload.get("action_id") is not None
             else None
         ),
-        action_effect=(
-            ActionEffectSummary.from_dict(thaw(raw_effect))
-            if raw_effect is not None
-            else None
-        ),
         error_kind=error_kind,
     )
-
-
-def _validate_action_effect_evidence(
-    transition: TransitionSummary,
-    refs: tuple[EvidenceRef, ...],
-) -> None:
-    effect = transition.action_effect
-    if effect is None:
-        return
-    by_id = {ref.id: ref for ref in refs}
-    try:
-        before = by_id[effect.before_frame_evidence_ref]
-        after = by_id[effect.after_frame_evidence_ref]
-        attestation = by_id[effect.evidence_ref]
-    except KeyError as exc:
-        raise EvidenceScopeError(
-            "action effect evidence is missing from the transition"
-        ) from exc
-    if (
-        before.obligation_id != transition.obligation_id
-        or before.trust != "deterministic"
-        or before.frame_id != effect.before_frame_id
-        or before.kind not in {"current_frame", "post_action_frame"}
-        or before.payload_hash != effect.before_frame_payload_hash
-        or (
-            before.kind == "current_frame"
-            and before.action_id is not None
-        )
-        or (
-            before.kind == "post_action_frame"
-            and (
-                not before.action_id
-                or before.action_id == effect.action_id
-            )
-        )
-    ):
-        raise EvidenceScopeError(
-            "action effect before-frame evidence is not deterministic frame evidence"
-        )
-    if (
-        after.obligation_id != transition.obligation_id
-        or after.trust != "deterministic"
-        or after.kind != "post_action_frame"
-        or after.frame_id != effect.after_frame_id
-        or after.action_id != effect.action_id
-        or after.payload_hash != effect.after_frame_payload_hash
-    ):
-        raise EvidenceScopeError(
-            "action effect after-frame evidence does not bind the action"
-        )
-    if (
-        attestation.obligation_id != transition.obligation_id
-        or attestation.trust != "deterministic"
-        or attestation.kind != ACTION_EFFECT_EVIDENCE_KIND
-        or attestation.frame_id != effect.after_frame_id
-        or attestation.action_id != effect.action_id
-        or attestation.payload_hash != effect.payload_hash
-    ):
-        raise EvidenceScopeError(
-            "action effect attestation does not bind the canonical comparison"
-        )
 
 
 def _claim_fingerprint(
@@ -605,19 +533,6 @@ def _apply_event(
             evidence_refs=transition_refs,
         )
         refs = _evidence_refs(projection, scope, transition_refs, obligation_id=obligation_id)
-        _validate_action_effect_evidence(transition, refs)
-        effect = transition.action_effect
-        previous = states[obligation_id]
-        streak = previous.no_progress_streak
-        if (
-            effect is not None
-            and effect.input_completed
-            and effect.target_binding_valid
-            and effect.frame_comparable
-        ):
-            if effect.local_visual_change is LocalVisualChange.UNCHANGED:
-                streak += 1
-        states[obligation_id] = replace(previous, no_progress_streak=streak)
         updated = replace(
             projection,
             obligation_states=tuple(
@@ -648,7 +563,6 @@ def _apply_event(
             verified_claim_fingerprint=(
                 previous.claim_fingerprint or completion_id
             ),
-            no_progress_streak=0,
             last_reason="actor_completed",
         )
         return replace(
@@ -797,7 +711,6 @@ def _apply_event(
                         verification_id=verification_id,
                         verified_claim_fingerprint=previous.claim_fingerprint,
                         verification_attempt_count=attempt_count,
-                        no_progress_streak=0,
                         last_reason=_payload_text(payload, "verifier_kind", "verified"),
                     )
                     if item.id == obligation_id else item

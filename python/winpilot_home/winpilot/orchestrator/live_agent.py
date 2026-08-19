@@ -2280,7 +2280,6 @@ class _LiveAgentSession:
     def turn_snapshot(self) -> Mapping[str, Any]:
         projection = self._reducer.projection
         frame = self._authority.current
-        transition = projection.last_transition
         return {
             "mission_revision": projection.revision,
             "mission_status": projection.status.value,
@@ -2301,12 +2300,6 @@ class _LiveAgentSession:
                 for ref in self._registry.snapshot()
                 if frame is not None and ref.frame_id == frame.frame_id
             ],
-            "action_effect": (
-                None
-                if transition is None
-                or transition.action_effect is None
-                else transition.action_effect.to_dict()
-            ),
         }
 
     def close(self) -> None:

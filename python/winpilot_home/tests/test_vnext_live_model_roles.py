@@ -1265,18 +1265,12 @@ def test_press_key_model_tool_maps_to_existing_hotkey_runtime_action() -> None:
             semantic_summary="scroll",
             input_completed=True,
             visible_effect="",
-            local_visual_change="changed",
-            frame_comparable=True,
-            target_binding_valid=True,
         ),
         ActorPreviousActionView(
             action="click",
             semantic_summary="click",
             input_completed=True,
             visible_effect="",
-            local_visual_change="changed",
-            frame_comparable=True,
-            target_binding_valid=True,
         ),
     ),
 )

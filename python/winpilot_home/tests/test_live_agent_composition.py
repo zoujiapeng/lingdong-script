@@ -2157,7 +2157,6 @@ def test_public_turn_projection_omits_private_failure_feedback() -> None:
             "frame_id": 2,
             "frame_epoch": target.captured_at_ms,
             "frame_evidence_refs": [],
-            "action_effect": None,
             "failure_message": sentinel,
             "failure_summary": {"message": sentinel},
         },
@@ -2168,7 +2167,6 @@ def test_public_turn_projection_omits_private_failure_feedback() -> None:
     assert "failure_message" not in projected
     assert "failure_summary" not in projected
     assert "frame_evidence_refs" not in projected
-    assert "action_effect" not in projected
 
 
 def test_completion_projection_follows_current_workspace_target() -> None:

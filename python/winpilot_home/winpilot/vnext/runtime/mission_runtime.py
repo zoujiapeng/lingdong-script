@@ -656,15 +656,6 @@ class MissionRuntime:
                     "input_completed": True,
                     "visible_effect": transition.visible_effect,
                     "frame_id": transition.post_frame_id,
-                    **(
-                        {}
-                        if transition.action_effect is None
-                        else {
-                            "action_effect": (
-                                transition.action_effect.to_dict()
-                            )
-                        }
-                    ),
                 },
                 evidence_refs=event_refs,
                 base_revision=envelope.mission_revision,

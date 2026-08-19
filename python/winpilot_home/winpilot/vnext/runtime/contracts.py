@@ -24,7 +24,6 @@ from ..capabilities import (
 )
 from ..json_contract import BoundedJSONError, bounded_json_copy
 from ..mission import (
-    ActionEffectSummary,
     EvidenceRef,
     MissionCard,
     TargetBinding,
@@ -531,9 +530,6 @@ class ActorPreviousActionView:
     visible_effect: str
     semantic_summary: str | None = None
     local_intent: str | None = None
-    local_visual_change: str | None = None
-    frame_comparable: bool | None = None
-    target_binding_valid: bool | None = None
     error_kind: str | None = None
 
     def __post_init__(self) -> None:
@@ -573,21 +569,6 @@ class ActorPreviousActionView:
                 "local_intent",
                 _text(self.local_intent, "local_intent", allow_empty=True),
             )
-        if self.local_visual_change not in (
-            None,
-            "changed",
-            "unchanged",
-            "unknown",
-        ):
-            raise RuntimeContractError(
-                "previous action visual change is invalid"
-            )
-        for name in ("frame_comparable", "target_binding_valid"):
-            value = getattr(self, name)
-            if value is not None and type(value) is not bool:
-                raise RuntimeContractError(
-                    f"previous action {name} must be boolean or null"
-                )
         if self.error_kind is not None:
             object.__setattr__(
                 self,
@@ -602,9 +583,6 @@ class ActorPreviousActionView:
             "local_intent": self.local_intent,
             "input_completed": self.input_completed,
             "visible_effect": self.visible_effect,
-            "local_visual_change": self.local_visual_change,
-            "frame_comparable": self.frame_comparable,
-            "target_binding_valid": self.target_binding_valid,
         }
         if self.error_kind is not None:
             result["error_kind"] = self.error_kind
@@ -673,7 +651,6 @@ class ActorMissionView:
     verified_facts: tuple[str, ...] = ()
     failure_kind: str | None = None
     failure_message: str | None = None
-    no_progress_streak: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -709,14 +686,6 @@ class ActorMissionView:
                     allow_empty=True,
                 ),
             )
-        if (
-            type(self.no_progress_streak) is not int
-            or self.no_progress_streak < 0
-        ):
-            raise RuntimeContractError(
-                "no_progress_streak must be non-negative"
-            )
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "original_goal": self.original_goal,
@@ -730,7 +699,6 @@ class ActorMissionView:
                     "message": self.failure_message,
                 }
             ),
-            "no_progress_streak": self.no_progress_streak,
         }
 
 
@@ -939,12 +907,10 @@ def project_actor_turn_input(
             if card.failure_summary is None
             else card.failure_summary.message
         ),
-        no_progress_streak=card.no_progress_streak,
     )
     previous = None
     transition = card.last_transition
     if transition is not None:
-        effect = transition.action_effect
         previous = ActorPreviousActionView(
             action=transition.action,
             semantic_summary=_previous_action_summary(
@@ -954,17 +920,6 @@ def project_actor_turn_input(
             local_intent=previous_action_local_intent,
             input_completed=transition.input_completed,
             visible_effect=transition.visible_effect,
-            local_visual_change=(
-                None
-                if effect is None
-                else effect.local_visual_change.value
-            ),
-            frame_comparable=(
-                None if effect is None else effect.frame_comparable
-            ),
-            target_binding_valid=(
-                None if effect is None else effect.target_binding_valid
-            ),
             error_kind=transition.error_kind,
         )
     tools: list[ActorToolView] = []
@@ -1029,8 +984,6 @@ class ControllerTransition:
     visible_effect: str = ""
     post_frame_evidence: tuple[EvidenceRef, ...] = ()
     post_frame_id: int | None = None
-    action_effect: ActionEffectSummary | None = None
-    action_effect_evidence: EvidenceRef | None = None
     error_kind: str | None = None
     format: str = CONTROLLER_TRANSITION_FORMAT
 
@@ -1115,58 +1068,17 @@ class ControllerTransition:
             raise RuntimeContractError(
                 "post frame and evidence must be paired when present"
             )
-        if self.action_effect is not None:
-            if type(self.action_effect) is not ActionEffectSummary:
-                raise RuntimeContractError(
-                    "action_effect must be ActionEffectSummary"
-                )
-            if (
-                outcome is not ControllerOutcome.COMPLETED
-                or self.action_effect.action_id != self.action_id
-                or self.action_effect.after_frame_id != self.post_frame_id
-            ):
-                raise RuntimeContractError(
-                    "action effect does not bind the completed transition"
-                )
-            if (
-                type(self.action_effect_evidence) is not EvidenceRef
-                or self.action_effect_evidence.id
-                != self.action_effect.evidence_ref
-            ):
-                raise RuntimeContractError(
-                    "action effect requires its canonical EvidenceRef"
-                )
-        elif self.action_effect_evidence is not None:
-            raise RuntimeContractError(
-                "action_effect_evidence requires ActionEffectSummary"
-            )
-
     @property
     def post_frame_evidence_refs(self) -> tuple[str, ...]:
         return tuple(ref.id for ref in self.post_frame_evidence)
 
     @property
     def produced_evidence(self) -> tuple[EvidenceRef, ...]:
-        effect_ref = self.action_effect_evidence
-        return (
-            self.post_frame_evidence
-            if effect_ref is None
-            else (*self.post_frame_evidence, effect_ref)
-        )
+        return self.post_frame_evidence
 
     @property
     def event_evidence_refs(self) -> tuple[str, ...]:
-        refs = list(self.post_frame_evidence_refs)
-        effect = self.action_effect
-        if effect is not None:
-            refs.extend(
-                (
-                    effect.before_frame_evidence_ref,
-                    effect.after_frame_evidence_ref,
-                    effect.evidence_ref,
-                )
-            )
-        return tuple(dict.fromkeys(refs))
+        return self.post_frame_evidence_refs
 
     def to_dict(self) -> dict[str, Any]:
         """Return the exact reasoning-free Controller transition snapshot."""
@@ -1182,16 +1094,6 @@ class ControllerTransition:
                 ref.to_dict() for ref in self.post_frame_evidence
             ],
             "post_frame_id": self.post_frame_id,
-            "action_effect": (
-                None
-                if self.action_effect is None
-                else self.action_effect.to_dict()
-            ),
-            "action_effect_evidence": (
-                None
-                if self.action_effect_evidence is None
-                else self.action_effect_evidence.to_dict()
-            ),
             "error_kind": self.error_kind,
         }
 
