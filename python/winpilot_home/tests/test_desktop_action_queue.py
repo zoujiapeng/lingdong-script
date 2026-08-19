@@ -458,7 +458,6 @@ def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatc
         "_send_inputs",
         lambda inputs: calls.append(("send", tuple(inputs))),
     )
-    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", sleeps.append)
 
     result = executor._raw_click(
@@ -506,7 +505,6 @@ def test_public_raw_click_does_not_refocus_or_add_a_foreground_gate(monkeypatch)
         "_send_inputs",
         lambda inputs: calls.append(("send", tuple(inputs))),
     )
-    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
 
     result = executor._raw_click(

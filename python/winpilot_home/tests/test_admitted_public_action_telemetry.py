@@ -188,7 +188,6 @@ def strict_backend_environment(monkeypatch):
         "_send_inputs",
         lambda inputs: sent.append(tuple(inputs)),
     )
-    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(
         executor,
         "_should_type_via_vk",

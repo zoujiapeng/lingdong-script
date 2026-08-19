@@ -64,9 +64,6 @@ from .raw_device import (
 user32 = ctypes.windll.user32
 imm32 = ctypes.windll.imm32
 
-# ToolSession installs this callback only around a visible action. Sampling
-# after mouse-down makes short-lived pressed states part of action evidence.
-_press_probe_local = threading.local()
 _held_mouse_lock = threading.Lock()
 _held_mouse_buttons: set[str] = set()
 _held_mouse_key_vks: dict[str, tuple[int, ...]] = {}
@@ -90,44 +87,6 @@ def _stop_requested(value: StopSignal | None) -> bool:
         # physical input failure.
         return False
 
-
-def install_press_probe(callback: Callable[[], Any] | None) -> Callable[[], Any] | None:
-    previous = getattr(_press_probe_local, "callback", None)
-    _press_probe_local.callback = callback
-    return previous
-
-
-def restore_press_probe(previous: Callable[[], Any] | None) -> None:
-    _press_probe_local.callback = previous
-
-
-def _sample_pressed_state() -> bool:
-    callback = getattr(_press_probe_local, "callback", None)
-    if not callable(callback):
-        return False
-    try:
-        settle_ms = max(0, min(80, int(CONFIG.get("fusion", "press_probe_settle_ms", default=18))))
-        if settle_ms:
-            time.sleep(settle_ms / 1000.0)
-        try:
-            ctypes.windll.dwmapi.DwmFlush()
-        except (AttributeError, OSError):
-            pass
-        callback()
-        return True
-    except Exception:
-        logger.debug("pressed-state visual probe failed", exc_info=True)
-        return False
-
-
-def _settle_after_release() -> None:
-    settle_ms = max(0, min(80, int(CONFIG.get("fusion", "press_release_settle_ms", default=24))))
-    if settle_ms:
-        time.sleep(settle_ms / 1000.0)
-    try:
-        ctypes.windll.dwmapi.DwmFlush()
-    except (AttributeError, OSError):
-        pass
 
 # ---------------------------------------------------------------- SendInput
 _PUL = ctypes.POINTER(ctypes.c_ulong)
@@ -430,10 +389,6 @@ def _post_click(
                 error_kind="post_message_down_outcome_unknown",
             )
         try:
-            sampled = _sample_pressed_state()
-        except Exception:
-            sampled = False
-        try:
             win32gui.PostMessage(target, up, 0, lparam)
         except Exception:
             return _click_progress(
@@ -443,11 +398,6 @@ def _post_click(
                 error_kind="post_message_up_outcome_unknown",
             )
         completed_clicks += 1
-        if sampled:
-            try:
-                _settle_after_release()
-            except Exception:
-                logger.debug("post-click settle failed", exc_info=True)
         if index + 1 < count.value:
             try:
                 time.sleep(0.05)
@@ -879,12 +829,8 @@ def _raw_click(
                 cleanup=released if attempted else False,
                 held_after=held_after,
             )
-        try:
-            if press_duration_ms:
-                time.sleep(press_duration_ms / 1000.0)
-            sampled = _sample_pressed_state()
-        except Exception:
-            sampled = False
+        if press_duration_ms:
+            time.sleep(press_duration_ms / 1000.0)
         attempted, released, held_after = _best_effort_release_button(
             button,
             force=True,
@@ -897,11 +843,6 @@ def _raw_click(
                 held_after=held_after,
             )
         completed_clicks += 1
-        if sampled:
-            try:
-                _settle_after_release()
-            except Exception:
-                logger.debug("physical-click settle failed", exc_info=True)
         if index + 1 < count.value:
             try:
                 time.sleep(0.06)
@@ -3261,12 +3202,10 @@ def mouse_down(button: str = "left", hwnd: int | None = None) -> dict:
             "held_after": held_after,
             "error": "mouse-down outcome unknown",
         }
-    press_sampled = _sample_pressed_state()
     BUS.publish("action", action="mouse_down", button=typed_button.value)
     return {
         "ok": True,
         "button": typed_button.value,
-        "press_sampled": press_sampled,
     }
 
 

@@ -608,81 +608,82 @@ def test_relocate_text_falls_back_to_recorded_coords_when_no_window(monkeypatch)
     assert point == (1, 2)
 
 
-def _run_implicitly_verified_click(monkeypatch, frames):
-    r = trace_mod.Replayer()
-    r.hwnd = 123
-    remaining = iter(frames)
-    monkeypatch.setattr(r, "_capture_action_surface", lambda: next(remaining))
-    monkeypatch.setattr(
-        trace_mod.verify,
-        "run_with_verify",
-        lambda _name, action, **_kwargs: action(),
-    )
-    monkeypatch.setattr(
-        trace_mod.executor,
-        "click",
-        lambda *_args, **_kwargs: (
-            trace_mod.executor._sample_pressed_state() and {"ok": True}
-        ) or {"ok": True},
-    )
-    return r._run_step("1", {"tool": "click", "coords": [10, 20]})
-
-
-def test_click_without_expect_rejects_no_visible_change(monkeypatch):
-    still = np.zeros((100, 100, 3), dtype=np.uint8)
-    result = _run_implicitly_verified_click(monkeypatch, [still, still.copy(), still.copy()])
-
-    assert result["ok"] is True
-    assert result["verified"] is False
-    assert result["screen_change_ratio"] == 0
-    assert result["post_change_ratio"] == 0
-    assert result["press_sample_count"] == 1
-
-
-def test_click_without_expect_accepts_transient_pressed_state(monkeypatch):
-    before = np.zeros((100, 100, 3), dtype=np.uint8)
-    pressed = before.copy()
-    pressed[20:30, 20:30] = 255
-    after = before.copy()
-    result = _run_implicitly_verified_click(monkeypatch, [before, pressed, after])
-
-    assert result["verified"] is True
-    assert result["screen_delta_source"] == "press"
-    assert result["transient_observed"] is True
-    assert result["screen_change_ratio"] == 0.01
-    assert result["post_change_ratio"] == 0
-
-
-def test_demonstrated_click_can_delegate_outcome_to_final_evidence(monkeypatch):
+def test_click_without_expect_succeeds_without_pixel_change_probe(monkeypatch):
+    calls = []
     replay = trace_mod.Replayer()
     replay.hwnd = 123
     monkeypatch.setattr(
         replay,
         "_capture_action_surface",
-        lambda: (_ for _ in ()).throw(AssertionError("no per-click pixel proof")),
+        lambda: (_ for _ in ()).throw(AssertionError("click must not capture pixel proof")),
     )
+    monkeypatch.setattr(trace_mod.verify, "post_state_summary", lambda: {})
+    monkeypatch.setattr(
+        trace_mod.executor,
+        "click",
+        lambda *_args, **_kwargs: calls.append(1) or {"ok": True},
+    )
+
+    result = replay._run_step("1", {"tool": "click", "coords": [10, 20]})
+
+    assert calls == [1]
+    assert result["ok"] is True
+    assert result["attempts"] == 1
+    assert "verified" not in result
+
+
+def test_click_failed_expect_does_not_repeat_physical_action(monkeypatch):
+    calls = []
+    replay = trace_mod.Replayer()
+    replay.hwnd = 123
+    monkeypatch.setattr(trace_mod.verify, "post_state_summary", lambda: {})
     monkeypatch.setattr(
         trace_mod.verify,
-        "run_with_verify",
-        lambda _name, action, **_kwargs: action(),
+        "check",
+        lambda *_args, **_kwargs: trace_mod.verify.VerifyOutcome(False, "not found", "uia"),
     )
     monkeypatch.setattr(
         trace_mod.executor,
         "click",
-        lambda *_args, **_kwargs: {"ok": True, "physical_attempt": True},
+        lambda *_args, **_kwargs: calls.append(1) or {"ok": True},
     )
 
     result = replay._run_step("1", {
         "tool": "click",
         "coords": [10, 20],
-        "allow_no_change": True,
+        "expect": {"text_appears": "Never"},
     })
 
-    assert result == {
-        "ok": True,
-        "physical_attempt": True,
-        "resolved": {"source": "recorded_coords", "point": [10, 20]},
-    }
+    assert calls == [1]
+    assert result["attempts"] == 1
+    assert result["verified"] is False
+
+
+def test_draw_failed_expect_does_not_repeat_physical_action(monkeypatch):
+    calls = []
+    replay = trace_mod.Replayer()
+    replay.hwnd = 123
+    monkeypatch.setattr(trace_mod.verify, "post_state_summary", lambda: {})
+    monkeypatch.setattr(
+        trace_mod.verify,
+        "check",
+        lambda *_args, **_kwargs: trace_mod.verify.VerifyOutcome(False, "not found", "uia"),
+    )
+    monkeypatch.setattr(
+        trace_mod.executor,
+        "draw_strokes",
+        lambda *_args, **_kwargs: calls.append(1) or {"ok": True},
+    )
+
+    result = replay._run_step("1", {
+        "tool": "draw_strokes",
+        "strokes": [[[1, 2], [3, 4]]],
+        "expect": {"text_appears": "Never"},
+    })
+
+    assert calls == [1]
+    assert result["attempts"] == 1
+    assert result["verified"] is False
 
 
 def test_replayer_preflight_binds_declared_target_window(tmp_path, monkeypatch):

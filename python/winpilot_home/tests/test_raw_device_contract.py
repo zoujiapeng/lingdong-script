@@ -1096,7 +1096,6 @@ def _physical_executor_mocks(monkeypatch, events):
         "_send_inputs",
         lambda inputs: events.append(("input", tuple(inputs))),
     )
-    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
     return executor
 
@@ -2503,7 +2502,6 @@ def test_post_click_partial_failure_is_unknown_and_releases(
         executor.win32gui, "ScreenToClient", lambda target, point: point,
     )
     monkeypatch.setattr(executor.win32gui, "PostMessage", post_message)
-    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
 
     result = executor._post_click(
@@ -2541,7 +2539,6 @@ def test_physical_click_partial_failure_is_unknown_and_releases(
         lambda x, y: ("absolute", x, y),
     )
     monkeypatch.setattr(executor, "_send_inputs", send_inputs)
-    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
 
     result = executor._raw_click(
@@ -2577,7 +2574,6 @@ def test_click_release_failure_remains_owned_until_session_cleanup(
         "_absolute_mouse_input",
         lambda x, y: ("absolute", x, y),
     )
-    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
     with executor._held_mouse_lock:
         executor._held_mouse_buttons.discard("left")
@@ -2624,7 +2620,6 @@ def test_physical_click_uses_final_root_ownership_not_focus_helper_result(
         lambda x, y: ("absolute", x, y),
     )
     monkeypatch.setattr(executor, "_send_inputs", sent.append)
-    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
 
     result = executor._raw_click(

@@ -3293,7 +3293,6 @@ class Replayer:
                         "visual_servo": servo_trace,
                     }
             x, y = point
-            implicit_verify = not expect and not bool(step.get("allow_no_change"))
             needs_learning = bool(
                 self.anchor_profile
                 and self._last_relocation.get("source") != "anchor_cache"
@@ -3304,61 +3303,17 @@ class Replayer:
                     surface = window_region(int(self.hwnd))
                 except Exception:
                     surface = None
-            before = self._capture_action_surface() if implicit_verify or needs_learning else None
-            press_frames: list[Any] = []
-
-            def capture_pressed_state() -> None:
-                frame = self._capture_action_surface()
-                if frame is not None:
-                    press_frames.append(frame)
-
-            previous_probe = None
-            probe_installed = False
-            if before is not None and implicit_verify:
-                install_probe = getattr(executor, "install_press_probe", None)
-                if callable(install_probe):
-                    previous_probe = install_probe(capture_pressed_state)
-                    probe_installed = True
-            try:
-                result = verify.run_with_verify(
-                    "click",
-                    lambda: executor.click(x, y, button=step.get("button", "left"),
-                                           double=bool(step.get("double")), hwnd=self.hwnd,
-                                           prepositioned=bool(servo_trace)),
-                    expect=expect, hwnd=self.hwnd, stop_event=self.stop_event)
-            finally:
-                if probe_installed:
-                    restore_probe = getattr(executor, "restore_press_probe", None)
-                    if callable(restore_probe):
-                        restore_probe(previous_probe)
+            before = self._capture_action_surface() if needs_learning else None
+            result = verify.run_with_verify(
+                "click",
+                lambda: executor.click(x, y, button=step.get("button", "left"),
+                                       double=bool(step.get("double")), hwnd=self.hwnd,
+                                       prepositioned=bool(servo_trace)),
+                expect=expect, hwnd=self.hwnd, stop_event=self.stop_event)
 
             result["resolved"] = dict(self._last_relocation)
             if servo_trace is not None:
                 result["visual_servo"] = servo_trace
-            if implicit_verify and result.get("ok"):
-                after = self._capture_action_surface()
-                post_ratio = self._screen_change_ratio(before, after)
-                candidates = [("after", post_ratio)]
-                candidates.extend(
-                    ("press", self._screen_change_ratio(before, frame))
-                    for frame in press_frames
-                )
-                delta_source, ratio = max(candidates, key=lambda item: item[1])
-                changed = ratio >= 0.00005
-                result.update({
-                    "verified": changed,
-                    "verify_method": "screen-delta",
-                    "verify_detail": (
-                        f"visible change observed ({delta_source}, ratio={ratio:.6f})"
-                        if changed
-                        else "click produced no visible change; set allow_no_change=true only when intentional"
-                    ),
-                    "screen_change_ratio": ratio,
-                    "post_change_ratio": post_ratio,
-                    "screen_delta_source": delta_source,
-                    "press_sample_count": len(press_frames),
-                    "transient_observed": bool(changed and delta_source == "press"),
-                })
             if (
                 result.get("ok")
                 and result.get("verified", True) is not False
@@ -3702,9 +3657,7 @@ class Replayer:
     def _emit_step(self, idx: str, tool: str, ok: bool, result: dict) -> None:
         detail_keys = (
             "error", "verify_detail", "verify_method", "verified", "attempts",
-            "timeout", "stopped", "hint", "resolved", "screen_change_ratio",
-            "post_change_ratio", "screen_delta_source", "press_sample_count",
-            "transient_observed", "launch_settle",
+            "timeout", "stopped", "hint", "resolved", "launch_settle",
         )
         BUS.publish("replay", state="step", index=idx, tool=tool, ok=ok,
                     detail={k: v for k, v in result.items()
