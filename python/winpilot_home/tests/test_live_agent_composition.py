@@ -3913,8 +3913,6 @@ def test_flow_fragment_resources_keep_local_budget_without_run_telemetry() -> No
     }
     raw_client = _RawClient(response)
     config = _config()
-    budget = live_agent._freeze_budget(config)
-    model = live_agent._freeze_model(config, budget)
     dependencies = live_agent._CompositionDependencies(
         monotonic=lambda: 10.0,
         client_factory=lambda **_kwargs: raw_client,
@@ -3922,33 +3920,29 @@ def test_flow_fragment_resources_keep_local_budget_without_run_telemetry() -> No
     events: list[dict[str, Any]] = []
     sink = events.append
     BUS.add_sink(sink)
-    bundle = None
     try:
-        bundle = live_agent._build_actor_resources(
-            run_id="flow-fragment-test",
-            mission_id="flow-fragment-proposal-test",
-            budget=budget,
-            model=model,
-            dependencies=dependencies,
-            deadline=lambda: 200.0,
-            publish_run_telemetry=False,
-            role_factory=live_agent.FlowFragmentProposer,
-        )
-        fragment = bundle.actor.propose_flow_fragment(
-            {"request": "click"},
-            catalog_ports={"click": ("output",)},
-            catalog_params={"click": frozenset({"x", "y"})},
+        fragment = live_agent.propose_live_flow_fragment(
+            "click",
+            document={"node_count": 2, "edge_count": 1, "node_types": ["start", "end"]},
+            catalog=[{
+                "type": "click",
+                "label": "Click",
+                "params": {"x": 0, "y": 0},
+                "output_ports": ["output"],
+            }],
+            config_snapshot=config,
+            _dependencies=dependencies,
         )
     finally:
-        if bundle is not None:
-            bundle.close()
         BUS.remove_sink(sink)
 
     assert fragment["nodes"][0]["params"] == {"x": 10, "y": 20}
-    assert bundle is not None
-    assert bundle.counter.count == 1
-    assert bundle.usage_total["prompt_tokens"] == 7
-    assert bundle.usage_total["completion_tokens"] == 3
+    assert fragment["proposal_usage"]["model_calls"] == 1
+    assert fragment["proposal_usage"]["tokens"]["prompt_tokens"] == 7
+    assert fragment["proposal_usage"]["tokens"]["completion_tokens"] == 3
+    assert set(fragment) == {
+        "format", "proposal_usage", "summary", "nodes", "edges"
+    }
     assert not {
         event.get("type") for event in events
     } & {"vnext_model_call", "agent_usage"}
