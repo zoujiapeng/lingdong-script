@@ -898,13 +898,13 @@ class ArpExecution:
             self.status = ArpRunStatus.CANCELED if self.stop_event.is_set() else ArpRunStatus.FAILED
             self.error = str(exc)
         finally:
-            action_batch_session = self.runtime_state.pop("action_batch_session", None)
-            close_action_batch_session = getattr(action_batch_session, "close", None)
-            if callable(close_action_batch_session):
+            action_batch_controller = self.runtime_state.pop("action_batch_controller", None)
+            close_action_batch_controller = getattr(action_batch_controller, "close", None)
+            if callable(close_action_batch_controller):
                 try:
-                    close_action_batch_session()
+                    close_action_batch_controller()
                 except Exception:
-                    logger.debug("action batch session cleanup failed", exc_info=True)
+                    logger.debug("action batch controller cleanup failed", exc_info=True)
             adapter = self.runtime_state.get("communication_adapter")
             close_adapter = getattr(adapter, "close", None)
             if callable(close_adapter):

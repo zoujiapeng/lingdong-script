@@ -437,38 +437,34 @@ def test_managed_screenshot_action_batch_surfaces_run_artifact(monkeypatch, tmp_
     assert result["evidence"][0]["metadata"]["region"] == artifact["metadata"]["region"]
 
 
-def test_action_batches_share_target_session_until_run_cleanup(monkeypatch):
-    import json
-    from types import SimpleNamespace
-
+def test_action_batches_share_target_controller_until_run_cleanup(monkeypatch):
     from winpilot.orchestrator import adapters
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
     from winpilot.orchestrator.runtime import ArpExecution
 
-    sessions = []
+    controllers = []
 
-    class FakeToolSession:
+    class FakeFastGuiController:
         def __init__(self, **_kwargs):
             self.hwnd = None
             self.closed = 0
             self.calls = []
-            sessions.append(self)
+            controllers.append(self)
 
-        def dispatch(self, name, args):
-            assert name == "run_action_batch"
+        def execute(self, actions, **_kwargs):
             assert self.closed == 0
-            action = args["actions"][0]
+            action = actions[0]
             self.calls.append(action["action"])
             if action["action"] == "focus_window":
                 self.hwnd = 4242
             elif action["action"] == "click":
                 assert self.hwnd == 4242
-            return SimpleNamespace(text=json.dumps({"ok": True, "verified": True}))
+            return {"ok": True, "failed_at": None, "results": []}
 
         def close(self):
             self.closed += 1
 
-    monkeypatch.setattr(adapters, "ToolSession", FakeToolSession)
+    monkeypatch.setattr(adapters, "FastGuiController", FakeFastGuiController)
     graph = _graph(
         [
             ArpNode(id="start", kind=ArpNodeKind.START),
@@ -495,31 +491,31 @@ def test_action_batches_share_target_session_until_run_cleanup(monkeypatch):
     result = execution.run()
 
     assert result["status"] == "done"
-    assert len(sessions) == 1
-    assert sessions[0].calls == ["focus_window", "click"]
-    assert sessions[0].closed == 1
-    assert "action_batch_session" not in execution.runtime_state
+    assert len(controllers) == 1
+    assert controllers[0].calls == ["focus_window", "click"]
+    assert controllers[0].closed == 1
+    assert "action_batch_controller" not in execution.runtime_state
 
 
-def test_action_batch_session_cleanup_runs_after_dispatch_exception(monkeypatch):
+def test_action_batch_controller_cleanup_runs_after_execute_exception(monkeypatch):
     from winpilot.orchestrator import adapters
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
     from winpilot.orchestrator.runtime import ArpExecution
 
-    sessions = []
+    controllers = []
 
-    class FailingToolSession:
+    class FailingFastGuiController:
         def __init__(self, **_kwargs):
             self.closed = 0
-            sessions.append(self)
+            controllers.append(self)
 
-        def dispatch(self, _name, _args):
+        def execute(self, _actions, **_kwargs):
             raise RuntimeError("controller failed")
 
         def close(self):
             self.closed += 1
 
-    monkeypatch.setattr(adapters, "ToolSession", FailingToolSession)
+    monkeypatch.setattr(adapters, "FastGuiController", FailingFastGuiController)
     graph = _graph(
         [
             ArpNode(id="start", kind=ArpNodeKind.START),
@@ -541,9 +537,66 @@ def test_action_batch_session_cleanup_runs_after_dispatch_exception(monkeypatch)
 
     assert result["status"] == "failed"
     assert result["error"] == "controller failed"
-    assert len(sessions) == 1
-    assert sessions[0].closed == 1
-    assert "action_batch_session" not in execution.runtime_state
+    assert len(controllers) == 1
+    assert controllers[0].closed == 1
+    assert "action_batch_controller" not in execution.runtime_state
+
+
+def test_action_batch_adapter_imports_and_runs_when_agent_imports_are_blocked():
+    from pathlib import Path
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent("""
+        import importlib.abc
+        import threading
+        import sys
+
+        class BlockAgent(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "winpilot.agent" or fullname.startswith("winpilot.agent."):
+                    raise ImportError(f"blocked legacy import: {fullname}")
+                return None
+
+        sys.meta_path.insert(0, BlockAgent())
+        from winpilot.orchestrator import adapters
+        from winpilot.orchestrator.contracts import ArpNode, ArpNodeKind
+
+        class Controller:
+            def __init__(self, **kwargs):
+                self.run_id = kwargs.get("run_id", "")
+                self.stop_event = kwargs.get("stop_event")
+                self.task = kwargs.get("task", "")
+                self.artifact_store = None
+                self.evidence_registry = None
+
+            def execute(self, actions, **kwargs):
+                assert actions == [{"action": "wait", "duration_ms": 0}]
+                return {"ok": True, "failed_at": None, "results": []}
+
+        adapters.FastGuiController = Controller
+        result = adapters._batch_handler(
+            ArpNode(
+                id="batch",
+                kind=ArpNodeKind.ACTION_BATCH,
+                config={"actions": [{"action": "wait", "duration_ms": 0}]},
+            ),
+            {"run_id": "blocked-agent", "runtime_state": {}},
+            threading.Event(),
+        )
+        assert result.ok is True
+        assert not any(name == "winpilot.agent" or name.startswith("winpilot.agent.") for name in sys.modules)
+    """)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_replay_step_ignores_removed_policy_and_verification_fields(tmp_path):

@@ -33,7 +33,6 @@ from winpilot.action.raw_device import (
     RawDeviceExecutor,
 )
 from winpilot.action.replay_policy import MutationOutcome
-from winpilot.fast.legacy_session_actions import LegacyToolSessionActionAdapter
 
 
 def _context(*, target: int = 41, current: int = 41) -> RawActionContext:
@@ -48,17 +47,18 @@ def _executor(calls: list, *, completed: bool | None = True) -> RawDeviceExecuto
     return RawDeviceExecutor(RawDeviceBackends(scroll=backend))
 
 
-def test_fast_controller_names_reflective_session_adapter_as_legacy() -> None:
+def test_fast_controller_owns_a_typed_raw_device_without_session_reflection() -> None:
     from winpilot.fast.controller import FastGuiController
 
-    class Session:
-        snapshot = None
-        hwnd = 41
-
-    assert isinstance(
-        FastGuiController(Session()).raw_device,
-        LegacyToolSessionActionAdapter,
-    )
+    controller = FastGuiController()
+    try:
+        assert isinstance(controller.raw_device, RawDeviceExecutor)
+        assert set(controller.raw_device.admitted_action_names) == {
+            "click", "drag", "hotkey", "input_sequence",
+            "move_mouse", "scroll", "type_text",
+        }
+    finally:
+        controller.close()
 
 
 def test_raw_device_requires_an_explicit_typed_backend() -> None:

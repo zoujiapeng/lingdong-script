@@ -1,20 +1,20 @@
 """Adapters from ARP node kinds to the existing WinPilot runtimes."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from ..agent.runtime_profile import build_runtime_profile
-from ..agent.tools import ToolSession
 from ..config import SCRIPTS_DIR
+from ..fast.controller import FastGuiController
 from ..memory import experience
 from ..recorder import trace as trace_mod
+from ..tasking.artifacts import ArtifactStore
+from ..tasking.evidence import EvidenceRegistry
 from ..utils.log import BUS
 from .contracts import ArpNode, ArpNodeKind
 from .runtime import NodeHandler, NodeResult
 
-_ACTION_BATCH_SESSION_KEY = "action_batch_session"
+_ACTION_BATCH_CONTROLLER_KEY = "action_batch_controller"
 
 
 def _publish_anchor_metrics(result: dict[str, Any], context: dict[str, Any], node: ArpNode) -> None:
@@ -29,14 +29,6 @@ def _publish_anchor_metrics(result: dict[str, Any], context: dict[str, Any], nod
     )
 
 
-def _json_result(text: str) -> dict[str, Any]:
-    try:
-        value = json.loads(text or "{}")
-    except (TypeError, json.JSONDecodeError):
-        return {"ok": False, "text": text}
-    return value if isinstance(value, dict) else {"ok": False, "value": value}
-
-
 def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
     actions = node.config.get("actions")
     if not isinstance(actions, list) or not actions:
@@ -45,19 +37,6 @@ def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
     runtime_state = context.get("runtime_state")
     if not isinstance(runtime_state, dict):
         return NodeResult(ok=False, error="action_batch requires an ARP runtime session")
-    session = runtime_state.get(_ACTION_BATCH_SESSION_KEY)
-    if session is None:
-        session = ToolSession(
-            stop_event=stop_event,
-            task=task,
-            runtime_profile=build_runtime_profile(task),
-        )
-        runtime_state[_ACTION_BATCH_SESSION_KEY] = session
-    else:
-        # A node timeout wraps the run stop event with a node-local event. Keep
-        # the run-scoped session, but use the current node's cancellation view.
-        session.stop_event = stop_event
-    session.run_id = context["run_id"]
     managed_screenshot = any(
         isinstance(action, dict)
         and action.get("action") == "screenshot"
@@ -65,27 +44,42 @@ def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
         for action in actions
     )
     if managed_screenshot:
-        if runtime_state.get("artifact_store") is not None:
-            session.managed_artifact_store = runtime_state["artifact_store"]
-        if runtime_state.get("evidence_registry") is not None:
-            session.evidence_registry = runtime_state["evidence_registry"]
         try:
-            store, registry = session._managed_artifacts()
+            store = runtime_state.get("artifact_store")
+            if not isinstance(store, ArtifactStore):
+                store = ArtifactStore(context["run_id"])
+            registry = runtime_state.get("evidence_registry")
+            if not isinstance(registry, EvidenceRegistry):
+                registry = EvidenceRegistry(context["run_id"])
         except Exception as exc:
             return NodeResult(ok=False, error=f"managed screenshot store failed: {exc}")
         runtime_state["artifact_store"] = store
         runtime_state["evidence_registry"] = registry
-    result = session.dispatch(
-        "run_action_batch",
-        {
-            "actions": actions,
-            "subgoal": task,
-            "stop_on_error": bool(node.config.get("stop_on_error", True)),
-            **({"sync": node.config["sync"]} if "sync" in node.config else {}),
-        },
+    controller = runtime_state.get(_ACTION_BATCH_CONTROLLER_KEY)
+    if not isinstance(controller, FastGuiController):
+        controller = FastGuiController(
+            run_id=context["run_id"],
+            stop_event=stop_event,
+            task=task,
+            artifact_store=runtime_state.get("artifact_store"),
+            evidence_registry=runtime_state.get("evidence_registry"),
+        )
+        runtime_state[_ACTION_BATCH_CONTROLLER_KEY] = controller
+    else:
+        # Node timeouts wrap the run event.  The controller stays run-scoped,
+        # while each node supplies its current cancellation view.
+        controller.run_id = context["run_id"]
+        controller.stop_event = stop_event
+        controller.task = task
+        controller.artifact_store = runtime_state.get("artifact_store")
+        controller.evidence_registry = runtime_state.get("evidence_registry")
+    data = controller.execute(
+        actions,
+        subgoal=task,
+        stop_on_error=bool(node.config.get("stop_on_error", True)),
+        **({"sync": node.config["sync"]} if "sync" in node.config else {}),
     )
-    data = _json_result(result.text)
-    ok = bool(data.get("ok")) and not data.get("failed_at")
+    ok = bool(data.get("ok")) and data.get("failed_at") is None
     verified = bool(data.get("verified")) or bool(
         isinstance(data.get("controller_state"), dict)
         and data["controller_state"].get("verified")
@@ -124,7 +118,7 @@ def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
         branch="next" if ok else "fail",
         output=data,
         evidence=evidence,
-        error="" if ok else str(data.get("error") or result.text),
+        error="" if ok else str(data.get("error") or "action batch failed"),
     )
 
 
