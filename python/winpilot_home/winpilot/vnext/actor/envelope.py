@@ -210,7 +210,6 @@ class ActorDecisionEnvelope(BaseModel):
     target_binding_id: str
     pointer_disposition: Literal["released", "held"]
     pointer_lease_id: str | None
-    allowed_evidence_scope: tuple[str, ...]
     proposal: ActorProposal
 
     @field_validator(
@@ -223,11 +222,6 @@ class ActorDecisionEnvelope(BaseModel):
     @classmethod
     def _required_identity(cls, value: Any, info: Any) -> str:
         return _identity(value, info.field_name)
-
-    @field_validator("allowed_evidence_scope", mode="before")
-    @classmethod
-    def _evidence_ids(cls, value: Any) -> tuple[str, ...]:
-        return _identities(value, "allowed_evidence_scope")
 
     @field_validator("frame_image_sha256")
     @classmethod
@@ -360,7 +354,6 @@ def bind_actor_decision(
     frame_region: tuple[int, int, int, int],
     submitted_image_size: tuple[int, int],
     frame_image_sha256: str,
-    allowed_evidence_scope: tuple[str, ...] = (),
 ) -> ActorDecisionEnvelope:
     """Attach current mission/frame/pointer identity to one parsed proposal.
 
@@ -387,10 +380,6 @@ def bind_actor_decision(
         image_sha = _sha256(
             frame_image_sha256, "frame_image_sha256"
         )
-        evidence_scope = _identities(
-            allowed_evidence_scope, "allowed_evidence_scope"
-        )
-
         active_id = mission.active_obligation_id
         if mission.status is not MissionStatus.RUNNING or active_id is None:
             raise ValueError("Mission is not actionable")
@@ -414,7 +403,6 @@ def bind_actor_decision(
             "target_binding_id": target.binding_id,
             "pointer_disposition": pointer.disposition.value,
             "pointer_lease_id": pointer.lease_id,
-            "allowed_evidence_scope": list(evidence_scope),
             "proposal": canonical_proposal,
         }
         decision_material = {

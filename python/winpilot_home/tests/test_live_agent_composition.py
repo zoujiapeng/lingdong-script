@@ -48,9 +48,7 @@ from winpilot.vnext.actor import InvalidActorProposal, parse_actor_proposal
 from winpilot.vnext.capabilities import (
     ExecutionMedium,
 )
-from winpilot.vnext.evidence import EvidenceRegistry
 from winpilot.vnext.mission import (
-    EvidenceRef,
     MissionDefinition,
     MissionReducer,
     MissionStatus,
@@ -62,11 +60,6 @@ from winpilot.vnext.mission import contracts as mission_contracts
 from winpilot.vnext.runtime import (
     MissionRuntimeResult,
     RuntimeStatus,
-)
-from winpilot.vnext.runtime import (
-    CURRENT_FRAME_EVIDENCE_KIND,
-    POST_ACTION_FRAME_EVIDENCE_KIND,
-    RuntimeFrameIdentity,
 )
 
 
@@ -2444,7 +2437,7 @@ def test_completion_snapshot_metadata_cannot_overturn_runtime_completion(
     assert execution.runtime_state["user_result"] == expected_result
 
 
-def test_pause_state_is_independent_of_frame_evidence_kind() -> None:
+def test_pause_state_is_independent_of_frame_updates() -> None:
     mission_id = "vnext-mission-pause-test"
     run_id = "arp-pause-test"
     definition = MissionDefinition(
@@ -2460,32 +2453,19 @@ def test_pause_state_is_independent_of_frame_evidence_kind() -> None:
             ),
         ),
     )
-    registry = EvidenceRegistry(mission_id, run_id)
-    reducer = MissionReducer(definition, evidence=registry)
-    target_ref = EvidenceRef(
-        id="e-target-pause",
-        mission_id=mission_id,
-        run_id=run_id,
-        obligation_id="full-goal",
-        kind="target_binding",
-        trust="deterministic",
-        payload_hash="target-pause-payload",
-    )
+    reducer = MissionReducer(definition)
     binding = TargetBinding(
         binding_id="binding-pause",
         hwnd=HWND,
         process_id=PID,
         executable_identity=r"c:\apps\live_agent.exe",
         title_snapshot="Canary Target",
-        established_by_evidence_ref=target_ref.id,
         epoch=7,
     )
-    registry.append(target_ref)
     reducer.apply(
         reducer.event(
             "target_bound",
             payload={"target_binding": binding.to_dict()},
-            evidence_refs=(target_ref.id,),
         )
     )
     authority = FrameAuthority()
@@ -2501,36 +2481,10 @@ def test_pause_state_is_independent_of_frame_evidence_kind() -> None:
         expected_previous_frame_id=0,
     )
 
-    def frame_ref(state: Any, kind: str, evidence_id: str) -> EvidenceRef:
-        identity = RuntimeFrameIdentity(
-            frame_id=state.frame_id,
-            epoch=state.epoch,
-            hwnd=state.hwnd,
-            region=state.region,
-            scope=state.scope,
-            submitted_size=state.submitted_size,
-            image_sha256=state.image_sha256,
-        )
-        return EvidenceRef(
-            id=evidence_id,
-            mission_id=mission_id,
-            run_id=run_id,
-            obligation_id="full-goal",
-            kind=kind,
-            trust="deterministic",
-            payload_hash=identity.payload_hash,
-            frame_id=state.frame_id,
-        )
-
-    registry.append(
-        frame_ref(first, CURRENT_FRAME_EVIDENCE_KIND, "e-current-pause")
-    )
     pause = type("_Pause", (), {"paused": True})()
     state = live_agent._LiveRuntimeState(
         reducer=reducer,
-        registry=registry,
         binding=binding,
-        target_evidence=target_ref,
         target_probe=live_agent._BoundTargetProbe(
             _facts(),
             reader=lambda _hwnd: _facts(),
@@ -2558,14 +2512,6 @@ def test_pause_state_is_independent_of_frame_evidence_kind() -> None:
         captured_at=2.0,
         expected_previous_frame_id=first.frame_id,
     )
-    registry.append(
-        frame_ref(
-            second,
-            POST_ACTION_FRAME_EVIDENCE_KIND,
-            "e-post-pause",
-        )
-    )
-
     assert state.current(reducer.projection, turn_index=0).broker_state.paused is True
 
 
@@ -2962,7 +2908,6 @@ def test_fresh_observation_is_auditable_without_pixel_data(
         "frame_scope",
         "authoritative",
         "fresh",
-        "evidence_refs",
         "parameter_visibility",
     }
     assert observation["execution_medium"] == "control"
@@ -2976,7 +2921,7 @@ def test_fresh_observation_is_auditable_without_pixel_data(
     assert observation["frame_scope"] == "full_desktop"
     assert observation["authoritative"] is True
     assert observation["fresh"] is True
-    assert len(observation["evidence_refs"]) == 1
+    assert "evidence_refs" not in observation
     assert (
         observation["parameter_visibility"]
         == "private_runtime_evidence"
@@ -2993,7 +2938,7 @@ def test_fresh_observation_is_auditable_without_pixel_data(
         if item["type"] == "vnext_gui_observation"
     ]
     assert len(traced) == 1
-    assert traced[0]["evidence_refs"] == observation["evidence_refs"]
+    assert "evidence_refs" not in traced[0]
     _assert_private_runtime_evidence_absent(
         {"bus": observation, "trace": traced}
     )
@@ -3651,12 +3596,7 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
         if item["type"] == "vnext_gui_observation"
     ]
     assert [item["target_hwnd"] for item in observations] == [HWND, HWND]
-    target_evidence = [
-        item
-        for item in session._registry.snapshot()
-        if item.kind == "target_binding"
-    ]
-    assert len(target_evidence) == 1
+    assert not hasattr(session, "_registry")
 
 
 def test_initial_full_desktop_capture_dimension_mismatch_stops_before_model_or_raw(
@@ -3918,26 +3858,26 @@ def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
             if self.fail:
                 raise RuntimeError(f"{self.name} unavailable")
 
-    registry = CloseResource("registry", fail=True)
+    controller = CloseResource("controller", fail=True)
     actor_client = _RawClient(close_error="actor close unavailable")
     session = live_agent._LiveAgentSession(
         runtime=object(),
         reducer=object(),
-        registry=registry,
         authority=FrameAuthority(),
         binding=object(),
         counter=object(),
         client=actor_client,
+        controller=controller,
     )
 
     with pytest.raises(ExceptionGroup) as caught:
         session.close()
 
-    assert registry.calls == 1
+    assert controller.calls == 1
     assert actor_client.closed is True
     messages = [str(error) for error in caught.value.exceptions]
     assert len(messages) == 2
-    assert any("evidence registry" in message for message in messages)
+    assert any("controller unavailable" in message for message in messages)
     assert any("Visual Actor client" in message for message in messages)
 
 

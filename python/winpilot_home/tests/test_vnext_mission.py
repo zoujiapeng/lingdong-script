@@ -53,14 +53,13 @@ def _proof(
     )
 
 
-def _target(proof_id: str = "target-proof") -> TargetBinding:
+def _target() -> TargetBinding:
     return TargetBinding(
         binding_id="target-1",
         hwnd=101,
         process_id=202,
         executable_identity="notepad.exe",
         title_snapshot="Untitled - Notepad",
-        established_by_evidence_ref=proof_id,
         epoch=0,
     )
 
@@ -87,34 +86,18 @@ def test_reducer_activates_the_first_ready_obligation() -> None:
     )
 
 
-def test_target_bound_requires_run_scoped_evidence() -> None:
-    proof = _proof()
-    reducer = MissionReducer(_definition(), evidence=(proof,))
+def test_target_bound_uses_direct_target_identity() -> None:
+    reducer = MissionReducer(_definition())
     event = reducer.event(
         "target_bound",
         payload={"target_binding": _target().to_dict()},
-        evidence_refs=(proof.id,),
     )
 
     projection = reducer.apply(event)
 
     assert projection.target_binding == _target()
-    assert projection.evidence_refs == {proof.id: proof}
+    assert projection.evidence_refs == {}
     assert projection.revision == 1
-
-
-def test_target_bound_rejects_foreign_evidence() -> None:
-    foreign = replace(_proof(), mission_id="another-mission")
-    reducer = MissionReducer(_definition(), evidence=(foreign,))
-
-    with pytest.raises(Exception):
-        reducer.apply(
-            reducer.event(
-                "target_bound",
-                payload={"target_binding": _target().to_dict()},
-                evidence_refs=(foreign.id,),
-            )
-        )
 
 
 def test_transition_recorded_keeps_mechanical_feedback() -> None:

@@ -99,7 +99,6 @@ def _target() -> TargetBinding:
         process_id=7,
         executable_identity="notepad.exe",
         title_snapshot="Notepad",
-        established_by_evidence_ref="evidence-1",
         epoch=0,
     )
 

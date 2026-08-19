@@ -42,7 +42,6 @@ from winpilot.vnext.json_contract import (
 )
 from winpilot.vnext.mission import (
     ArtifactRef,
-    EvidenceRef,
     MissionDefinition,
     MissionReducer,
     MissionStatus,
@@ -258,21 +257,7 @@ def _mission(capability: str = "visual.interact", *, bound: bool = True):
             ),
         ),
     )
-    evidence = ()
-    if bound:
-        evidence = (
-            EvidenceRef(
-                id="e-target",
-                mission_id="m1",
-                run_id="r1",
-                kind="target",
-                trust="deterministic",
-                obligation_id="o1",
-                payload_hash="target-payload-hash",
-                frame_id=9,
-            ),
-        )
-    reducer = MissionReducer(definition, evidence=evidence)
+    reducer = MissionReducer(definition)
     if bound:
         reducer.apply(
             reducer.event(
@@ -284,11 +269,9 @@ def _mission(capability: str = "visual.interact", *, bound: bool = True):
                         process_id=7,
                         executable_identity="opaque-process-identity",
                         title_snapshot="",
-                        established_by_evidence_ref="e-target",
                         epoch=3,
                     ).to_dict(),
                 },
-                evidence_refs=("e-target",),
             )
         )
     return reducer.projection

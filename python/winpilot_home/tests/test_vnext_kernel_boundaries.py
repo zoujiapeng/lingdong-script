@@ -27,7 +27,6 @@ LIVE_COMPOSITION_VNEXT_MODULES = (
     "winpilot.vnext.capabilities",
     "winpilot.vnext.desktop_adapter",
     "winpilot.vnext.desktop_ops",
-    "winpilot.vnext.evidence",
     "winpilot.vnext.mission",
     "winpilot.vnext.model_roles",
     "winpilot.vnext.profiling",
@@ -50,7 +49,6 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.desktop_adapter", "WorkspaceSurface", None),
     ("winpilot.vnext.desktop_ops", "copy_current_view", None),
     ("winpilot.vnext.desktop_ops", "list_windows", None),
-    ("winpilot.vnext.evidence", "EvidenceRegistry", None),    ("winpilot.vnext.mission", "EvidenceRef", None),
     ("winpilot.vnext.mission", "MissionDefinition", None),
     ("winpilot.vnext.mission", "MissionReducer", None),
     ("winpilot.vnext.mission", "MissionStatus", None),
@@ -62,12 +60,9 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.model_roles", "LiveVisualActor", None),
     ("winpilot.vnext.model_roles", "VisualActorTurnAdmission", None),
     ("winpilot.vnext.profiling", "ExecutionPolicy", None),
-    ("winpilot.vnext.runtime", "CURRENT_FRAME_EVIDENCE_KIND", None),
     ("winpilot.vnext.runtime", "MissionRuntime", None),
     ("winpilot.vnext.runtime", "MissionRuntimeResult", None),
-    ("winpilot.vnext.runtime", "POST_ACTION_FRAME_EVIDENCE_KIND", None),
     ("winpilot.vnext.runtime", "RuntimeFrame", None),
-    ("winpilot.vnext.runtime", "RuntimeFrameIdentity", None),
     ("winpilot.vnext.runtime", "RuntimeSnapshot", None),
     ("winpilot.vnext.runtime", "RuntimeStatus", None),
     ("winpilot.vnext.runtime", "RuntimeTargetIdentity", None),
@@ -75,7 +70,6 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
 KERNEL_ROOTS = (
     VNEXT_ROOT / "__init__.py",
     VNEXT_ROOT / "mission",
-    VNEXT_ROOT / "evidence",
 )
 
 FORBIDDEN_IMPORT_PREFIXES = (

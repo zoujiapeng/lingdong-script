@@ -45,7 +45,6 @@ def _binding(
     executable: str = "C:/a.exe",
     *,
     binding_id: str = "binding-a",
-    evidence_id: str = "evidence-a",
     epoch: int = 10,
 ) -> TargetBinding:
     return TargetBinding(
@@ -54,7 +53,6 @@ def _binding(
         process_id=process_id,
         executable_identity=executable,
         title_snapshot=f"Window {hwnd}",
-        established_by_evidence_ref=evidence_id,
         epoch=epoch,
     )
 
@@ -134,7 +132,6 @@ def test_desktop_shell_flag_retires_when_a_real_window_is_adopted() -> None:
         PID_B,
         "C:/b.exe",
         binding_id="binding-b",
-        evidence_id="evidence-b",
         epoch=11,
     )
     workspace.adopt(observation, replacement)
@@ -178,7 +175,6 @@ def test_completed_click_adopts_stable_foreground_on_next_observation() -> None:
         PID_B,
         "C:/b.exe",
         binding_id="binding-b",
-        evidence_id="evidence-b",
         epoch=11,
     )
     workspace.adopt(observation, replacement)
@@ -220,7 +216,6 @@ def test_discarded_full_desktop_successor_is_never_adopted() -> None:
         PID_TRANSIENT,
         "C:/transient.exe",
         binding_id="binding-transient",
-        evidence_id="evidence-transient",
         epoch=11,
     )
     with pytest.raises(RuntimeError, match="stale or uncaused"):
@@ -233,7 +228,6 @@ def test_discarded_full_desktop_successor_is_never_adopted() -> None:
         PID_B,
         "C:/b.exe",
         binding_id="binding-b",
-        evidence_id="evidence-b",
         epoch=11,
     )
     workspace.adopt(successor, replacement)

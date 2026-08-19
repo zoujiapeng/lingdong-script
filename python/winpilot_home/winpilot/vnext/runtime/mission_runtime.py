@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Mapping
 
 from ...utils.log import logger
 from ..actor import (
@@ -30,9 +30,7 @@ from ..capabilities import (
     ToolCatalog,
     ToolRoute,
 )
-from ..evidence import EvidenceRegistry
 from ..mission import (
-    EvidenceRef,
     MissionError,
     MissionReducer,
     MissionStatus,
@@ -82,7 +80,6 @@ class MissionRuntime:
         actor: ActorPort,
         state: RuntimeStatePort,
         controller: ControllerPort,
-        evidence_registry: EvidenceRegistry,
         budget_facts_provider: Callable[[int], Mapping[str, Any]] | None = None,
     ) -> None:
         if type(reducer) is not MissionReducer:
@@ -94,14 +91,6 @@ class MissionRuntime:
         if type(catalog) is not ToolCatalog or broker.catalog != catalog:
             raise TypeError(
                 "Runtime and Broker must share one ToolCatalog"
-            )
-        if type(evidence_registry) is not EvidenceRegistry:
-            raise TypeError(
-                "evidence_registry must be EvidenceRegistry"
-            )
-        if reducer.evidence_source is not evidence_registry:
-            raise TypeError(
-                "Runtime and MissionReducer must share one EvidenceRegistry"
             )
         for value, method, name in (
             (actor, "propose", "actor"),
@@ -115,7 +104,6 @@ class MissionRuntime:
             reducer=reducer,
             profile=profile,
             catalog=catalog,
-            registry=evidence_registry,
         )
         self._reducer = reducer
         self._profile = profile
@@ -124,7 +112,6 @@ class MissionRuntime:
         self._actor = actor
         self._state = state
         self._controller = controller
-        self._registry = evidence_registry
         self._verified_completion_result: str | None = None
         self._latest_narration: str = ""
         self._previous_action_local_intent: str | None = None
@@ -142,16 +129,8 @@ class MissionRuntime:
         reducer: MissionReducer,
         profile: ExecutionProfile,
         catalog: ToolCatalog,
-        registry: EvidenceRegistry,
     ) -> None:
         definition = reducer.definition
-        if (
-            registry.mission_id != definition.mission_id
-            or registry.run_id != definition.run_id
-        ):
-            raise MissionRuntimeConfigurationError(
-                "EvidenceRegistry is outside mission/run"
-            )
         if len(definition.obligations) != 1:
             raise MissionRuntimeConfigurationError(
                 "minimal Runtime requires one full-goal obligation"
@@ -263,13 +242,11 @@ class MissionRuntime:
         *,
         payload: Mapping[str, Any],
         base_revision: int,
-        evidence_refs: Iterable[str] = (),
     ) -> None:
         event = self._reducer.event(
             kind,
             payload=dict(payload),
             base_revision=base_revision,
-            evidence_refs=tuple(evidence_refs),
         )
         self._reducer.apply(event)
 
@@ -615,17 +592,6 @@ class MissionRuntime:
             )
         diagnostics: list[str] = []
         try:
-            self._registry.append_many(transition.produced_evidence)
-        except Exception as exc:
-            diagnostics.append(f"post-action evidence unavailable: {exc}")
-        try:
-            available_refs = {
-                ref.id for ref in self._registry.snapshot()
-            }
-            event_refs = tuple(
-                ref for ref in transition.event_evidence_refs
-                if ref in available_refs
-            )
             self._accept(
                 "transition_recorded",
                 payload={
@@ -637,7 +603,6 @@ class MissionRuntime:
                     "visible_effect": transition.visible_effect,
                     "frame_id": transition.post_frame_id,
                 },
-                evidence_refs=event_refs,
                 base_revision=envelope.mission_revision,
             )
         except Exception as exc:
@@ -814,12 +779,6 @@ class MissionRuntime:
                         proposal_kind=proposal_kind,
                         detail="desktop action is not approved",
                     )
-            visible_scope = tuple(
-                evidence_id
-                for evidence_id in initial.frame.evidence_refs
-                if evidence_id
-                in self._reducer.projection.evidence_refs
-            )
             envelope = bind_actor_decision(
                 mission_reducer=self._reducer,
                 state=initial.broker_state,
@@ -827,7 +786,6 @@ class MissionRuntime:
                 frame_region=initial.frame.region,
                 submitted_image_size=initial.frame.submitted_size,
                 frame_image_sha256=initial.frame.image_sha256,
-                allowed_evidence_scope=visible_scope,
             )
         except InvalidActorProposal as exc:
             # A malformed observation proposal is a correctable model error,

@@ -23,10 +23,8 @@ from winpilot.vnext.capabilities import (
     ToolRoute,
     ToolSpec,
 )
-from winpilot.vnext.evidence import EvidenceRegistry
 from winpilot.vnext.mission import (
     EvidencePolicy,
-    EvidenceRef,
     MissionDefinition,
     MissionReducer,
     MissionStatus,
@@ -37,8 +35,6 @@ from winpilot.vnext.mission import (
 from winpilot.vnext.profiling import ExecutionPolicy
 from winpilot.vnext.runtime import (
     APPROVED_RUNTIME_TOOLS,
-    CURRENT_FRAME_EVIDENCE_KIND,
-    POST_ACTION_FRAME_EVIDENCE_KIND,
     ActorBudgetView,
     ActorTaskState,
     ActorTaskStateError,
@@ -520,7 +516,7 @@ class FakeController:
         state: FakeState,
         make_post_frame: Callable[
             [ActorDecisionEnvelope],
-            tuple[RuntimeFrame, EvidenceRef],
+            RuntimeFrame,
         ],
     ) -> None:
         self.state = state
@@ -570,7 +566,7 @@ class FakeController:
                 action=action,
                 input_completed=True,
             )
-        frame, post_evidence = self.make_post_frame(envelope)
+        frame = self.make_post_frame(envelope)
         pointer_after = PointerLeaseState(PointerDisposition.RELEASED)
         if action == "drag" and args.get("keep_holding", False):
             before_pointer = self.state.snapshot.broker_state.pointer
@@ -594,7 +590,6 @@ class FakeController:
             action=action,
             input_completed=True,
             visible_effect="post-action frame captured",
-            post_frame_evidence=(post_evidence,),
             post_frame_id=frame.frame_id,
         )
 
@@ -602,7 +597,6 @@ class FakeController:
 @dataclass
 class Harness:
     reducer: MissionReducer
-    registry: EvidenceRegistry
     actor: FakeActor
     state: FakeState
     controller: FakeController
@@ -612,10 +606,7 @@ class Harness:
     def make_frame(
         self,
         frame_id: int,
-        *,
-        kind: str,
-        action_id: str | None = None,
-    ) -> tuple[RuntimeFrame, EvidenceRef]:
+    ) -> RuntimeFrame:
         image_b64 = f"ZnJhbWUt{frame_id:02d}"
         digest = hashlib.sha256(image_b64.encode("ascii")).hexdigest()
         identity = RuntimeFrameIdentity(
@@ -627,18 +618,6 @@ class Harness:
             submitted_size=(320, 240),
             image_sha256=digest,
         )
-        suffix = "" if action_id is None else f"-{action_id}"
-        ref = EvidenceRef(
-            id=f"e-frame-{frame_id}{suffix}",
-            mission_id=MISSION_ID,
-            run_id=RUN_ID,
-            obligation_id=OBLIGATION_ID,
-            kind=kind,
-            trust="deterministic",
-            payload_hash=identity.payload_hash,
-            action_id=action_id,
-            frame_id=frame_id,
-        )
         return RuntimeFrame(
             frame_id=frame_id,
             epoch=EPOCH,
@@ -648,8 +627,7 @@ class Harness:
             submitted_size=identity.submitted_size,
             image_b64=image_b64,
             image_sha256=digest,
-            evidence_refs=(ref.id,),
-        ), ref
+        )
 
 
 def _definition(
@@ -682,8 +660,7 @@ def _harness(
     budget_provider: Callable[[int], Mapping[str, Any]] | None = None,
 ) -> Harness:
     definition = definition or _definition()
-    registry = EvidenceRegistry(definition.mission_id, definition.run_id)
-    reducer = MissionReducer(definition, evidence=registry)
+    reducer = MissionReducer(definition)
     actor = FakeActor(*(proposals or (_action(),)))
     catalog = catalog or _catalog()
 
@@ -698,34 +675,12 @@ def _harness(
         submitted_size=(320, 240),
         image_sha256=digest,
     )
-    current_ref = EvidenceRef(
-        id="e-frame-1",
-        mission_id=definition.mission_id,
-        run_id=definition.run_id,
-        obligation_id=definition.obligations[0].id,
-        kind=CURRENT_FRAME_EVIDENCE_KIND,
-        trust="deterministic",
-        payload_hash=frame_identity.payload_hash,
-        frame_id=1,
-    )
-    target_ref = EvidenceRef(
-        id="e-target",
-        mission_id=definition.mission_id,
-        run_id=definition.run_id,
-        obligation_id=definition.obligations[0].id,
-        kind="target",
-        trust="deterministic",
-        payload_hash="target-evidence-payload",
-        frame_id=1,
-    )
-    registry.append_many((current_ref, target_ref))
     binding = TargetBinding(
         binding_id="binding-current",
         hwnd=HWND,
         process_id=PROCESS_ID,
         executable_identity="opaque-process",
         title_snapshot="",
-        established_by_evidence_ref=target_ref.id,
         epoch=EPOCH,
     )
     if bind_target:
@@ -733,7 +688,6 @@ def _harness(
             reducer.event(
                 "target_bound",
                 payload={"target_binding": binding.to_dict()},
-                evidence_refs=(current_ref.id, target_ref.id),
             )
         )
     frame = RuntimeFrame(
@@ -745,7 +699,6 @@ def _harness(
         submitted_size=frame_identity.submitted_size,
         image_b64=image_b64,
         image_sha256=digest,
-        evidence_refs=(current_ref.id,),
     )
     snapshot = RuntimeSnapshot(
         broker_state=BrokerRuntimeState(
@@ -769,11 +722,10 @@ def _harness(
 
     def make_post_frame(
         envelope: ActorDecisionEnvelope,
-    ) -> tuple[RuntimeFrame, EvidenceRef]:
+    ) -> RuntimeFrame:
+        del envelope
         return holder["harness"].make_frame(
             state.snapshot.frame.frame_id + 1,
-            kind=POST_ACTION_FRAME_EVIDENCE_KIND,
-            action_id=envelope.decision_id,
         )
 
     controller = FakeController(
@@ -798,12 +750,10 @@ def _harness(
         actor=actor,
         state=state,
         controller=controller,
-        evidence_registry=registry,
         budget_facts_provider=budget_provider,
     )
     harness = Harness(
         reducer=reducer,
-        registry=registry,
         actor=actor,
         state=state,
         controller=controller,
@@ -1034,10 +984,6 @@ def test_type_text_is_absent_from_mission_bus_and_reducer_state() -> None:
             for event in harness.reducer.events
         ],
         "projection": harness.reducer.projection.to_dict(),
-        "evidence": [
-            reference.to_dict()
-            for reference in harness.registry.snapshot()
-        ],
     }
     assert sentinel not in json.dumps(
         reducer_wire,
@@ -1046,7 +992,7 @@ def test_type_text_is_absent_from_mission_bus_and_reducer_state() -> None:
     )
 
 
-def test_ephemeral_task_state_crosses_turns_but_not_durable_evidence() -> None:
+def test_ephemeral_task_state_crosses_turns_but_not_mission_history() -> None:
     sentinel = "PRIVATE-GROUP-SUMMARY-7f4c"
     harness = _harness(
         _task_decision(
@@ -1077,9 +1023,6 @@ def test_ephemeral_task_state_crosses_turns_but_not_durable_evidence() -> None:
     durable_wire = {
         "events": [event.to_dict() for event in harness.reducer.events],
         "projection": harness.reducer.projection.to_dict(),
-        "evidence": [
-            reference.to_dict() for reference in harness.registry.snapshot()
-        ],
     }
     assert sentinel not in json.dumps(durable_wire, ensure_ascii=False)
     assert "task_state_update" not in json.dumps(
@@ -1462,25 +1405,6 @@ def test_repeated_actions_are_executed_without_task_level_suppression() -> None:
     assert harness.controller.calls == 6
 
 
-def test_frame_evidence_labels_are_advisory_to_visual_execution() -> None:
-    harness = _harness(_action())
-    bad_frame = replace(
-        harness.state.snapshot.frame,
-        evidence_refs=("e-target",),
-    )
-    harness.state.snapshot = RuntimeSnapshot(
-        broker_state=harness.state.snapshot.broker_state,
-        frame=bad_frame,
-        target=harness.state.snapshot.target,
-    )
-
-    result = harness.runtime.run_one_turn(turn_index=0)
-
-    assert result.status is RuntimeStatus.ACTION_RECORDED
-    assert harness.actor.calls == 1
-    assert harness.controller.calls == 1
-
-
 def test_full_desktop_snapshot_is_not_rejected_by_window_binding() -> None:
     harness = _harness(_claim())
     image_b64 = "ZnVsbC1kZXNrdG9wLWZyYW1l"
@@ -1494,17 +1418,6 @@ def test_full_desktop_snapshot_is_not_rejected_by_window_binding() -> None:
         submitted_size=(320, 240),
         image_sha256=digest,
     )
-    evidence = EvidenceRef(
-        id="e-full-desktop-frame",
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        obligation_id=OBLIGATION_ID,
-        kind=CURRENT_FRAME_EVIDENCE_KIND,
-        trust="deterministic",
-        payload_hash=identity.payload_hash,
-        frame_id=identity.frame_id,
-    )
-    harness.registry.append(evidence)
     frame = RuntimeFrame(
         frame_id=identity.frame_id,
         epoch=identity.epoch,
@@ -1514,7 +1427,6 @@ def test_full_desktop_snapshot_is_not_rejected_by_window_binding() -> None:
         submitted_size=identity.submitted_size,
         image_b64=image_b64,
         image_sha256=digest,
-        evidence_refs=(evidence.id,),
     )
     target = RuntimeTargetIdentity(
         binding_id="foreground-anchor",
@@ -1671,10 +1583,7 @@ def test_duplicate_post_action_state_probe_is_not_an_input_gate() -> None:
     assert second.status is RuntimeStatus.ACTION_RECORDED
     assert harness.controller.calls == 2
     assert harness.state.current_calls == 0
-    assert any(
-        ref.kind == POST_ACTION_FRAME_EVIDENCE_KIND
-        for ref in harness.registry.snapshot()
-    )
+    assert harness.state.snapshot.frame.frame_id == 3
 
 
 def test_claim_binds_current_frame_and_completes_deterministically() -> None:
@@ -1731,7 +1640,7 @@ def test_evidence_policy_does_not_override_actor_completion() -> None:
                 acceptance_criteria=("the visible result is confirmed",),
                 required_capabilities=("visual.interact",),
                 evidence_policy=EvidencePolicy(
-                    required_evidence_kinds=(CURRENT_FRAME_EVIDENCE_KIND,),
+                    required_evidence_kinds=("current_frame",),
                 ),
             ),
         ),
@@ -1853,7 +1762,6 @@ def test_identical_fake_run_replays_deterministically() -> None:
             first,
             second,
             tuple(event.to_dict() for event in harness.reducer.events),
-            tuple(ref.to_dict() for ref in harness.registry.snapshot()),
             harness.reducer.projection.to_dict(),
             tuple(turn.to_dict() for turn in harness.actor.turns),
         )

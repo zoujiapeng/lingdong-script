@@ -870,7 +870,6 @@ class TargetBinding:
     process_id: int
     executable_identity: str
     title_snapshot: str
-    established_by_evidence_ref: str
     epoch: int
 
     _FIELDS = (
@@ -879,12 +878,11 @@ class TargetBinding:
         "process_id",
         "executable_identity",
         "title_snapshot",
-        "established_by_evidence_ref",
         "epoch",
     )
 
     def __post_init__(self) -> None:
-        for name in ("binding_id", "executable_identity", "established_by_evidence_ref"):
+        for name in ("binding_id", "executable_identity"):
             object.__setattr__(
                 self,
                 name,
@@ -941,7 +939,6 @@ class TargetBinding:
             "process_id": self.process_id,
             "executable_identity": self.executable_identity,
             "title_snapshot": self.title_snapshot,
-            "established_by_evidence_ref": self.established_by_evidence_ref,
             "epoch": self.epoch,
         }
 
@@ -976,11 +973,6 @@ class TargetBinding:
                 "title_snapshot",
                 InvalidMissionEvent,
                 allow_empty=True,
-            ),
-            established_by_evidence_ref=_contract_text(
-                value["established_by_evidence_ref"],
-                "established_by_evidence_ref",
-                InvalidMissionEvent,
             ),
             epoch=_contract_int(
                 value["epoch"], "epoch", InvalidMissionEvent, minimum=0

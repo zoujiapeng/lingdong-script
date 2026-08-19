@@ -77,7 +77,6 @@ PROCESS_ID = 77
 EPOCH = 4
 REGION = (10, 20, 100, 80)
 POINT = (60, 60)
-CURRENT_EVIDENCE_ID = "evidence-current-frame"
 
 
 def _jpeg(level: int) -> str:
@@ -607,7 +606,6 @@ def _envelope(state, binding: TargetBinding, action: str):
         "target_binding_id": binding.binding_id,
         "pointer_disposition": "released",
         "pointer_lease_id": None,
-        "allowed_evidence_scope": [CURRENT_EVIDENCE_ID],
         "proposal": _proposal(action),
     }
     return ActorDecisionEnvelope.from_dict(
@@ -702,7 +700,6 @@ def _harness(
         process_id=PROCESS_ID,
         executable_identity="C:/app.exe",
         title_snapshot="App",
-        established_by_evidence_ref="evidence-target-bound",
         epoch=EPOCH,
     )
     drag_guard_points: tuple[tuple[int, int], ...] | None = None
@@ -803,7 +800,7 @@ def test_exact_atomic_surface_completes_once_with_model_visible_post_frame(
     assert transition.outcome is ControllerOutcome.COMPLETED
     assert transition.input_completed is True
     assert transition.post_frame_id == 2
-    assert len(transition.post_frame_evidence) == 1
+    assert not hasattr(transition, "post_frame_evidence")
     assert len(harness.raw.calls) == 1
     assert harness.wait_calls == [0.12]
     assert harness.raw.calls[0][0] == raw_name
@@ -925,7 +922,6 @@ def test_screen_first_click_is_admitted_on_any_visible_window(
         process_id=PROCESS_ID,
         executable_identity="C:/app.exe",
         title_snapshot="App",
-        established_by_evidence_ref="evidence-target-bound",
         epoch=EPOCH,
     )
     probe = _Probe(
@@ -1065,7 +1061,6 @@ def test_screen_first_scroll_does_not_carry_the_old_window(
         process_id=PROCESS_ID,
         executable_identity="C:/app.exe",
         title_snapshot="App",
-        established_by_evidence_ref="evidence-target-bound",
         epoch=EPOCH,
     )
     raw = _RawHarness(True)
@@ -1138,7 +1133,6 @@ def test_screen_first_held_drag_skips_bound_window_foreground(
         process_id=PROCESS_ID,
         executable_identity="C:/app.exe",
         title_snapshot="App",
-        established_by_evidence_ref="evidence-target-bound",
         epoch=EPOCH,
     )
     start = _map_submitted_test_point(
@@ -1222,7 +1216,6 @@ def test_screen_first_click_ignores_dead_hit_test_and_keeps_desktop_frame(
         process_id=PROCESS_ID,
         executable_identity="C:/app.exe",
         title_snapshot="App",
-        established_by_evidence_ref="evidence-target-bound",
         epoch=EPOCH,
     )
     probe = _Probe(
@@ -1308,7 +1301,6 @@ def test_screen_first_pointer_never_falls_back_to_old_binding(
         process_id=PROCESS_ID,
         executable_identity="C:/gone.exe",
         title_snapshot="Gone",
-        established_by_evidence_ref="evidence-target-bound",
         epoch=EPOCH,
     )
 
@@ -1375,7 +1367,6 @@ def test_screen_first_keyboard_uses_live_foreground_not_old_binding(
         process_id=PROCESS_ID,
         executable_identity="C:/app.exe",
         title_snapshot="Old",
-        established_by_evidence_ref="evidence-target-bound",
         epoch=EPOCH,
     )
     probe = _Probe(
@@ -1442,7 +1433,6 @@ def test_screen_first_pointer_and_post_frame_ignore_missing_old_binding(
         process_id=PROCESS_ID,
         executable_identity="C:/gone.exe",
         title_snapshot="Gone",
-        established_by_evidence_ref="evidence-target-bound",
         epoch=EPOCH,
     )
 
@@ -1530,7 +1520,7 @@ def test_completed_transition_uses_post_frame_without_separate_effect_verifier()
     assert transition is not None
     wire = transition.to_dict()
     assert wire["post_frame_id"] == 2
-    assert len(wire["post_frame_evidence"]) == 1
+    assert "post_frame_evidence" not in wire
 
 
 def test_applied_order_is_raw_then_wait_then_capture(monkeypatch) -> None:
@@ -1619,7 +1609,7 @@ def test_wait_exception_cannot_downgrade_completed_input() -> None:
     assert attempt.transition.outcome is ControllerOutcome.COMPLETED
     assert attempt.transition.input_completed is True
     assert attempt.transition.post_frame_id == 2
-    assert len(attempt.transition.post_frame_evidence) == 1
+    assert not hasattr(attempt.transition, "post_frame_evidence")
     assert harness.wait_calls == [0.12]
     assert len(harness.raw.calls) == 1
     assert harness.authority.current is not None
@@ -2591,17 +2581,6 @@ def test_closed_adapter_rejects_new_input() -> None:
         harness.adapter.execute(harness.envelope)
 
     assert harness.raw.calls == []
-
-
-def test_deterministic_replay_produces_identical_post_frame_evidence() -> None:
-    first = _harness("click").run().transition
-    second = _harness("click").run().transition
-
-    assert first is not None
-    assert second is not None
-    assert first.outcome is ControllerOutcome.COMPLETED
-    assert second.outcome is ControllerOutcome.COMPLETED
-    assert first.post_frame_evidence == second.post_frame_evidence
 
 
 def test_adapter_package_is_one_narrow_single_composition_owner() -> None:

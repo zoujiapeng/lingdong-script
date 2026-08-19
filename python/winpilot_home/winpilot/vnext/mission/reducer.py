@@ -277,30 +277,12 @@ def _apply_event(
 
     if event_type == "target_bound":
         target = _parse_target(payload)
-        evidence_ids = tuple(
-            dict.fromkeys(
-                (*event.evidence_refs, target.established_by_evidence_ref)
-            )
-        )
-        refs = _evidence_refs(scope, evidence_ids, required=True)
-        established = next(
-            ref
-            for ref in refs
-            if ref.id == target.established_by_evidence_ref
-        )
-        if established.artifact_id not in (None, ""):
-            raise EvidenceScopeError(
-                "target evidence cannot identify an artifact"
-            )
         old = projection.target_binding
         if old is not None and old.binding_id == target.binding_id and old != target:
             raise IllegalTransitionError(
                 "target binding identity changed"
             )
-        return _merge_evidence(
-            replace(projection, target_binding=target),
-            refs,
-        )
+        return replace(projection, target_binding=target)
 
     if event_type == "transition_recorded":
         obligation_id = _payload_text(payload, "obligation_id")

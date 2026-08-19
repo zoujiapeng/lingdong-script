@@ -58,7 +58,6 @@ from winpilot.vnext.json_contract import (
     MIN_SIGNED_64,
 )
 from winpilot.vnext.mission import (
-    EvidenceRef,
     MissionDefinition,
     MissionReducer,
     ObligationSpec,
@@ -265,21 +264,7 @@ def _mission_reducer(
             ),
         ),
     )
-    evidence = ()
-    if bound:
-        evidence = (
-            EvidenceRef(
-                id="e-target",
-                mission_id=definition.mission_id,
-                run_id=definition.run_id,
-                kind="target",
-                trust="deterministic",
-                obligation_id="obligation-current",
-                payload_hash="target-evidence-payload",
-                frame_id=82,
-            ),
-        )
-    reducer = MissionReducer(definition, evidence=evidence)
+    reducer = MissionReducer(definition)
     if bound:
         reducer.apply(
             reducer.event(
@@ -291,11 +276,9 @@ def _mission_reducer(
                         process_id=44,
                         executable_identity="opaque-process",
                         title_snapshot="",
-                        established_by_evidence_ref="e-target",
                         epoch=7,
                     ).to_dict(),
                 },
-                evidence_refs=("e-target",),
             )
         )
     return reducer
@@ -386,7 +369,6 @@ def _bind(**overrides) -> ActorDecisionEnvelope:
         "frame_region": (-1200, 0, 1200, 800),
         "submitted_image_size": (900, 600),
         "frame_image_sha256": "b" * 64,
-        "allowed_evidence_scope": ("e-target",),
     }
     values.update(overrides)
     return bind_actor_decision(**values)
@@ -864,7 +846,6 @@ def test_runtime_binder_derives_all_authority_and_round_trips() -> None:
     assert raw["target_binding_id"] == "binding-current"
     assert raw["pointer_disposition"] == "released"
     assert raw["pointer_lease_id"] is None
-    assert raw["allowed_evidence_scope"] == ["e-target"]
     assert ActorDecisionEnvelope.from_dict(raw) == envelope
     assert json.loads(envelope.to_json()) == raw
     assert envelope.epoch == raw["frame_epoch"]
@@ -898,7 +879,6 @@ def test_full_desktop_binder_keeps_frame_facts_without_window_admission() -> Non
         frame_region=(-1200, 0, 1200, 800),
         submitted_image_size=(900, 600),
         frame_image_sha256="b" * 64,
-        allowed_evidence_scope=("e-target",),
     )
 
     assert envelope.frame_id == 83
@@ -916,7 +896,6 @@ def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
         frame_region=(-1200, 0, 1200, 800),
         submitted_image_size=(900, 600),
         frame_image_sha256="b" * 64,
-        allowed_evidence_scope=("e-target",),
     )
     assert envelope.pointer_disposition == "held"
     assert envelope.pointer_lease_id == "pointer-lease-current"
@@ -932,7 +911,6 @@ def test_held_envelope_accepts_mouse_keyboard_actions_and_tracks_lease() -> None
         "frame_region": (-1200, 0, 1200, 800),
         "submitted_image_size": (900, 600),
         "frame_image_sha256": "b" * 64,
-        "allowed_evidence_scope": ("e-target",),
     }
     for proposal in (
         _action(),
@@ -994,13 +972,6 @@ def test_envelope_wire_is_strict_bounded_and_frozen() -> None:
     ):
         with pytest.raises(InvalidActorEnvelope):
             ActorDecisionEnvelope.from_dict({**raw, **change})
-    with pytest.raises(InvalidActorEnvelope, match="array length"):
-        ActorDecisionEnvelope.from_dict({
-            **raw,
-            "allowed_evidence_scope": [
-                f"evidence-{index}" for index in range(4097)
-            ],
-        })
     with pytest.raises(ValidationError):
         envelope.turn_index = 9
 
@@ -1060,7 +1031,6 @@ def test_envelope_wire_rejects_coercible_scalars_none_and_non_list_arrays() -> N
         with pytest.raises(InvalidActorEnvelope):
             ActorDecisionEnvelope.from_dict({**raw, field: value})
     for field in (
-        "allowed_evidence_scope",
         "frame_region",
         "submitted_image_size",
     ):
@@ -1284,7 +1254,6 @@ def test_envelope_structurally_pins_the_real_frame_authority() -> None:
         frame_region=frame.region,
         submitted_image_size=frame.submitted_size,
         frame_image_sha256=frame.image_sha256,
-        allowed_evidence_scope=("e-target",),
     )
 
     called, result = authority.run_if_current(

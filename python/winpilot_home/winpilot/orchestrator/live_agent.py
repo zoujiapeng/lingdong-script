@@ -73,9 +73,7 @@ from ..vnext.desktop_adapter import (
     LiveTargetSnapshot,
     WorkspaceSurface,
 )
-from ..vnext.evidence import EvidenceRegistry
 from ..vnext.mission import (
-    EvidenceRef,
     MissionDefinition,
     MissionReducer,
     MissionStatus,
@@ -91,12 +89,9 @@ from ..vnext.model_roles import (
 )
 from ..vnext.profiling import ExecutionPolicy
 from ..vnext.runtime import (
-    CURRENT_FRAME_EVIDENCE_KIND,
-    POST_ACTION_FRAME_EVIDENCE_KIND,
     MissionRuntime,
     MissionRuntimeResult,
     RuntimeFrame,
-    RuntimeFrameIdentity,
     RuntimeSnapshot,
     RuntimeStatus,
     RuntimeTargetIdentity,
@@ -1603,10 +1598,8 @@ class _LiveRuntimeState:
         self,
         *,
         reducer: MissionReducer,
-        registry: EvidenceRegistry,
         workspace: DesktopWorkspace | None = None,
         binding: TargetBinding | None = None,
-        target_evidence: EvidenceRef | None = None,
         target_probe: _BoundTargetProbe | None = None,
         authority: FrameAuthority,
         observer: FrameObserver,
@@ -1654,14 +1647,7 @@ class _LiveRuntimeState:
                 foreground_reader=legacy_foreground_reader,
                 hit_test_root=target_probe.hit_test_root,
             )
-            if (
-                target_evidence is not None
-                and target_evidence.id
-                != binding.established_by_evidence_ref
-            ):
-                raise ValueError("legacy target evidence disagrees")
         self._reducer = reducer
-        self._registry = registry
         self._workspace = workspace
         self._authority = authority
         self._observer = observer
@@ -1680,34 +1666,6 @@ class _LiveRuntimeState:
         if type(state) is not PointerLeaseState:
             raise TypeError("pointer_state_reader returned an invalid state")
         self._pointer_state_reader = reader
-
-    def _frame_ref(self, state: FrameState) -> EvidenceRef:
-        identity = RuntimeFrameIdentity(
-            frame_id=state.frame_id,
-            epoch=state.epoch,
-            hwnd=state.hwnd,
-            region=state.region,
-            scope=state.scope,
-            submitted_size=state.submitted_size,
-            image_sha256=state.image_sha256,
-        )
-        digest = hashlib.sha256(
-            (
-                f"{self._registry.run_id}|{state.frame_id}|"
-                f"{identity.payload_hash}"
-            ).encode("utf-8")
-        ).hexdigest()
-        return EvidenceRef(
-            id=f"vnext-current-frame-{digest[:24]}",
-            mission_id=self._registry.mission_id,
-            run_id=self._registry.run_id,
-            obligation_id=_OBLIGATION_ID,
-            kind=CURRENT_FRAME_EVIDENCE_KIND,
-            trust="deterministic",
-            payload_hash=identity.payload_hash,
-            frame_id=state.frame_id,
-            created_at=state.captured_at,
-        )
 
     def _capture_current(self) -> FrameState:
         binding = self._workspace.binding
@@ -1745,22 +1703,12 @@ class _LiveRuntimeState:
         ):
             raise RuntimeError("fresh full-desktop JPEG capture failed")
         committed = self._observer.commit(captured)
-        frame_ref = self._frame_ref(committed)
-        evidence_refs: tuple[str, ...] = ()
-        try:
-            self._registry.append(frame_ref)
-            evidence_refs = (frame_ref.id,)
-        except Exception:
-            # The JPEG and FrameAuthority are the execution facts.  Evidence
-            # is useful for diagnostics, but an auxiliary journal failure must
-            # not make a real screen unavailable to the model.
-            pass
         BUS.publish(
             "vnext_gui_observation",
             runtime_version=_RUNTIME_VERSION,
             no_legacy_fallback=True,
-            run_id=self._registry.run_id,
-            mission_id=self._registry.mission_id,
+            run_id=self._reducer.definition.run_id,
+            mission_id=self._reducer.definition.mission_id,
             obligation_id=_OBLIGATION_ID,
             execution_medium=ExecutionMedium.CONTROL.value,
             observation_kind="fresh_authoritative_desktop_frame",
@@ -1771,35 +1719,11 @@ class _LiveRuntimeState:
             frame_scope=committed.scope,
             authoritative=True,
             fresh=True,
-            evidence_refs=list(evidence_refs),
             parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
         )
         return committed
 
     def _runtime_frame(self, state: FrameState) -> RuntimeFrame:
-        identity = RuntimeFrameIdentity(
-            frame_id=state.frame_id,
-            epoch=state.epoch,
-            hwnd=state.hwnd,
-            region=state.region,
-            scope=state.scope,
-            submitted_size=state.submitted_size,
-            image_sha256=state.image_sha256,
-        )
-        refs = tuple(
-            sorted(
-                ref.id
-                for ref in self._registry.snapshot()
-                if ref.obligation_id == _OBLIGATION_ID
-                and ref.frame_id == state.frame_id
-                and ref.payload_hash == identity.payload_hash
-                and ref.kind
-                in {
-                    CURRENT_FRAME_EVIDENCE_KIND,
-                    POST_ACTION_FRAME_EVIDENCE_KIND,
-                }
-            )
-        )
         return RuntimeFrame(
             frame_id=state.frame_id,
             epoch=state.epoch,
@@ -1809,7 +1733,6 @@ class _LiveRuntimeState:
             submitted_size=state.submitted_size,
             image_b64=state.image_b64,
             image_sha256=state.image_sha256,
-            evidence_refs=refs,
         )
 
     def _snapshot(self, state: FrameState, *, turn_index: int) -> RuntimeSnapshot:
@@ -2181,7 +2104,6 @@ class _LiveAgentSession:
         *,
         runtime: MissionRuntime,
         reducer: MissionReducer,
-        registry: EvidenceRegistry,
         authority: FrameAuthority,
         binding: TargetBinding,
         counter: _ModelCallCounter,
@@ -2190,7 +2112,6 @@ class _LiveAgentSession:
     ) -> None:
         self._runtime = runtime
         self._reducer = reducer
-        self._registry = registry
         self._authority = authority
         self._binding = binding
         self._counter = counter
@@ -2272,11 +2193,6 @@ class _LiveAgentSession:
             ),
             "frame_id": frame.frame_id if frame is not None else None,
             "frame_epoch": frame.epoch if frame is not None else None,
-            "frame_evidence_refs": [
-                ref.id
-                for ref in self._registry.snapshot()
-                if frame is not None and ref.frame_id == frame.frame_id
-            ],
         }
 
     def close(self) -> None:
@@ -2290,12 +2206,7 @@ class _LiveAgentSession:
                 self._controller.close()
             except Exception as exc:
                 errors.append(exc)
-        errors.extend(_close_resources(
-            (
-                ("evidence registry", self._registry),
-                ("Visual Actor client", self._client),
-            )
-        ))
+        errors.extend(_close_resources((("Visual Actor client", self._client),)))
         if errors:
             raise ExceptionGroup(
                 "vNext live Agent session cleanup failed",
@@ -2764,161 +2675,95 @@ def _model_reasoning_content(response: Any) -> str:
     return reasoning if type(reasoning) is str else ""
 
 
-def _target_evidence(
-    build: _SessionBuild,
-) -> tuple[EvidenceRef, TargetBinding]:
-    payload = build.target.trace_identity()
-    payload_hash = hashlib.sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    evidence_id = (
-        "vnext-target-evidence-"
-        + hashlib.sha256(
-            f"{build.run_id}|{payload_hash}".encode("utf-8")
-        ).hexdigest()[:24]
-    )
-    evidence = EvidenceRef(
-        id=evidence_id,
-        mission_id=build.mission_id,
-        run_id=build.run_id,
-        obligation_id=_OBLIGATION_ID,
-        kind="target_binding",
-        trust="deterministic",
-        payload_hash=payload_hash,
-        created_at=build.target.captured_at_ms / 1000.0,
-    )
-    binding = TargetBinding(
+def _target_binding(build: _SessionBuild) -> TargetBinding:
+    return TargetBinding(
         binding_id=build.target.binding_id,
         hwnd=build.target.hwnd,
         process_id=build.target.process_id,
         executable_identity=build.target.executable_identity,
         title_snapshot=build.target.title,
-        established_by_evidence_ref=evidence.id,
         epoch=build.target.captured_at_ms,
     )
-    return evidence, binding
 
 
 def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
-    try:
-        definition = MissionDefinition(
-            mission_id=build.mission_id,
-            run_id=build.run_id,
-            original_goal=build.goal,
-            obligations=(
-                ObligationSpec(
-                    id=_OBLIGATION_ID,
-                    desired_state=build.goal,
-                    acceptance_criteria=(build.goal,),
-                    required_capabilities=(),
-                ),
+    definition = MissionDefinition(
+        mission_id=build.mission_id,
+        run_id=build.run_id,
+        original_goal=build.goal,
+        obligations=(
+            ObligationSpec(
+                id=_OBLIGATION_ID,
+                desired_state=build.goal,
+                acceptance_criteria=(build.goal,),
+                required_capabilities=(),
             ),
-            source="vnext-live-agent",
-            experience_policy="disabled",
+        ),
+        source="vnext-live-agent",
+        experience_policy="disabled",
+    )
+    reducer = MissionReducer(definition)
+    binding = _target_binding(build)
+    reducer.apply(
+        reducer.event(
+            "target_bound",
+            payload={"target_binding": binding.to_dict()},
         )
-    except Exception as exc:
-        raise
-    registry: EvidenceRegistry | None = None
-    try:
-        registry = EvidenceRegistry(build.mission_id, build.run_id)
-        reducer = MissionReducer(definition, evidence=registry)
-        target_evidence, binding = _target_evidence(build)
-        registry.append(target_evidence)
-        reducer.apply(
-            reducer.event(
-                "target_bound",
-                payload={"target_binding": binding.to_dict()},
-                evidence_refs=(target_evidence.id,),
-            )
+    )
+    initial_surface = WorkspaceSurface(
+        hwnd=binding.hwnd,
+        root_hwnd=build.target.root_hwnd,
+        process_id=binding.process_id,
+        executable_identity=binding.executable_identity,
+        title=binding.title_snapshot,
+        class_name=build.target.class_name,
+        region=build.target.region,
+        foreground_root_hwnd=None,
+    )
+    workspace = DesktopWorkspace(
+        binding=binding,
+        surface=initial_surface,
+        reader=lambda hwnd: _workspace_surface(build.target.reader(hwnd)),
+        foreground_reader=build.target.foreground_reader,
+        hit_test_root=build.target.hit_test_root,
+        desktop_shell=build.target.desktop_shell,
+    )
+    authority = FrameAuthority()
+    observer = FrameObserver(
+        authority,
+        capture=_capture_exact_target_jpeg,
+        max_submitted_side=_MAX_SUBMITTED_SIDE,
+    )
+    state = _LiveRuntimeState(
+        reducer=reducer,
+        workspace=workspace,
+        authority=authority,
+        observer=observer,
+        pause_controller=build.pause_controller,
+    )
+    raw = RawDeviceExecutor(
+        RawDeviceBackends(
+            admitted_physical_click=ADMITTED_PHYSICAL_CLICK_BACKEND,
+            admitted_physical_drag=ADMITTED_PHYSICAL_DRAG_BACKEND,
+            admitted_physical_move=ADMITTED_PHYSICAL_MOVE_BACKEND,
+            admitted_physical_sequence=ADMITTED_PHYSICAL_SEQUENCE_BACKEND,
+            admitted_physical_scroll=ADMITTED_PHYSICAL_SCROLL_BACKEND,
+            admitted_physical_type_text=ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
+            admitted_physical_hotkey=ADMITTED_PHYSICAL_HOTKEY_BACKEND,
         )
-        initial_surface = WorkspaceSurface(
-            hwnd=binding.hwnd,
-            root_hwnd=build.target.root_hwnd,
-            process_id=binding.process_id,
-            executable_identity=binding.executable_identity,
-            title=binding.title_snapshot,
-            class_name=build.target.class_name,
-            region=build.target.region,
-            foreground_root_hwnd=None,
-        )
-        workspace = DesktopWorkspace(
-            binding=binding,
-            surface=initial_surface,
-            reader=lambda hwnd: _workspace_surface(
-                build.target.reader(hwnd)
-            ),
-            foreground_reader=build.target.foreground_reader,
-            hit_test_root=build.target.hit_test_root,
-            desktop_shell=build.target.desktop_shell,
-        )
-        authority = FrameAuthority()
-        observer = FrameObserver(
-            authority,
-            capture=_capture_exact_target_jpeg,
-            max_submitted_side=_MAX_SUBMITTED_SIDE,
-        )
-        state = _LiveRuntimeState(
-            reducer=reducer,
-            registry=registry,
-            workspace=workspace,
-            authority=authority,
-            observer=observer,
-            pause_controller=build.pause_controller,
-        )
-    except Exception as exc:
-        cleanup_errors: list[Exception] = []
-        cleanup_errors.extend(
-            _close_resources((("evidence registry", registry),))
-        )
-        if cleanup_errors:
-            raise ExceptionGroup(
-                "vNext composition and cleanup failed",
-                [exc, *cleanup_errors],
-            ) from exc
-        raise
-    try:
-        raw = RawDeviceExecutor(
-            RawDeviceBackends(
-                admitted_physical_click=ADMITTED_PHYSICAL_CLICK_BACKEND,
-                admitted_physical_drag=ADMITTED_PHYSICAL_DRAG_BACKEND,
-                admitted_physical_move=ADMITTED_PHYSICAL_MOVE_BACKEND,
-                admitted_physical_sequence=ADMITTED_PHYSICAL_SEQUENCE_BACKEND,
-                admitted_physical_scroll=ADMITTED_PHYSICAL_SCROLL_BACKEND,
-                admitted_physical_type_text=ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
-                admitted_physical_hotkey=ADMITTED_PHYSICAL_HOTKEY_BACKEND,
-            )
-        )
-        controller = AtomicDesktopAdapter(
-            frame_authority=authority,
-            frame_observer=observer,
-            frozen_target_binding=binding,
-            target_probe=workspace,
-            desktop_workspace=workspace,
-            raw_device=raw,
-            receipt_trace_sink=_RawReceiptTrace(),
-            launcher=_launch_application_primitive,
-            desktop_shell=build.target.desktop_shell,
-        )
-        state.bind_pointer_state_reader(controller.pointer_state)
-    except Exception as exc:
-        cleanup_errors = []
-        cleanup_errors.extend(
-            _close_resources(
-                (
-                    ("evidence registry", registry),
-                )
-            )
-        )
-        if cleanup_errors:
-            raise ExceptionGroup(
-                "vNext live Agent owner composition and cleanup failed",
-                [exc, *cleanup_errors],
-            ) from exc
-        raise
+    )
+    controller = AtomicDesktopAdapter(
+        frame_authority=authority,
+        frame_observer=observer,
+        frozen_target_binding=binding,
+        target_probe=workspace,
+        desktop_workspace=workspace,
+        raw_device=raw,
+        receipt_trace_sink=_RawReceiptTrace(),
+        launcher=_launch_application_primitive,
+        desktop_shell=build.target.desktop_shell,
+    )
+    state.bind_pointer_state_reader(controller.pointer_state)
     try:
         actor_bundle = build.actor_bundle
         counter = actor_bundle.counter
@@ -2959,13 +2804,11 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             actor=actor_bundle.actor,
             state=state,
             controller=controller,
-            evidence_registry=registry,
             budget_facts_provider=budget_facts,
         )
         return _LiveAgentSession(
             runtime=runtime,
             reducer=reducer,
-            registry=registry,
             authority=authority,
             binding=binding,
             counter=counter,
@@ -2977,7 +2820,6 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
         cleanup_errors.extend(
             _close_resources(
                 (
-                    ("evidence registry", registry),
                     ("model resources", build.actor_bundle),
                 )
             )

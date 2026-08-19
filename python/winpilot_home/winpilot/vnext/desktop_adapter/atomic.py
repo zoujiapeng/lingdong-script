@@ -12,7 +12,6 @@ import base64
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 import hashlib
-import json
 import math
 import ntpath
 import threading
@@ -56,7 +55,7 @@ from ..capabilities import (
     PointerDisposition,
     PointerLeaseState,
 )
-from ..mission import EvidenceRef, TargetBinding
+from ..mission import TargetBinding
 from ..runtime import (
     ControllerOutcome,
     ControllerTransition,
@@ -79,7 +78,6 @@ _ACTIONS = frozenset(
         "launch_application",
     }
 )
-_POST_FRAME_KIND = "post_action_frame"
 _JPEG_MEDIA_TYPE = "image/jpeg"
 _MAX_SCROLL_AMOUNT = 1200
 _MAX_LAUNCH_EFFECT_CHARS = 200
@@ -571,10 +569,8 @@ class AtomicDesktopAdapter:
             )
 
         post_frame: RuntimeFrame | None = None
-        post_evidence: EvidenceRef | None = None
         try:
-            post_frame, post_evidence = self._capture_post_action(
-                envelope,
+            post_frame = self._capture_post_action(
                 prepared,
                 pinned.before_frame,
             )
@@ -602,7 +598,6 @@ class AtomicDesktopAdapter:
                 action,
                 input_completed=None,
                 post_frame=post_frame,
-                post_evidence=post_evidence,
                 error_kind=self._receipt_error_kind(receipt),
             )
 
@@ -612,7 +607,6 @@ class AtomicDesktopAdapter:
             action=action,
             input_completed=True,
             visible_effect=self._completed_input_effect(receipt, prepared),
-            post_frame_evidence=(post_evidence,),
             post_frame_id=post_frame.frame_id,
         )
 
@@ -630,10 +624,7 @@ class AtomicDesktopAdapter:
                 self._not_started(prepared.action, "frame_unavailable"),
             )
         try:
-            before_frame = self._runtime_frame(
-                state,
-                evidence_refs=envelope.allowed_evidence_scope,
-            )
+            before_frame = self._runtime_frame(state)
         except Exception:
             return _PinnedExecution(
                 None,
@@ -1110,10 +1101,9 @@ class AtomicDesktopAdapter:
 
     def _capture_post_action(
         self,
-        envelope: ActorDecisionEnvelope,
         prepared: _PreparedAction,
         before: RuntimeFrame,
-    ) -> tuple[RuntimeFrame, EvidenceRef]:
+    ) -> RuntimeFrame:
         if before.scope == "full_desktop":
             region = virtual_screen_region()
             region_tuple = (
@@ -1145,15 +1135,7 @@ class AtomicDesktopAdapter:
                 or committed.region != region_tuple
             ):
                 raise RuntimeError("post-action frame commit identity changed")
-            identity = self._runtime_frame_identity(committed)
-            evidence = self._post_frame_evidence(envelope, identity)
-            return (
-                self._runtime_frame(
-                    committed,
-                    evidence_refs=(evidence.id,),
-                ),
-                evidence,
-            )
+            return self._runtime_frame(committed)
 
         first = self._safe_snapshot()
         # A crop is an observation hint, not action authority.  Prefer fresh
@@ -1196,13 +1178,7 @@ class AtomicDesktopAdapter:
         ):
             raise RuntimeError("post-action frame commit identity changed")
 
-        identity = self._runtime_frame_identity(committed)
-        evidence = self._post_frame_evidence(envelope, identity)
-        frame = self._runtime_frame(
-            committed,
-            evidence_refs=(evidence.id,),
-        )
-        return frame, evidence
+        return self._runtime_frame(committed)
 
     def _prepare_action(
         self,
@@ -1813,8 +1789,6 @@ class AtomicDesktopAdapter:
     def _runtime_frame(
         cls,
         state: FrameState,
-        *,
-        evidence_refs: tuple[str, ...],
     ) -> RuntimeFrame:
         identity = cls._runtime_frame_identity(state)
         return RuntimeFrame(
@@ -1826,7 +1800,6 @@ class AtomicDesktopAdapter:
             submitted_size=identity.submitted_size,
             image_b64=state.image_b64,
             image_sha256=identity.image_sha256,
-            evidence_refs=tuple(sorted(evidence_refs)),
             media_type=identity.media_type,
         )
 
@@ -1859,42 +1832,6 @@ class AtomicDesktopAdapter:
             or not raw.endswith(b"\xff\xd9")
         ):
             raise ValueError("frame payload is not an explicit JPEG")
-
-    @staticmethod
-    def _post_frame_evidence(
-        envelope: ActorDecisionEnvelope,
-        identity: RuntimeFrameIdentity,
-    ) -> EvidenceRef:
-        payload_hash = identity.payload_hash
-        material = {
-            "format": "atomic-post-frame-evidence/0",
-            "mission_id": envelope.mission_id,
-            "run_id": envelope.run_id,
-            "obligation_id": envelope.obligation_id,
-            "action_id": envelope.decision_id,
-            "frame_id": identity.frame_id,
-            "payload_hash": payload_hash,
-        }
-        digest = hashlib.sha256(
-            json.dumps(
-                material,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        ).hexdigest()
-        return EvidenceRef(
-            id=f"evidence-post-action-frame-{digest[:32]}",
-            mission_id=envelope.mission_id,
-            run_id=envelope.run_id,
-            obligation_id=envelope.obligation_id,
-            kind=_POST_FRAME_KIND,
-            trust="deterministic",
-            payload_hash=payload_hash,
-            frame_id=identity.frame_id,
-            action_id=envelope.decision_id,
-        )
 
     @staticmethod
     def _raw_action(action: str) -> str:
@@ -1972,20 +1909,13 @@ class AtomicDesktopAdapter:
         *,
         input_completed: bool | None,
         post_frame: RuntimeFrame | None = None,
-        post_evidence: EvidenceRef | None = None,
         error_kind: str | None = None,
     ) -> ControllerTransition:
-        if (post_frame is None) != (post_evidence is None):
-            post_frame = None
-            post_evidence = None
         return ControllerTransition(
             outcome=ControllerOutcome.UNKNOWN,
             action_id=envelope.decision_id,
             action=action,
             input_completed=input_completed,
-            post_frame_evidence=(
-                () if post_evidence is None else (post_evidence,)
-            ),
             post_frame_id=(
                 None if post_frame is None else post_frame.frame_id
             ),

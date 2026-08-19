@@ -24,7 +24,6 @@ from ..capabilities import (
 )
 from ..json_contract import BoundedJSONError, bounded_json_copy
 from ..mission import (
-    EvidenceRef,
     MissionCard,
     TargetBinding,
     is_safe_action_summary,
@@ -44,8 +43,6 @@ ACTOR_TURN_FORMAT = "runtime-actor-turn/0"
 CONTROLLER_TRANSITION_FORMAT = "controller-transition/0"
 MISSION_RUNTIME_RESULT_FORMAT = "mission-runtime-result/0"
 
-CURRENT_FRAME_EVIDENCE_KIND = "current_frame"
-POST_ACTION_FRAME_EVIDENCE_KIND = "post_action_frame"
 APPROVED_DESKTOP_ACTIONS = frozenset(
     {
         "click",
@@ -367,7 +364,6 @@ class RuntimeFrame:
     submitted_size: tuple[int, int]
     image_b64: str
     image_sha256: str
-    evidence_refs: tuple[str, ...]
     media_type: str = "image/jpeg"
     format: str = RUNTIME_FRAME_FORMAT
 
@@ -386,17 +382,11 @@ class RuntimeFrame:
         )
         if type(self.image_b64) is not str or not self.image_b64:
             raise RuntimeContractError("image_b64 must be non-empty")
-        refs = _ordered_identities(self.evidence_refs, "evidence_refs")
-        if tuple(sorted(refs)) != refs:
-            raise RuntimeContractError(
-                "RuntimeFrame evidence_refs must be sorted"
-            )
         object.__setattr__(self, "region", identity.region)
         object.__setattr__(self, "scope", identity.scope)
         object.__setattr__(self, "submitted_size", identity.submitted_size)
         object.__setattr__(self, "image_sha256", identity.image_sha256)
         object.__setattr__(self, "media_type", identity.media_type)
-        object.__setattr__(self, "evidence_refs", refs)
 
     @property
     def identity(self) -> RuntimeFrameIdentity:
@@ -413,7 +403,7 @@ class RuntimeFrame:
 
     @property
     def authority_key(self) -> tuple[Any, ...]:
-        return (self.identity, self.evidence_refs)
+        return (self.identity,)
 
     def broker_frame(
         self,
@@ -972,7 +962,6 @@ class ControllerTransition:
     action: str
     input_completed: bool | None
     visible_effect: str = ""
-    post_frame_evidence: tuple[EvidenceRef, ...] = ()
     post_frame_id: int | None = None
     error_kind: str | None = None
     format: str = CONTROLLER_TRANSITION_FORMAT
@@ -1022,21 +1011,6 @@ class ControllerTransition:
                 allow_empty=True,
             ),
         )
-        post_evidence = tuple(self.post_frame_evidence)
-        if any(type(ref) is not EvidenceRef for ref in post_evidence):
-            raise RuntimeContractError(
-                "post_frame_evidence must contain canonical EvidenceRef values"
-            )
-        post_ids = tuple(ref.id for ref in post_evidence)
-        if len(post_ids) != len(set(post_ids)):
-            raise RuntimeContractError(
-                "post_frame_evidence must not contain duplicate ids"
-            )
-        if tuple(sorted(post_ids)) != post_ids:
-            raise RuntimeContractError(
-                "post_frame_evidence must be sorted by id"
-            )
-        object.__setattr__(self, "post_frame_evidence", post_evidence)
         if self.post_frame_id is not None and (
             type(self.post_frame_id) is not int
             or self.post_frame_id <= 0
@@ -1054,22 +1028,6 @@ class ControllerTransition:
                 raise RuntimeContractError(
                     "rejected transition must prove input did not execute"
                 )
-        if (self.post_frame_id is None) != (not post_evidence):
-            raise RuntimeContractError(
-                "post frame and evidence must be paired when present"
-            )
-    @property
-    def post_frame_evidence_refs(self) -> tuple[str, ...]:
-        return tuple(ref.id for ref in self.post_frame_evidence)
-
-    @property
-    def produced_evidence(self) -> tuple[EvidenceRef, ...]:
-        return self.post_frame_evidence
-
-    @property
-    def event_evidence_refs(self) -> tuple[str, ...]:
-        return self.post_frame_evidence_refs
-
     def to_dict(self) -> dict[str, Any]:
         """Return the exact reasoning-free Controller transition snapshot."""
 
@@ -1080,9 +1038,6 @@ class ControllerTransition:
             "action": self.action,
             "input_completed": self.input_completed,
             "visible_effect": self.visible_effect,
-            "post_frame_evidence": [
-                ref.to_dict() for ref in self.post_frame_evidence
-            ],
             "post_frame_id": self.post_frame_id,
             "error_kind": self.error_kind,
         }
@@ -1160,8 +1115,6 @@ __all__ = [
     "ACTOR_TURN_FORMAT",
     "CONTROLLER_TRANSITION_FORMAT",
     "MISSION_RUNTIME_RESULT_FORMAT",
-    "CURRENT_FRAME_EVIDENCE_KIND",
-    "POST_ACTION_FRAME_EVIDENCE_KIND",
     "APPROVED_DESKTOP_ACTIONS",
     "APPROVED_OBSERVATION_TOOLS",
     "APPROVED_OUTCOME_TOOLS",
