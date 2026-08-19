@@ -69,6 +69,28 @@ def test_control_value_uses_complete_text_when_value_pattern_is_truncated():
     assert harness._control_value(Control()) == full
 
 
+def test_control_value_keeps_empty_editor_empty_when_text_is_accessible_name():
+    harness = _load_harness()
+
+    class Range:
+        def GetText(self, length):
+            assert length == -1
+            return f"{harness.GOAL_INPUT}\r\n"
+
+    class Control:
+        Name = harness.GOAL_INPUT
+        ControlTypeName = "EditControl"
+
+        def GetPattern(self, pattern_id):
+            if pattern_id == harness.auto.PatternId.ValuePattern:
+                return SimpleNamespace(Value="")
+            if pattern_id == harness.auto.PatternId.TextPattern:
+                return SimpleNamespace(DocumentRange=Range())
+            return None
+
+    assert harness._control_value(Control()) == ""
+
+
 def test_document_text_can_verify_a_long_goal_when_edit_value_is_truncated(
     monkeypatch,
 ):
@@ -201,7 +223,7 @@ def test_goal_entry_uses_native_keyboard_input_without_value_pattern(monkeypatch
     }
 
 
-def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
+def test_cold_start_clicks_new_conversation_and_proves_blank_composer(
     monkeypatch,
     tmp_path,
 ):
@@ -209,71 +231,141 @@ def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
     driver = object.__new__(harness.ElectronClientDriver)
     driver.output_dir = tmp_path
     navigated = []
-    lookups = []
+    captures = []
+    invoked = []
+    refreshes = []
+    state = {
+        "workbench_open": True,
+        "drawer_open": False,
+        "new_conversation": False,
+    }
+    drawer = object()
+    stale_root = object()
+    fresh_root = object()
 
-    class SessionButton:
-        Name = "会话 27"
+    class NewConversationButton:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def GetInvokePattern(self):
+            return SimpleNamespace(Invoke=self._invoke)
+
+        def _invoke(self):
+            invoked.append(self.owner)
+            if self.owner == "drawer":
+                state["drawer_open"] = False
+                state["new_conversation"] = True
 
         def Click(self):
-            return None
+            self._invoke()
 
-    session = SessionButton()
+    drawer_button = NewConversationButton("drawer")
+    background_button = NewConversationButton("background")
 
-    class ClearButton:
-        def Click(self):
-            session.Name = "会话 0"
+    class GoalInput:
+        def GetPattern(self, pattern_id):
+            assert pattern_id == harness.auto.PatternId.ValuePattern
+            return SimpleNamespace(Value="")
 
     driver.restore_and_focus = lambda: None
-    driver.navigate = lambda title: navigated.append(title)
-    driver.capture_window = lambda name: str(tmp_path / name)
+    driver.window = stale_root
     driver.identity = SimpleNamespace(hwnd=4242)
 
-    def button(title, *, prefix=False, timeout=0.0):
-        del timeout
-        lookups.append((title, prefix))
-        if title == "会话 ":
-            return session
-        if title == "清空会话记忆":
-            return ClearButton()
-        raise AssertionError(title)
+    def navigate(title):
+        navigated.append(title)
+        if title == harness.CLOSE_WORKBENCH:
+            state["workbench_open"] = False
+        elif title == harness.OPEN_CONVERSATIONS and state["workbench_open"]:
+            raise AssertionError("conversation drawer is hidden by the workbench")
+        elif title == harness.OPEN_CONVERSATIONS:
+            state["drawer_open"] = True
+        elif title == harness.NEW_CONVERSATION:
+            raise AssertionError("new conversation lookup must be drawer-scoped")
 
-    driver.button = button
+    def capture(name):
+        captures.append(name)
+        return str(tmp_path / name)
+
+    def find(_window, control_type, *, name="", **_kwargs):
+        if (
+            _window in {stale_root, fresh_root}
+            and control_type == "Group"
+            and name == harness.CONVERSATION_DRAWER
+        ):
+            return drawer if state["drawer_open"] else None
+        if (
+            _window is drawer
+            and control_type == "Button"
+            and name == harness.NEW_CONVERSATION
+        ):
+            return drawer_button
+        if (
+            _window in {stale_root, fresh_root}
+            and control_type == "Button"
+            and name == harness.NEW_CONVERSATION
+        ):
+            return background_button
+        if (
+            state["new_conversation"]
+            and _window is fresh_root
+            and control_type == "Group"
+            and name == harness.NEW_CONVERSATION
+        ):
+            return object()
+        if (
+            state["new_conversation"]
+            and _window is fresh_root
+            and control_type == "Edit"
+            and name == harness.GOAL_INPUT
+        ):
+            return GoalInput()
+        return None
+
+    driver.navigate = navigate
+    driver.capture_window = capture
+
+    def refresh(hwnd):
+        assert hwnd == 4242
+        refreshes.append(hwnd)
+        return fresh_root
+
+    monkeypatch.setattr(harness.auto, "ControlFromHandle", refresh)
+    monkeypatch.setattr(harness, "_first_visible_descendant", find)
     monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
 
-    invoked = []
+    result = driver.start_new_conversation_through_client()
 
-    def fake_scroll_invoke(hwnd, *, regex_name):
-        invoked.append((hwnd, regex_name))
-        # Mirror the harness path: find the named button and invoke it.
-        if regex_name == harness.re.compile(r"^会话 \d+$").pattern or (
-            regex_name == r"^会话 \d+$"
-        ):
-            return None
-        if regex_name == "清空会话记忆":
-            ClearButton().Click()
-            return None
-        raise RuntimeError(f"unexpected scroll invoke: {regex_name!r}")
-
-    monkeypatch.setattr(harness, "_uia_scroll_invoke", fake_scroll_invoke)
-
-    result = driver.clear_session_through_client()
-
-    assert result["before"] == 27
-    assert result["after"] == 0
+    assert state["workbench_open"] is False
     assert navigated == [
         harness.NAV_AGENT,
-        harness.OPEN_RESOURCES,
-        harness.ASSETS_TAB,
-        harness.CLOSE_RESOURCES,
-        harness.NEW_CONVERSATION,
+        harness.CLOSE_WORKBENCH,
+        harness.OPEN_CONVERSATIONS,
     ]
-    assert lookups == [
-        ("会话 ", True),
-    ]
-    assert invoked == [
-        (4242, r"^会话 \d+$"),
-        (4242, "清空会话记忆"),
-    ]
+    assert invoked == ["drawer"]
+    assert refreshes == [4242]
+    assert driver.window is fresh_root
+    assert captures == ["before-new-conversation.png", "new-conversation.png"]
+    assert result == {
+        "action": "new_conversation",
+        "aria_label": harness.NEW_CONVERSATION,
+        "postcondition": {
+            "conversation_drawer_present": False,
+            "new_conversation_region_present": True,
+            "goal_input": "",
+        },
+        "proof": {
+            "before": str(tmp_path / "before-new-conversation.png"),
+            "after": str(tmp_path / "new-conversation.png"),
+        },
+    }
+
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "scripts"
+        / "client_e2e_run.py"
+    ).read_text(encoding="utf-8")
+    assert "清空会话记忆" not in source
+    assert r"^会话 \d+$" not in source
 
 
 def test_navigation_reasserts_the_client_foreground_before_click(monkeypatch):

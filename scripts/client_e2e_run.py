@@ -2,8 +2,8 @@
 """Drive the real Electron client with native mouse and keyboard input.
 
 Windows UI Automation is used only to locate and read visible controls. Goals,
-session reset, and submission are operated through native mouse and keyboard
-events in the foreground Electron window. Backend trace files are only
+new-conversation reset, and submission are operated through the foreground
+Electron client. Backend trace files are only
 collected after the client submission so the result can be audited without
 stealing focus from the desktop agent while it works.
 """
@@ -39,9 +39,9 @@ HARNESS_FOCUS_INPUT_TAG = 0x56584346
 
 CLIENT_TITLE = "灵动脚本"
 NAV_AGENT = "返回智能代理"
-OPEN_RESOURCES = "查看运行时状态"
-ASSETS_TAB = "技能与记忆"
-CLOSE_RESOURCES = "关闭工作台"
+CLOSE_WORKBENCH = "关闭工作台"
+OPEN_CONVERSATIONS = "打开对话列表"
+CONVERSATION_DRAWER = "对话列表"
 NEW_CONVERSATION = "新建对话"
 GOAL_INPUT = "消息输入"
 RUN_TASK = "发送消息"
@@ -233,6 +233,9 @@ def _control_value(control: Any) -> str:
         text = str(text_pattern.DocumentRange.GetText(-1) or "").rstrip("\r\n")
     except Exception:
         return value
+    control_name = str(getattr(control, "Name", "") or "").strip()
+    if not value and text.strip() == control_name:
+        return ""
     return text if len(text) > len(value) and text.startswith(value) else value
 
 
@@ -861,52 +864,89 @@ class ElectronClientDriver:
         ImageGrab.grab(all_screens=True).save(path)
         return str(path)
 
-    def clear_session_through_client(self) -> dict[str, Any]:
+    def start_new_conversation_through_client(self) -> dict[str, Any]:
+        """Start a blank client conversation without deleting server history."""
+
         self.restore_and_focus()
         try:
             self.navigate(NAV_AGENT)
         except RuntimeError:
             pass
-        self.navigate(OPEN_RESOURCES)
-        self.navigate(ASSETS_TAB)
-        session_button = self.button("会话 ", prefix=True, timeout=5.0)
-        before_name = session_button.Name.strip()
-        before_match = re.search(r"(\d+)$", before_name)
-        before = int(before_match.group(1)) if before_match else -1
-        _uia_scroll_invoke(self.identity.hwnd, regex_name=r"^会话 \d+$")
-        time.sleep(0.5)
         try:
-            _uia_scroll_invoke(self.identity.hwnd, regex_name="清空会话记忆")
-        except RuntimeError:
-            # Chromium can omit title-only icon buttons from UIA names; reload
-            # the tab once before treating it as a client defect.
-            _uia_scroll_invoke(self.identity.hwnd, regex_name=r"^会话 \d+$")
-            time.sleep(0.3)
-            _uia_scroll_invoke(self.identity.hwnd, regex_name="清空会话记忆")
-        cleared = True
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            time.sleep(0.3)
-            # React retains this tab button while its count changes.  Reusing
-            # the UIA element avoids repeatedly traversing every trace card on
-            # the Assets page while waiting for the visible count to reach 0.
-            now = session_button.Name.strip()
-            if re.search(r"\b0$", now):
-                break
-        else:
-            raise RuntimeError("通过客户端清空会话后，会话计数未归零")
-        after_name = session_button.Name.strip()
-        after_match = re.search(r"(\d+)$", after_name)
-        after = int(after_match.group(1)) if after_match else -1
-        if after != 0:
-            raise RuntimeError(f"冷启动前会话计数不是 0: {after_name}")
-        proof = self.capture_window("session-reset.png")
-        self.navigate(CLOSE_RESOURCES)
-        try:
-            self.navigate(NEW_CONVERSATION)
+            self.navigate(CLOSE_WORKBENCH)
         except RuntimeError:
             pass
-        return {"before": before, "after": after, "cleared": cleared, "proof": proof}
+        self.navigate(OPEN_CONVERSATIONS)
+        drawer = _first_visible_descendant(
+            self.window,
+            "Group",
+            name=CONVERSATION_DRAWER,
+        )
+        if drawer is None:
+            raise RuntimeError("客户端未显示对话列表")
+        new_conversation_button = _first_visible_descendant(
+            drawer,
+            "Button",
+            name=NEW_CONVERSATION,
+        )
+        if new_conversation_button is None:
+            raise RuntimeError("对话列表中未找到新建对话按钮")
+        before = self.capture_window("before-new-conversation.png")
+        try:
+            pattern = new_conversation_button.GetInvokePattern()
+            if pattern is not None:
+                pattern.Invoke()
+            else:
+                new_conversation_button.Click()
+        except Exception:
+            new_conversation_button.Click()
+        time.sleep(0.8)
+
+        deadline = time.time() + 10
+        goal_value = ""
+        while time.time() < deadline:
+            refreshed = auto.ControlFromHandle(self.identity.hwnd)
+            if refreshed is not None:
+                self.window = refreshed
+            drawer = _first_visible_descendant(
+                self.window,
+                "Group",
+                name=CONVERSATION_DRAWER,
+            )
+            region = _first_visible_descendant(
+                self.window,
+                "Group",
+                name=NEW_CONVERSATION,
+            )
+            goal = _first_visible_descendant(
+                self.window,
+                "Edit",
+                name=GOAL_INPUT,
+            )
+            if goal is not None:
+                goal_value = _control_value(goal)
+            if (
+                drawer is None
+                and region is not None
+                and goal is not None
+                and not goal_value
+            ):
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError("点击新建对话后，客户端未显示空白新对话")
+
+        after = self.capture_window("new-conversation.png")
+        return {
+            "action": "new_conversation",
+            "aria_label": NEW_CONVERSATION,
+            "postcondition": {
+                "conversation_drawer_present": False,
+                "new_conversation_region_present": True,
+                "goal_input": goal_value,
+            },
+            "proof": {"before": before, "after": after},
+        }
 
     def configure_goal(
         self,
@@ -1983,16 +2023,21 @@ def run_case(
         runtime_before = driver.wait_for_runtime_ready()
         result["runtime_before"] = runtime_before
         if _runtime_has_active_run(runtime_before):
-            raise RuntimeError("runtime already has an active run before session reset")
+            raise RuntimeError("runtime already has an active run before conversation reset")
         previous_current = runtime_before.get("current_run")
         previous_run_id = str(
             previous_current.get("run_id")
             if isinstance(previous_current, dict) else ""
         )
         if reset_session:
-            result["session_reset"] = driver.clear_session_through_client()
+            result["conversation_reset"] = (
+                driver.start_new_conversation_through_client()
+            )
         else:
-            result["session_reset"] = {"skipped": True, "reason": "same scenario context"}
+            result["conversation_reset"] = {
+                "skipped": True,
+                "reason": "same scenario context",
+            }
         result["configuration"] = driver.configure_goal(
             spec["task"],
             int(spec.get("max_steps", 120)),
