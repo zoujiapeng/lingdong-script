@@ -234,11 +234,10 @@ class TraceRecorder:
         if step is not None and phase in {"before", "batch_before"}:
             expected_region = self._region_from_event(event)
             # A causal action record is useful only when its before-frame was
-            # captured before input dispatch.  Make that invariant the normal
-            # runtime contract; an explicit opt-out remains available for
-            # latency experiments, but evaluation and ordinary production
-            # traces must not silently substitute a possibly stale daemon
-            # sample and then call the action verified.
+            # captured before input dispatch. Make that invariant the normal
+            # runtime contract. The explicit latency opt-out skips the
+            # before-frame instead of substituting an asynchronously sampled
+            # frame whose ordering cannot be guaranteed.
             if strict_trace and expected_region is not None:
                 try:
                     # Evaluation-only strict mode pays this small synchronous
@@ -246,20 +245,6 @@ class TraceRecorder:
                     frame = capture(expected_region)
                     frame_region = expected_region
                     baseline_capture_source = "sync_pre_action"
-                except Exception:
-                    frame = None
-            elif not strict_trace:
-                try:
-                    from ..fast.perception_daemon import PERCEPTION_DAEMON
-
-                    latest = PERCEPTION_DAEMON.latest_frame(
-                        run_id=str(run_id or ""), max_age_ms=500,
-                    )
-                    if latest is not None:
-                        candidate_frame, candidate_region = latest
-                        if expected_region is not None and candidate_region == expected_region:
-                            frame, frame_region = candidate_frame, candidate_region
-                            baseline_capture_source = "perception_daemon"
                 except Exception:
                     frame = None
         elif step is not None and phase in {"after", "batch_after"} and strict_trace:

@@ -86,7 +86,6 @@ def test_trace_saves_batch_child_before_after_screenshots(tmp_path, monkeypatch)
 
 
 def test_trace_writer_is_async_and_pairs_interleaved_action_ids(tmp_path, monkeypatch):
-    from winpilot.fast import perception_daemon
     from winpilot.recorder import trace as trace_mod
     from winpilot.utils.screenshot import Region
 
@@ -103,11 +102,6 @@ def test_trace_writer_is_async_and_pairs_interleaved_action_ids(tmp_path, monkey
 
     monkeypatch.setattr(trace_mod, "capture", slow_capture)
     monkeypatch.setenv("WINPILOT_STRICT_TRACE_BASELINE", "0")
-    monkeypatch.setattr(
-        perception_daemon.PERCEPTION_DAEMON,
-        "latest_frame",
-        lambda **_kwargs: (image.copy(), region),
-    )
     envelopes = {
         action_id: {
             "action_id": action_id,
@@ -144,18 +138,18 @@ def test_trace_writer_is_async_and_pairs_interleaved_action_ids(tmp_path, monkey
     by_action = {}
     for event in events:
         by_action.setdefault(event.get("action_id"), []).append(event.get("screenshot"))
-    assert by_action["a"] == ["async/before_001.jpg", "async/after_001.jpg"]
-    assert by_action["b"] == ["async/before_002.jpg", "async/after_002.jpg"]
+    assert by_action["a"] == [None, "async/after_001.jpg"]
+    assert by_action["b"] == [None, "async/after_002.jpg"]
+    assert not (tmp_path / "async" / "before_001.jpg").exists()
+    assert not (tmp_path / "async" / "before_002.jpg").exists()
 
 
-def test_trace_after_screenshot_does_not_reuse_pre_action_daemon_frame(tmp_path, monkeypatch):
-    from winpilot.fast import perception_daemon
+def test_trace_low_latency_opt_out_captures_after_without_before_fallback(tmp_path, monkeypatch):
     from winpilot.recorder import trace as trace_mod
     from winpilot.utils.screenshot import Region
 
     recorder = trace_mod.TraceRecorder()
     trace_mod.BUS.remove_sink(recorder._on_event)
-    stale = np.zeros((30, 40, 3), dtype=np.uint8)
     current = np.full((30, 40, 3), 255, dtype=np.uint8)
     monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
     # Exercise the explicit low-latency opt-out path here; strict mode now
@@ -163,11 +157,6 @@ def test_trace_after_screenshot_does_not_reuse_pre_action_daemon_frame(tmp_path,
     monkeypatch.setenv("WINPILOT_STRICT_TRACE_BASELINE", "0")
     region = Region(5, 6, 40, 30)
     monkeypatch.setattr(trace_mod, "capture", lambda _region=None: current.copy())
-    monkeypatch.setattr(
-        perception_daemon.PERCEPTION_DAEMON,
-        "latest_frame",
-        lambda **_kwargs: (stale.copy(), region),
-    )
     monkeypatch.setattr(trace_mod, "_POST_ACTION_CAPTURE_SETTLE_S", 0.0)
 
     try:
@@ -205,9 +194,9 @@ def test_trace_after_screenshot_does_not_reuse_pre_action_daemon_frame(tmp_path,
     finally:
         trace_mod.BUS.remove_sink(recorder._on_event)
 
-    before = cv2.imread(str(tmp_path / "frame-order" / "batch_before_001.jpg"))
+    before_path = tmp_path / "frame-order" / "batch_before_001.jpg"
     after = cv2.imread(str(tmp_path / "frame-order" / "batch_after_001.jpg"))
-    assert float(before.mean()) < 5
+    assert not before_path.exists()
     assert float(after.mean()) > 250
 
 

@@ -277,7 +277,6 @@ def _assert_model_owned_visual_evidence(
     runtime = start.get("runtime") or {}
     assert runtime.get("stage_type") == "ExecuteDesktopTask", runtime
     assert runtime.get("adaptive_visual_interaction") is True, runtime
-    assert runtime.get("perception_daemon") is False, runtime
     assert runtime.get("experience_enabled") is False, runtime
 
     child_events = [
