@@ -5,7 +5,6 @@ import {
   automationDocumentToFlowScript,
   automationIrToFlowScript,
   automationIrToWps,
-  automationProjectionFingerprint,
   automationRuntimeGraph,
   validateAutomationLocally,
   validateAutomationRuntime,
@@ -109,10 +108,10 @@ describe('Automation IR adapters', () => {
     expect(ir).not.toHaveProperty('fallback');
     expect(ir.runtime?.kind).toBe('arp_graph');
     expect(automationRuntimeGraph(ir).metadata.source_ir).toBe('air-flow');
-    const stale = structuredClone(ir);
-    stale.steps[1].tool = 'changed-after-compile';
-    expect(validateAutomationRuntime(stale)).toContain('投影已过期');
-    expect(() => automationRuntimeGraph(stale)).toThrow('投影已过期');
+    const changedEditorView = structuredClone(ir);
+    changedEditorView.steps[1].tool = 'changed-after-compile';
+    expect(validateAutomationRuntime(changedEditorView)).toBeUndefined();
+    expect(automationRuntimeGraph(changedEditorView)).toEqual(automationRuntimeGraph(ir));
 
     const restored = automationIrToFlowScript(ir);
     expect(restored.meta.id).toBe('flow-1');
@@ -289,13 +288,6 @@ describe('Automation IR adapters', () => {
     expect(validateAutomationIR(ir)).toBeUndefined();
     expect(validateAutomationRuntime(ir)).toContain('runtime.kind');
     expect(() => automationRuntimeGraph(ir)).toThrow('runtime.kind');
-  });
-
-  it('keeps the projection fingerprint cross-runtime stable', () => {
-    expect(automationProjectionFingerprint(
-      [{ tool: 'start', node_id: 's', params: { x: 1, text: '你好' } }],
-      { token: 'x' },
-    )).toBe('sha256:f6996f5a13fe5cbb9a6c41e57a3ee5feb366e844d6055b54737d6f28fafcb302');
   });
 
   it('rejects dangling editor projection edges', () => {

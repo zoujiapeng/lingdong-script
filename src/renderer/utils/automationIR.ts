@@ -7,7 +7,7 @@ import { wpsToFlowScript, type WpsScript, type WpsStep } from './wpsToFlowScript
 
 export type AutomationRuntime =
   | { kind: 'wps_replay' }
-  | { kind: 'arp_graph'; graph: ArpGraph; projection_fingerprint: string };
+  | { kind: 'arp_graph'; graph: ArpGraph };
 
 export interface AutomationIR {
   format: 'automation-ir/1';
@@ -182,17 +182,6 @@ function sha256Hex(input: Uint8Array): string {
   return hash.map((word) => word.toString(16).padStart(8, '0')).join('');
 }
 
-function legacyAutomationProjectionFingerprint(
-  steps: Array<Record<string, unknown>>,
-  variables: Record<string, unknown>,
-  graph?: ArpGraph,
-): string {
-  const bytes = new TextEncoder().encode(stableJson({ steps, variables, ...(graph ? { graph } : {}) }));
-  let hash = 0x811c9dc5;
-  for (const byte of bytes) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
-  return `fnv1a32:${hash.toString(16).padStart(8, '0')}`;
-}
-
 export function automationProjectionFingerprint(
   steps: Array<Record<string, unknown>>,
   variables: Record<string, unknown>,
@@ -263,7 +252,6 @@ export function automationIrFromFlowScript(script: FlowScript, id = `air-${nanoi
     runtime: {
       kind: 'arp_graph',
       graph,
-      projection_fingerprint: automationProjectionFingerprint(steps, variables, graph),
     },
   };
 }
@@ -296,14 +284,6 @@ export function validateAutomationRuntime(ir: AutomationIR): string | undefined 
   if (!graph || graph.format !== 'arp/1') return 'Automation IR 的 arp_graph 运行时要求 graph 格式为 arp/1';
   if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
     return 'Automation IR 的 arp_graph 运行时必须包含 graph.nodes 和 graph.edges';
-  }
-  const expected = str(ir.runtime?.kind === 'arp_graph' ? ir.runtime.projection_fingerprint : '');
-  if (!expected) return 'Automation IR 的 arp_graph 运行时必须包含 projection_fingerprint';
-  const actual = expected.startsWith('fnv1a32:')
-    ? legacyAutomationProjectionFingerprint(ir.steps, ir.variables, graph)
-    : automationProjectionFingerprint(ir.steps, ir.variables, graph);
-  if (expected !== actual) {
-    return `Automation IR 运行时投影已过期：期望 ${expected}，实际计算为 ${actual}`;
   }
   return undefined;
 }

@@ -6,8 +6,6 @@ automations and skills use this validated envelope as their runtime boundary.
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 import time
 import uuid
 from typing import Any
@@ -213,43 +211,6 @@ def automation_runtime_kind(ir: dict[str, Any]) -> str:
     return ""
 
 
-def automation_projection_fingerprint(
-    steps: list[dict[str, Any]],
-    variables: dict[str, Any],
-    graph: dict[str, Any] | None = None,
-) -> str:
-    content: dict[str, Any] = {"steps": steps, "variables": variables}
-    if graph is not None:
-        content["graph"] = graph
-    payload = json.dumps(
-        content,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
-
-
-def _legacy_projection_fingerprint(
-    steps: list[dict[str, Any]],
-    variables: dict[str, Any],
-    graph: dict[str, Any] | None = None,
-) -> str:
-    content: dict[str, Any] = {"steps": steps, "variables": variables}
-    if graph is not None:
-        content["graph"] = graph
-    payload = json.dumps(
-        content,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    value = 0x811C9DC5
-    for byte in payload:
-        value = ((value ^ byte) * 0x01000193) & 0xFFFFFFFF
-    return f"fnv1a32:{value:08x}"
-
-
 def arp_graph_from_automation_ir(
     ir: dict[str, Any],
     *,
@@ -268,24 +229,6 @@ def arp_graph_from_automation_ir(
     raw_graph = runtime.get("graph")
     if not isinstance(raw_graph, dict):
         raise ValueError("Automation IR arp_graph runtime requires graph object")
-    expected = _nonempty_str(runtime.get("projection_fingerprint"))
-    if not expected:
-        raise ValueError("Automation IR arp_graph runtime requires projection_fingerprint")
-    fingerprint_args = (
-        ir.get("steps") or [],
-        ir.get("variables") or {},
-        raw_graph,
-    )
-    actual = (
-        _legacy_projection_fingerprint(*fingerprint_args)
-        if expected.startswith("fnv1a32:")
-        else automation_projection_fingerprint(*fingerprint_args)
-    )
-    if expected != actual:
-        raise ValueError(
-            "Automation IR runtime projection is stale: "
-            f"expected {expected}, calculated {actual}"
-        )
     from .orchestrator.contracts import ArpGraph, validate_graph
 
     try:

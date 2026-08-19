@@ -301,7 +301,8 @@ describe('control plane client contracts', () => {
       expect(String(fetchMock.mock.calls[1][0])).toContain('/api/v2/automation-ir/runs');
       const submitted = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
       expect(submitted.automation.runtime.kind).toBe('arp_graph');
-      expect(submitted.automation.runtime.projection_fingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
+      expect(submitted.automation.runtime.graph.format).toBe('arp/1');
+      expect(submitted.automation.runtime).not.toHaveProperty('projection_fingerprint');
     } finally {
       vi.unstubAllGlobals();
     }

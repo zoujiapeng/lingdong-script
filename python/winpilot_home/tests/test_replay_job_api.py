@@ -165,8 +165,6 @@ def test_get_script_as_automation_ir(client, tmp_path):
 
 
 def _arp_automation_ir():
-    from winpilot.automation_ir import automation_projection_fingerprint
-
     ir = {
         "format": "automation-ir/1",
         "id": "air-api",
@@ -203,11 +201,6 @@ def _arp_automation_ir():
             },
         },
     }
-    ir["runtime"]["projection_fingerprint"] = automation_projection_fingerprint(
-        ir["steps"],
-        ir["variables"],
-        ir["runtime"]["graph"],
-    )
     return ir
 
 
@@ -226,13 +219,6 @@ def test_automation_ir_validate_api_preserves_individual_graph_errors(client):
         {"id": "legacy-b", "kind": "legacy_flow", "config": {"node_type": "camera_capture"}},
     ]
     ir["runtime"]["graph"]["edges"] = []
-    from winpilot.automation_ir import automation_projection_fingerprint
-    ir["runtime"]["projection_fingerprint"] = automation_projection_fingerprint(
-        ir["steps"],
-        ir["variables"],
-        ir["runtime"]["graph"],
-    )
-
     response = client.post("/api/v2/automation-ir/validate", json=ir)
 
     assert response.status_code == 200
@@ -270,7 +256,7 @@ def test_automation_ir_api_starts_arp_projection(client, monkeypatch):
     assert captured[0][1] == {"token": "x"}
 
 
-def test_script_save_rejects_stale_automation_runtime_projection(client):
+def test_script_save_uses_valid_runtime_graph_directly(client):
     ir = _arp_automation_ir()
     ir["steps"][0]["tool"] = "changed-after-runtime-compile"
 
@@ -279,8 +265,8 @@ def test_script_save_rejects_stale_automation_runtime_projection(client):
         json={"script": ir},
     )
 
-    assert response.status_code == 400
-    assert "projection is stale" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
 
 
 def test_automation_ir_api_routes_wps_runtime_to_replayer(client, monkeypatch):

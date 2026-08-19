@@ -170,21 +170,13 @@ def test_automation_ir_validates_and_returns_canonical_arp_runtime_graph():
             },
         },
     }
-    ir["runtime"]["projection_fingerprint"] = (
-        automation_ir.automation_projection_fingerprint(
-            ir["steps"],
-            ir["variables"],
-            ir["runtime"]["graph"],
-        )
-    )
-
     assert automation_ir.validate_automation_runtime(ir) is None
     graph = automation_ir.arp_graph_from_automation_ir(ir)
     assert graph.id == "graph-1"
     assert graph.nodes[0].id == "start"
 
-    ir["steps"][0]["tool"] = "changed-after-compile"
-    assert "projection is stale" in automation_ir.validate_automation_runtime(ir)
+    ir["runtime"]["graph"]["edges"][0]["target"] = "missing"
+    assert "missing target" in automation_ir.validate_automation_runtime(ir)
 
 
 def test_automation_ir_runtime_rejects_missing_flow_graph():
@@ -203,13 +195,6 @@ def test_automation_ir_runtime_rejects_missing_flow_graph():
 
     assert automation_ir.validate_automation_ir(ir) is None
     assert "runtime.kind" in automation_ir.validate_automation_runtime(ir)
-
-
-def test_projection_fingerprint_matches_cross_runtime_contract():
-    assert automation_ir.automation_projection_fingerprint(
-        [{"tool": "start", "node_id": "s", "params": {"x": 1, "text": "你好"}}],
-        {"token": "x"},
-    ) == "sha256:f6996f5a13fe5cbb9a6c41e57a3ee5feb366e844d6055b54737d6f28fafcb302"
 
 
 def test_wps_runtime_ignores_removed_safety_settings():
