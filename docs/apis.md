@@ -1,163 +1,123 @@
 # API / IPC / MCP
 
-项目有四类接口：Electron HTTP API、WinPilot REST/WebSocket、Electron IPC、MCP。它们服务不同的运行时，不能因为路径或工具名相似就混用。
+项目有三类本地接口：Electron `:7880` HTTP、Electron 托管的 WinPilot REST/WebSocket、
+Electron IPC。只有可见 Electron“智能代理”提交到 WinPilot
+`POST /api/v2/goals/runs` 才是产品自然语言 Agent 入口；其他接口用于 Studio、回放、兼容或
+进程控制，不能冒充客户端 E2E。
 
 ## Electron HTTP API
 
-实现：`src/main/api.ts`。默认监听 `127.0.0.1:7880`，可由 `API_PORT` 覆盖。除 `/api/ping` 外，接口要求 Electron 进程生成的 bearer token，并严格限制本地 origin。`/api/execute-js` 默认禁用，只能用显式开发环境变量开启。
+实现位于 `src/main/api.ts`，默认监听 `127.0.0.1:7880`，可由 `API_PORT` 覆盖。除
+`/api/ping` 外都要求 Electron 生成的 bearer token，并限制本地 origin；
+`/api/execute-js` 默认关闭。
 
-当前端点（除明确列出的 GET 外，下面各功能组均为 POST；`/api/ping`、`/api/get-state`、`/api/set-view-mode` 和 `/api/fit-screen` 同时提供 GET/POST 形态）：
+这套接口服务流程编辑器和旧本地工具：
 
-- GET：`/api/ping`、`/api/get-state`、`/api/set-view-mode`、`/api/fit-screen`、`/api/execute-js`。
-- 脚本/画布：`/api/load-script`、`/api/new-script`、`/api/save-script`、`/api/set-script-name`、`/api/check-params`、`/api/auto-layout`。
-- 节点/边：`/api/add-node`、`/api/update-node`、`/api/update-node-params`、`/api/delete-nodes`、`/api/add-edge`、`/api/delete-edges`。
-- 编辑命令：`/api/undo`、`/api/redo`、`/api/select-all`、`/api/clear-selection`、`/api/copy-selected`、`/api/cut-selected`、`/api/paste`、`/api/duplicate-nodes`。
-- 执行：`/api/run-dsl`、`/api/generate-dsl`、`/api/create-flow`、`/api/engine/start`、`/api/engine/pause`、`/api/engine/resume`。
-- 截图/OCR：`/api/screenshot/capture`、`/api/screenshot/select-region`、`/api/ocr/region`、`/api/wheel-select`。
-- 宏：`/api/macro/start-recording`、`/api/macro/stop-recording`、`/api/macro/play`、`/api/macro/list`、`/api/macro/delete`、`/api/macro/get-events`、`/api/macro/recording-status`。
-- `@feature`：`/api/features/list`、`/api/features/reload`、`/api/features/call`。
-- 模板/标记：`/api/save-template`、`/api/list-templates`、`/api/marks/save`、`/api/marks/load`。
-- AI/命令/UI：`/api/ai/generate`、`/api/command`、`/api/set-view-mode`、`/api/set-ui`、`/api/fit-screen`、`/api/get-state`、`/api/execute-js`。
-- 旧 `/api/agent-start` 已随 Electron autonomous Agent 删除；智能代理只使用托管服务的 `/api/v2/goals/runs`。
-- Electron 流程工具 MCP：`POST /mcp`。
+- 脚本/画布：load/new/save、节点/边、undo/redo、布局和选择；
+- 执行：旧 DSL/engine start/pause/resume；
+- 截图/OCR/区域选择；
+- 宏、`@feature`、模板和标记；
+- `POST /mcp`：流程图、`@feature` 和外部编辑控制面。
 
-这个 `:7880/mcp` 属于流程图、`@feature` 和外部编辑控制面，不是 WinPilot 的 GUI Controller MCP。
+它不是 WinPilot GUI Agent 的第二个模型入口。旧 `/api/agent-start` 已删除。
 
 ## WinPilot REST / WebSocket
 
-实现：`python/winpilot_home/winpilot/server.py`。必须由 `python/winpilot_home/serve.py` 启动；Electron 通常为托管子进程选择动态本地端口。中文原生工作台“智能代理、流程工作台、运行记录、技能与学习、系统设置”都使用这套控制面；`/` 下的旧 webui 只保留为兼容和诊断入口。
+实现位于 `python/winpilot_home/winpilot/server.py`，只能由
+`python/winpilot_home/serve.py` 启动。Electron 通常选择动态本地端口并托管该进程；不要直接
+运行 `uvicorn winpilot.server:app`。
 
-### 运行时身份契约
+### 运行时身份
 
-`GET /api/status` 和 `GET /api/v2/platform` 返回 `runtime` 身份。当前契约是 v2：
+`GET /api/status` 与 `GET /api/v2/platform` 返回 contract v3 runtime identity：
 
-- `runtime.contract_version == 2`。
-- `runtime.source.loaded_stamp/current_stamp/drifted` 表示进程启动时与当前 Python 源码指纹。
-- `runtime.git.loaded_commit/current_commit/branch/dirty` 区分进程实际加载的 revision 与工作区当前 revision。
-- `runtime.pid/repo_root/winpilot_home/launcher/port` 用于排查旧进程、错误 worktree 和错误端口。
+- `contract_version == 3`；
+- `source.loaded_stamp/current_stamp/drifted` 标记进程加载源码与当前工作区是否漂移；
+- `git.loaded_commit/current_commit/branch/dirty` 区分已加载 revision 和工作区 revision；
+- `pid/repo_root/winpilot_home/launcher/port` 用于排查旧进程、错误 worktree 或端口。
 
-Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源码漂移或 loaded/current commit 不一致时，前端不会继续提交任务；`POST /api/v2/arp/runs` 也会在源码漂移后返回 `409`。代码更新后必须重启运行时，不能靠刷新页面让旧 Python 进程冒充新代码。
+Electron 和 Renderer 会阻止源码漂移后的新任务。代码更新后必须重启托管 Runtime；刷新页面
+不能让旧 Python 进程变成新代码。
 
-### 当前端点
+### 当前路由
+
+以下列表与 `server.py` 的当前 decorator 对齐：
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| GET | `/api/ping` | 公开存活检查 |
-| POST | `/api/chat` | 提交直接 Agent RuntimeJob，返回 `run_id/job_id/status` |
-| POST | `/api/stop` | 请求停止当前任务 |
-| POST | `/api/interject` | 向运行中的 Agent 插话 |
-| GET | `/api/status` | 当前任务、队列、Desktop queue、Perception daemon、模型与 runtime 身份 |
-| GET | `/api/v2/platform` | 原生工作台聚合视图与版本化 contracts |
-| GET | `/api/v2/capabilities` | ARP/Controller capability catalog |
-| GET | `/api/v2/runs` | 统一运行导航摘要；不内嵌 timeline/evidence/result |
-| GET | `/api/v2/runs/current` | 当前运行投影与活跃/恢复的 ARP audit |
-| GET | `/api/v2/runs/{run_id}` | 单次完整运行投影与 ARP typed/historical audit |
-| POST | `/api/v2/runs/{run_id}/cancel` | 统一取消 Agent 或 ARP run；不存在返回 404，已终止返回 409 |
-| POST | `/api/v2/runs/{run_id}/pause` | 在当前原子动作完成后的安全边界暂停活跃 ARP 及其子 Agent |
-| POST | `/api/v2/runs/{run_id}/resume` | 继续由前端手动暂停的 ARP；人工确认门不走此端点 |
-| GET | `/api/v2/runs/{run_id}/artifacts/{artifact_id}` | 读取该 run 登记且重新通过大小/哈希/尺寸验证的受管理工件 |
-| GET | `/api/v2/jobs` | 统一 Agent/ARP/Replay/Schedule job 摘要列表；不内嵌 result |
-| GET | `/api/v2/jobs/{job_id}` | 单个 runtime job |
-| POST | `/api/v2/jobs/{job_id}/cancel` | 取消任意 runtime job |
-| POST | `/api/v2/arp/validate` | 校验 `arp/1` 图 |
-| POST | `/api/v2/task-contracts/compile` | 将自然语言编译为可满足性已检查的 `task-contract/1` 与 typed `arp/1` graph |
-| POST | `/api/v2/arp/runs` | 启动原生 ARP 图；源码漂移时 fail-closed |
-| GET | `/api/v2/arp/runs/{run_id}` | 查询 ARP 执行快照 |
-| POST | `/api/v2/arp/runs/{run_id}/cancel` | 取消 ARP run |
-| POST | `/api/v2/arp/runs/{run_id}/gate` | 决定等待中的人工门 |
-| POST | `/api/v2/automation-ir/validate` | 校验 IR envelope、runtime、safety、graph 和 projection fingerprint |
-| POST | `/api/v2/automation-ir/runs` | 运行 `wps_replay` 或 `arp_graph` IR |
-| GET | `/api/v2/integrations/chatgpt` | 本地 WinPilot MCP readiness、端点和工具目录 |
-| POST | `/api/elevate` | 请求 UAC 提权重启 |
-| GET/PATCH | `/api/config` | 读取/更新配置；返回时掩码 API key |
-| GET | `/api/traces`、`/api/evals` | 列出本机 trace / GUI eval 摘要 |
-| GET | `/api/trace/{run_id}/summary` | trace 延迟、工具和证据摘要 |
-| GET | `/api/trace/{run_id}` | 读取 trace |
-| GET | `/api/trace/{run_id}/shot/{name}` | 读取 trace 截图 |
-| POST | `/api/export/{run_id}` | 导出兼容 `.wps.json` |
-| POST | `/api/export/{run_id}/ir` | 导出 `automation-ir/1` |
-| GET | `/api/scripts` | 列脚本 artifact；返回 `valid/validation_error` 与独立的 `trust/memory_id/script_sha256` |
-| GET/PUT | `/api/script/{file}` | 读取/保存 `.wps.json` |
-| GET | `/api/script/{file}/ir` | 将 `.wps.json` 包装为 `automation-ir/1` |
-| GET | `/api/automation-ir/{file}` | 读取并校验 `.automation.json` |
-| POST | `/api/human/start`、`/api/human/stop` | 开始或停止人类演示录制 |
-| GET | `/api/human/status` | 人类演示录制状态 |
-
-`POST /api/v2/task-contracts/compile` 接受 `task`、`max_steps` 与可选的 `cold_start`。`cold_start=true` 会在合同和图上写入 `experience_policy=disabled`，不生成 `skill_replay` 节点，并禁止该 run 读取或写入阶段 Skill、经验提示和会话记忆；它用于验证首次探索路径，不会改变任务语义或为某个测试对象增加分支。
-
-当结构化 intent 表明任务依赖当前可见状态、轮次或共享交互面时，编译结果包含 `InteractionSessionContract`，并生成 `ObserveScene → InferInteraction → PerformTurn → VerifyLocalEffect`。只有 `expected_external_change=true` 的持续会话才可能进入 `WaitForExternalChange`；普通一次性拖动、点击或选择任务在语义完成核验后结束。等待阶段发出的 `interaction.external_change_observed` 只是下一轮控制/遥测证据，不是最终 completion obligation；最终必须由最新权威帧上的 `interaction.task_completed` 满足。合同中的 `authoritative_state_ref` 与 `interaction_region_ref` 是 ephemeral state binding，不是可发送 artifact。
-
-`GET /api/v2/arp/runs/{run_id}` 的 typed-task 快照包含 `task_contract`、`satisfiability`、`current_stage`、`stage_trace`、`artifacts`、`contract_evidence`、`experience_policy` 与 `skill_replay_node_count`。`stage_trace` 记录阶段状态、required/verifier/exposed/missing capabilities、模型可见工具、Controller 工具、`selected_evidence_providers`、artifact id、模型调用次数、`model_elapsed_ms`、`controller_elapsed_ms`、`capture_elapsed_ms`、interaction budget、尝试次数、失败分类和恢复策略；这些计时来自节点持久化的 `runtime_metrics`，不能从截断后的展示摘要反推。Controller batch 的 transaction trace 还记录 planned/attempted/committed/next-uncommitted、scope recovery 和重新绑定证据。观察帧不会出现在可发送 artifact 集合中。
-
-面向前端历史页应优先使用通用 `GET /api/v2/runs/{run_id}`。运行结束时 terminal trace 持久化有界 audit snapshot，启动事件持久化原始 Task Contract；服务重启后，Run Projection 还能从 task-stage node output 与 `arp_evidence` 恢复阶段能力、Evidence Registry 和 Completion Contract，并从 ArtifactStore manifest 恢复工件。旧 trace 若没有合同 snapshot，会返回 `arp.audit_source=trace_projection` 且省略 `task_contract`；客户端必须明确标注这是事件恢复，不能用当前 parser 补猜历史合同。
-
-`GET /api/v2/runs` 与 `/api/v2/jobs` 是轻量集合接口。前者保留状态、时间和聚合 metrics，但将 `timeline/evidence` 置为空、`result` 置为 null；后者省略 `result` 字段。需要完整内容时分别请求 run detail 或 job detail，不能依赖列表携带隐式大对象。
-
-artifact endpoint 同时支持进程内 execution 和重启后的 manifest。manifest 记录本身不构成信任：路径必须位于该 run 的 `traces/<run_id>/artifacts`，run id 必须一致；响应前 `ArtifactStore.get()` 再验证文件非空、大小、SHA-256 和图片尺寸。未知、跨 run、被修改或已删除的工件均返回 404。
-
-实时交互 run 还在有界的 `interaction_state` 中审计 `session_id`、`mode`、`frame_id`、`turn_index`、`model_calls`、`target_binding`、`interaction_region`、`turn_owner`、baseline/current observation artifact、`last_mutating_plan`、`last_executed_action`、`last_local_verification`、`frame_lineage`、`grounding_proof`、`failed_no_effect_evidence_check`、external change、`waiting_external` 与 `failure_stage`。只有合同声明需要外部参与者时才允许 `waiting_external`；其中包含 watch scope、baseline artifact、timeout、`requires_external_participant` 和 `agent_turn_verified`。它是非终态运行状态，外部超时的稳定分类为 `external_participant_absent`，普通自主任务不能用它规避完成验证。保留 `last_*` 是为了避免终止用的 no-op plan 覆盖最后一次真实因果动作；前端运行视图优先展示这些字段。窗口标题、hwnd、capture scope、frame region/sha256/epoch 和 client bounds 用于判断 frame authority，不能把旧 frame id 继续带到新窗口动作。
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/v2/replay/apprentice/start`、`/api/v2/replay/apprentice/stop` | 开始或停止 Apprentice 录制；start 必须带非空结构化 `verification` |
-| GET | `/api/v2/replay/apprentice/status` | Apprentice 录制状态 |
-| POST | `/api/replay` | 启动 replay job，返回 `replay_id` |
-| GET | `/api/replay/{replay_id}` | 查询 replay job 状态、结果和失败细节 |
-| POST | `/api/replay/{replay_id}/cancel` | 取消 replay job |
-| GET/POST | `/api/agent-schedules` | 列出或创建 WinPilot Agent 计划任务 |
-| PATCH/DELETE | `/api/agent-schedules/{schedule_id}` | 更新、启用、重新定时或禁用计划任务 |
-| GET/POST/DELETE | `/api/memory` | 兼容 recipe 视图的记忆列表、创建和清空 |
-| PUT/DELETE | `/api/memory/{recipe_id}` | 更新或删除单条记忆；动作记忆的适用条件/证据被修改后自动退回 provisional，不能用 PUT 手工激活 |
-| POST | `/api/memory/search` | Memory Graph 搜索 |
-| GET | `/api/memory/{recipe_id}/lineage`、`/api/memory/{recipe_id}/related` | 谱系、邻接关系和 attempts |
-| POST | `/api/memory/{recipe_id}/retire` | 退役记忆 |
-| POST | `/api/memory/{recipe_id}/verification-runs` | 排队真实 Skill 验证 replay；与其他交互运行共享资源锁 |
-| GET | `/api/memory/{recipe_id}/verification-runs/{replay_id}` | 查询 Skill 验证状态、postflight 和晋升结果 |
-| POST | `/api/memory/{recipe_id}/verify` | 兼容查询入口，只接受真实 `replay_id`，不再接受人工 evidence 文本或执行晋升 |
-| GET/DELETE | `/api/session` | 会话记忆 |
+| GET | `/api/ping` | 无鉴权存活检查 |
+| GET | `/api/status` | 当前 run、RuntimeJob、Desktop Action Queue 与 runtime identity |
+| GET | `/api/v2/platform` | 原生工作台聚合视图 |
+| POST | `/api/v2/goals/runs` | 唯一产品自然语言 goal 入口 |
+| GET | `/api/v2/threads`、`/api/v2/threads/{thread_id}` | 有界 Thread/Turn 投影 |
+| POST | `/api/v2/goals/runs/{run_id}/desktop-lease` | Electron 交付精确桌面 lease |
+| POST | `/api/v2/goals/runs/{run_id}/desktop-lease/fail` | 明确关闭未交付 lease |
+| GET | `/api/v2/runs`、`/api/v2/runs/current`、`/api/v2/runs/{run_id}` | run 列表、当前 run 与详情 |
+| POST | `/api/v2/runs/{run_id}/cancel`、`pause`、`resume` | 精确 run 控制 |
+| GET | `/api/v2/runs/{run_id}/artifacts/{artifact_id}` | 读取该 run 的受管理工件 |
+| GET | `/api/v2/jobs`、`/api/v2/jobs/{job_id}` | RuntimeJob 列表与详情 |
+| POST | `/api/v2/jobs/{job_id}/cancel` | 精确取消 RuntimeJob |
+| GET | `/api/v2/desktop-context` | 当前桌面交接上下文 |
+| POST | `/api/v2/arp/validate`、`/api/v2/arp/runs` | Studio/兼容显式 ARP 图校验与执行 |
+| GET/POST | `/api/v2/arp/runs/{run_id}`、`.../cancel` | ARP 快照与取消 |
+| POST | `/api/v2/automation-ir/validate`、`/api/v2/automation-ir/runs` | Automation IR 校验与执行 |
+| POST | `/api/v2/flow-fragments/proposals` | 用户主动的一次性 Studio 片段建议 |
+| GET | `/api/v2/integrations/chatgpt` | 返回旧 ChatGPT 集成已移除状态 |
+| GET/PATCH | `/api/config` | 读取/更新配置；API key 返回时掩码 |
+| GET | `/api/traces`、`/api/trace/{run_id}` | trace 列表与有界事件详情 |
+| GET | `/api/trace/{run_id}/shot/{name}` | 读取 trace 诊断截图 |
+| POST | `/api/export/{run_id}`、`/api/export/{run_id}/ir` | 导出 WPS / Automation IR |
+| POST | `/api/export/thread/{thread_id}/ir` | 聚合 Thread 的普通 ARP 动作 |
+| GET/PUT | `/api/scripts`、`/api/script/{file}` | 脚本列表、读取与保存 |
+| GET | `/api/script/{file}/ir`、`/api/automation-ir/{file}` | IR 转换或读取 |
+| POST/GET | `/api/v2/replay/apprentice/start`、`stop`、`status` | 宏录制 |
+| POST/GET | `/api/replay`、`/api/replay/{replay_id}`、`.../cancel` | 离线 replay RuntimeJob |
+| GET/POST/PUT/DELETE | `/api/memory*` | Studio/Replay 的 recipe、搜索、谱系、验证与退役 |
 | WS | `/ws/events` | BUS 事件流；使用同一控制 token |
-| POST | `/mcp` | WinPilot GUI Controller + ARP 的 Streamable HTTP MCP |
-| GET | `/` | 兼容 WinPilot webui |
 
-### 运行语义边界
+路由不存在即表示功能已删除；不要按旧文档恢复 `/api/chat`、`/api/stop`、
+`/api/interject`、`/api/elevate`、`/api/v2/capabilities`、
+`/api/v2/task-contracts/compile`、ARP gate、trace summary、`/api/evals`、`/api/human/*`、
+`/api/agent-schedules`、`/api/session`、WinPilot `/mcp`、`/` 或 `/static/*`。
 
-- 原生视觉模型收到的不是固定全屏图。`controller.target_window_capture_enabled=true` 时，只在目标 hwnd 有效、可见、位于前台、几何可信、任务不要求桌面或多窗口上下文且裁剪确有收益时使用目标窗口；其余情况保守回退完整虚拟桌面。每帧都会给出 `scope`、`reason`、物理 `screen_region` 和精确提交图片尺寸。当前 vNext 模型直接使用 submitted-image 的精确 `image_*` 像素，`AtomicDesktopAdapter` 只映射一次到物理区域；Legacy 内部若仍保存归一化字段，它们不得进入模型合同或形成第二次映射。关闭该配置可强制全桌面做 A/B 对照。
-- 下述较大的 `InteractionAction`/Controller 能力表同时包含 Legacy/Studio API；当前 vNext Visual Actor 的模型工具面以 [visual-runtime-principles.md](visual-runtime-principles.md) 为准，不会自动获得全部兼容动作。
-- 实时交互在 `SurfaceBinding` 中额外校验目标 hwnd、窗口 client authority、frame identity 和 `InteractionRegion`。client bounds 是安全包络而不是自动 action region；区域含糊、帧陈旧、前台所有权丢失或动作逃逸时请求 fail-closed，不会把全桌面坐标猜成目标坐标。
-- `InteractionAction` 支持 `click`、独立的 `double_click`、`hover`、`move_mouse`、`drag`、`draw_strokes`、`scroll`、`select_color`、`type_text`、`hotkey`、`hold_key` 和 `wait_stable`。native 模型还可用受约束的顶层 `mouse_down` / `move_mouse` / `mouse_up` 跨新鲜帧完成按下后目标才出现的交互；runtime 只允许一个有超时的 held-pointer session，并在取消、失焦、异常或终态强制释放。Controller batch 中的按下/释放仍必须平衡。长拖拽或连续路径的新鲜度 preflight 使用沿路径均匀抽样的多个局部 ROI（当前上限 12），而不是只比较一个容易稀释局部变化的大包围框。
-- 每个空间动作在映射坐标前验证 observation artifact 的 current-run/purpose/sendable/HWND、实际 capture region、声明 frame region、尺寸、session 和 frame lineage；读取 artifact 时重新核验文件大小、SHA-256 与图像尺寸。`grounding_mode` 区分对象锚点、语义控件、自由路径、相对手势与有界坐标，`effect_region_binding` 则显式绑定 source/target/surface/independent。
-- 失败动作后的“新证据”只比较 source/target/path/effect 因果 ROI；整帧 hash 只是完全相同的快路径，无关动画和不可用比较都不能换取额外模型调用。判定写入 `failed_no_effect_evidence_check` 并 fail-closed。
-- `controller.multi_input_cooperation=false` 是默认值。开启后只是在人和 Agent 之间仲裁同一套系统光标/键盘焦点：优先后台安全动作，前台或光标所有权变化时中止物理动作。它不提供两个真实鼠标或两套键盘并发。
-- `agent_plan` WebSocket 事件里的计划可被模型在运行中完全替换、清空，或原子 add/update/remove/move/reopen。客户端应把新快照当作当前状态，不能把旧索引缓存成固定任务清单。
-- 计划完成、Controller 返回 `ok`、`screen_delta.changed=true`、颜色存在或 replay 成功都不是最终任务证据。完成仍由当前目标匹配的新鲜视觉核验或文件/进程等确定性 evidence 决定。
-- Agent、ARP、Replay 与计划任务按 `interactive_runtime` 资源排队。`desktop_action_queue` 对真实鼠标键盘保持 `physical` 全局单写；只有明确证明不会移动真实输入的窗口消息动作才可跨 hwnd 并发。
-- Memory verification 也按 `interactive_runtime` 排队。同一 memory 不能重复排队；候选、verification 条件或脚本摘要在排队/执行期间变化时 fail-closed。晋升要求 replay `ok=true`、非空结构化 postflight、所有 checks 通过且结束时 SHA-256 仍与开始时一致。
+### 运行语义
 
-`/api/trace/{run_id}/summary` 的 `low_latency` / `fast_gui` 是性能复盘入口，包含 capture、perception、LLM decision、action、post-verify、VLM、replan、skill reuse、p50/p95 以及 Controller/anchor 指标。没有外部 ground truth 的 `status=done` 不能据此换算成成功率。
+- `/api/v2/goals/runs` 只接收原始 goal 和可选 Thread/交接上下文。服务端构造唯一 vNext
+  产品图；失败时不回退 AgentRunner、FlowScript 或客户端图。
+- `/api/v2/arp/runs` 与 Automation IR 是 Studio/兼容入口。`ACTION_BATCH` 当前在 run 内复用
+  `FastGuiController` 并直连 canonical action；不再创建 `ToolSession`。
+- Desktop Action Queue 对真实鼠标键盘保持全局 `physical` 单写；取消、异常和终态必须清理
+  held pointer/key。
+- vNext trace 用同一 `decision_id` 配对 `vnext_physical_attempt` 与
+  `vnext_raw_receipt`。`trace_integrity` 只说明事件队列/写入是否完整；异步 `after_*` 截图是
+  best-effort 诊断帧，不是业务结果证明。
+- 任务完成由同一个 `LiveVisualActor` 查看真实新屏幕后决定。测试中的业务成功由外部文件、
+  UIA、应用状态或浏览器 oracle 判断；工具 `ok`、Runtime `done` 或截图变化都不能替代它。
+- 工件与 Memory/Replay 仍可使用文件摘要检查本地文件是否被改动；这不构成在线 Agent 的
+  evidence/hash 链，也不能复活第二 verifier。
 
 ### 鉴权
 
-除 `/api/ping` 外，WinPilot `/api/*` 与 `/mcp` 都要求 Electron 托管进程传入的随机 bearer token；也支持 `X-WinPilot-Token`，WebSocket 使用 `?token=`。浏览器 `OPTIONS` 只通过严格 CORS 预检，后续真实请求仍必须鉴权。不要把 token 写入仓库、trace、截图、文档示例或 URL 查询串。
-
-## ChatGPT / Codex 桌面 MCP
-
-WinPilot 的 `POST /mcp` 是 controller-first MCP：读取 runtime/windows/runs/skills，先用 `begin_gui_task` 将完整用户目标绑定到 Task Contract 与 MCP session，再按需观察或捕获视觉帧，执行有作用域的 GUI subgoal/短 batch，并运行或检查 ARP 图。它刻意不暴露任意 shell/file 工具；`run_arp_graph` 也拒绝嵌套 `agent_goal`，因为连接的桌面模型已经是高层规划器。
-
-MCP 的 Controller 动作遵守同一目标窗口、新鲜状态、Desktop queue、多输入仲裁和 evidence 规则。`capture_visual_fallback` 返回权威 JPEG，以及 `frame_id`、frame sha256/epoch、目标 hwnd 和物理映射；任何 `frame_*` 动作必须回显该 `source_frame_id`。`execute_visual_transaction` 把一个 typed Controller transaction 与动作后权威 JPEG 放在同一次 MCP 往返中，避免客户端再用动作前图判断结果；一张权威帧最多授权一次 raw coordinate gesture。`observe_desktop` 仍用于结构化目标窗口观察。MCP 工具返回成功只说明该工具调用成立，不自动等于用户任务完成。
-
-本地连接、bearer token、代理绕过和当前外部 HTTPS/OAuth 限制见 [chatgpt-desktop.md](chatgpt-desktop.md)。
+除 `/api/ping` 外，WinPilot `/api/*` 要求 Electron 托管进程传入的随机 bearer token，也支持
+`X-WinPilot-Token`；WebSocket 使用 `?token=`。不要把 token 写入仓库、trace、截图、文档示例
+或持久化 URL。
 
 ## Electron IPC
 
-实现：`python/agent/__main__.py`。名称仍叫 `agent`，但当前作用是 Electron stdin/stdout JSON-line 到 WinPilot BUS 的兼容适配器；它调用 `winpilot.agent.router.build_runner()`，不是另一套 Agent 主循环。
+当前 IPC 直接实现在 `src/main/main.ts` / `src/main/preload.ts`，不再经过已删除的
+`python -m agent` 子进程。主要分组：
 
-## MCP 实现边界
+- 窗口最小化/最大化/关闭、桌面 handoff prepare/bind/release；
+- 文件打开/保存/读写；
+- 托管 WinPilot URL、连接状态、启动与重启；
+- 旧 engine、截图、区域选择、OCR、wheel select、DSL、feature、宏；
+- 本地模板 scheduler 的 list/create/update/delete 与提醒桥；它不是已删除的 WinPilot Agent
+  schedule API，也不能自动提交自然语言 Agent goal；
+- 设置、通知与菜单事件。
 
-| MCP | 实现 | 当前职责 |
-| --- | --- | --- |
-| WinPilot Streamable HTTP MCP | `winpilot/integrations/chatgpt_mcp.py` + WinPilot `/mcp` | ChatGPT/Codex 高层规划器到 GUI Controller、ARP、Run、Skill |
-| Electron HTTP MCP | `src/main/api.ts` 的 `:7880/mcp` | 流程图、`@feature`、外部编辑控制 |
-| Python MCP | `python/lobster_mcp/server.py` | 从旧 `@feature` 注册表导出工具 |
-| TypeScript MCP/HTTP | `src/ai-interface/` | `run_flow/list_flows/create_flow/ask_ai/screen_capture` 等旧流程集成 |
+## MCP 边界
 
-后面三项服务流程图/`@feature` 体系，不是 WinPilot 主 GUI Agent 的工具表；不要用它们的成功结果替代 WinPilot 的新鲜画面 done gate。
+当前仓库只保留 Electron `:7880/mcp` 流程编辑控制面。WinPilot Streamable HTTP MCP、
+`winpilot/integrations/chatgpt_mcp.py`、`python/lobster_mcp/` 和 `src/ai-interface/` 已删除。
+产品 Actor 的 connector 工具由 `ConnectorGateway` 按显式配置访问外部 MCP；这不是一个本地
+WinPilot MCP server，也不能绕过同一 Actor 的选择与只读边界。

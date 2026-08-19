@@ -1,5 +1,9 @@
 # 新旧架构关系分析报告（Legacy vs vNext）
 
+> 历史报告：下文记录 2026-08-17 当时的依赖与删除顺序，不是当前源码清单。后续已在
+> `master` 完成 Studio ACTION_BATCH → `fast.controller` 直连，并由提交 `50ce370` 删除整个
+> `agent/` / `ToolSession` 架构；当前状态以 `CLAUDE.md` 顶部和 `docs/architecture.md` 为准。
+
 > 分支：`analysis/new-vs-old-architecture`（从 `master` 创建，2026-08-17）
 > 方法：对 `python/winpilot_home/winpilot`、`python/` 旧引擎目录、`src/`、`scripts/`、
 > 两层测试做 AST 级 import 正反向扫描，与 `test_vnext_mechanical_core_contract.py`、

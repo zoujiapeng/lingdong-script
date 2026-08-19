@@ -25,7 +25,7 @@ PlatformWorkbench
        -> observe_desktop -> run-bound desktop lease
           -> Electron yield + exact target bind
           -> same LiveVisualActor -> MissionRuntime
-          -> CapabilityBroker -> GUI transaction
+          -> AtomicDesktopAdapter -> RawDevice
 ```
 
 `POST /api/v2/goals/runs` 是主 Agent 用户入口。请求只携带 `goal` 和可选
@@ -39,11 +39,11 @@ PlatformWorkbench
 `vnext.live_agent_enabled=true` 是 fail-closed 的产品可用性配置，不是按任务选择的
 canary selector，也不允许客户端逐 run 切换。
 
-显式 MCP 只作为同一 `LiveVisualActor` 的普通工具。`/api/chat`、CLI、scheduler、
-integration runner 或直接 MCP 调用可以复用内部能力，但不能形成行为不同的第二套 GUI
-产品入口，也不能代替 Electron 客户端 E2E。`/api/v2/task-contracts/compile` 与可由
-客户端提交图和 runtime 的 `/api/v2/arp/runs` 暂留给 Studio、自动化编辑和兼容调用，
-不属于主 Agent 的意图或 runtime 选择链。
+显式 MCP 只作为同一 `LiveVisualActor` 的普通工具。旧 `/api/chat`、WinPilot Agent scheduler、Task Contract
+编译链和 Legacy AgentRunner 已删除；CLI、integration runner 或直接 MCP 调用不能形成行为
+不同的第二套 GUI 产品入口，也不能代替 Electron 客户端 E2E。可由客户端提交显式图和
+runtime 的 `/api/v2/arp/runs` 暂留给 Studio、自动化编辑和兼容调用，不属于主 Agent 的意图
+或 runtime 选择链。
 
 ### 2. 一个完整目标和一条执行主线
 
@@ -53,7 +53,7 @@ Goal Admission 把用户原始目标直接绑定到一个 full-goal vNext turn�
 full-goal GUI mission；connector 结果也只回到同一个 Actor 继续决定。模型可在运行中
 调整、替换或放弃工作计划，最新画面与动作结果优先于旧计划的一致性。任务不能在
 看见界面前被 compiler 拆成一串应用专属微步骤，也不能因任务名称切换到另一套
-Agent、工具或提示词。Task Contract 只属于 Studio/兼容链。
+Agent、工具或提示词。旧 Task Contract 已删除。
 
 原生客户端当前使用一个小而固定的本地操作面：点击、双击、移动、输入、快捷键、滚动、
 拖拽/折线路径/跨帧按住、原子输入序列、通用启动、整屏刷新，以及 claim/blocked；
@@ -84,30 +84,28 @@ UIA、Win32、OCR、传统 CV 和 VLM fallback 都是有 provenance 的观测信
 GUI mutation 应归一化为同一种事务：
 
 ```text
-pre-frame
-  -> target/path/effect grounding
-  -> focus and freshness preflight
-  -> desktop input lease
-  -> physical or proven background-safe input
-  -> post-frame
-  -> local effect evidence
+current authoritative frame
+  -> model-selected generic action
+  -> freshness / desktop single-writer boundary
+  -> AtomicDesktopAdapter coordinate mapping
+  -> RawDevice physical input + completion receipt
+  -> new authoritative frame
 ```
 
 点击、滚动、输入、快捷键、拖拽、笔画和按住不是不同应用的能力，而是不同形态的通用输入事务。
 
 ### 5. 一个完成语义
 
-动作成功、局部像素变化、阶段成功和用户任务完成是四件事：
+动作成功、屏幕变化和用户任务完成是三件事：
 
 - **action success**：输入被执行；
-- **local effect**：预期局部区域发生了与动作相关的变化；
-- **stage success**：阶段工件或义务满足；
+- **screen change**：动作后屏幕可能变化，也可能只是获得焦点；
 - **task completion**：用户的最终目标由当前证据满足。
 
-只有最后一层可以让外层 run 进入可信完成。模型总结、工具 `ok` 或 runtime `done`
-都只是候选状态。当前 vNext 由模型提交 claim，再由 obligation/evidence 链检查其
-运行时一致性；测试中的真实业务成功仍由独立应用/browser oracle 判断。历史帧只能
-证明先前发生过什么，不能替代用户要求持续保持的当前状态。
+只有最后一层代表用户目标完成。模型看自己得到的新真实屏幕并决定继续、claim 或 blocked；
+runtime 不再用独立 verifier/evidence 链复判语义。工具 `ok` 和物理回执只证明机器执行了输入，
+测试中的真实业务成功仍由独立应用/browser oracle 判断。历史帧只能证明先前发生过什么，
+不能替代用户要求持续保持的当前状态。
 
 纯文本回答使用独立 `reply` 终态：它返回模型原始文本，不能构造 frame、target、
 `physical_attempt` 或 mission evidence。`reply` 表示这一轮成功完成，但不会证明
@@ -117,7 +115,7 @@ pre-frame
 
 ### 原始目标与执行媒介
 
-主 Agent 不再有前端“执行约束”选择器，也没有对应的请求字段、Goal Admission 状态或 Broker `InteractionMode`。用户口头强调“必须使用 GUI”时，这句话只存在于原始 `goal`，由同一个语义 Agent 理解；系统不再要求用户把同一意图重复编码到系统开关，也不增加关键词路由器或第二个 Task Profiler。
+主 Agent 不再有前端“执行约束”选择器，也没有对应的请求字段或 Goal Admission 状态。用户口头强调“必须使用 GUI”时，这句话只存在于原始 `goal`，由同一个语义 Agent 理解；系统不再要求用户把同一意图重复编码到系统开关，也不增加关键词路由器或第二个 Task Profiler。
 
 当前 live vNext 在存在显式 MCP 配置时，把 `search_connector_tools` 和
 `call_connector_tool` 与首轮 `observe_desktop` 同时交给同一个 Actor；进入视觉线后，
@@ -149,29 +147,15 @@ Thread 同时最多有一个活动 Turn。历史只保留最近成功且有用�
 terminal 由 Electron 自行恢复窗口，stale run、stale lease 或重复终态不能恢复其他
 运行。发送消息本身不再隐藏窗口。
 
-### Task Contract（Studio/兼容）
+### Studio / ARP 兼容入口
 
-Task Contract 把用户目标表达为：
-
-- 原始目标与 typed intent；
-- 阶段和依赖；
-- 所需 capability；
-- 输入/输出 artifact；
-- evidence provider；
-- completion obligation；
-- `experience_policy`。
-
-编译器适合表达“先得到工件，再发送工件”这类显式数据依赖，不适合替模型预写未知 GUI 的每一次点击。该链当前由 `/api/v2/task-contracts/compile` 暂留给 Studio 和兼容调用，不再替主 Agent 选择 intent 或 runtime。无法从用户语句确定的信息应由 Agent 到达对应界面后观察决定。
-
-### ARP 兼容入口
-
-`arp/1` 是可执行图契约，负责阶段顺序、失败边、等待、人类门和运行审计。它不应成为第二个 GUI planner。Task Contract 进入 ARP 后，未知视觉步骤仍由同一个 bounded Agent/Controller 闭环处理。
+`arp/1` 是 Studio 的显式可执行图契约，负责节点顺序、失败边和确定性动作。它不应成为
+第二个 GUI planner，也不能从自然语言替模型预写未知 GUI 的每一次点击。
 
 服务端仍在内部用 ArpExecution 承载 vNext run 的生命周期，但主 Agent 的规范图只能由 Goal Admission 在服务端构造。允许调用方提交图和 `runtime_version` 的 `/api/v2/arp/runs` 是 Studio/兼容入口，不能被重新接回智能代理提交页。
 
-### StageRuntime（Legacy）
-
-StageRuntime 是旧 Task Contract/TASK_STAGE 链的阶段生命周期 owner：能力预检、工件传递、可选能力、执行与验证。它仍服务兼容调用，但不是 vNext 主 Agent 的 owner；新能力不得为了兼容在 StageRuntime 与 MissionRuntime 各实现一份。
+Task Contract、TASK_STAGE、StageRuntime 和 InteractionStageEngine 已删除；不得为兼容调用恢复
+另一套任务分解、阶段状态机或模型角色。
 
 ### vNext 当前 owner
 
@@ -183,13 +167,12 @@ StageRuntime 是旧 Task Contract/TASK_STAGE 链的阶段生命周期 owner：�
 | `DesktopLeaseSlot` + Electron handoff | 精确配对桌面让出、target 交付和窗口恢复 | 按任务词预租约、替模型决定是否用 GUI |
 | `MissionRuntime` | 顺序驱动模型、动作、新帧与 obligation | 关键词规划、纠正模型答案 |
 | `FrameAuthority` / workspace | 发布当前 frame、epoch、hwnd、region、图像身份 | 理解画面或选择目标 |
-| `CapabilityBroker` | 投影 schema、当前可写性、窗口/指针所有权 | 根据任务类型预选路线 |
 | `AtomicDesktopAdapter` / `RawDevice` | 唯一坐标映射、真实输入和机械回执 | snap、offset、语义成功 |
 
-这些 owner 不应形成多个 planner。Legacy `AgentRunner`、FastGuiController、
-RunStateMachine 和 FailureRecoveryLayer 中可复用的基础能力，只能逐项迁移或删除，
-不能整体接回 vNext。失败后使旧 frame 失效，捕获新权威帧，再让同一个模型结合完整
-目标与失败事实决定继续、换路径或 blocked；runtime 不解释业务含义。
+这些 owner 不应形成多个 planner。Legacy `AgentRunner` / `ToolSession` 已删除；
+`FastGuiController` 只服务 Studio 的确定性动作，不能整体接回 vNext。失败后使旧 frame 失效，
+捕获新权威帧，再让同一个模型结合完整目标与失败事实决定继续、换路径或 blocked；runtime
+不解释业务含义。
 
 ## 视觉与感知
 
@@ -376,10 +359,8 @@ transport；Runtime 不应增加 GitHub 专属修正。
 
 ## 缓存与用量
 
-仓库整体并非没有稳定前缀机制：冻结 Legacy `agent/loop.py` 在 32 KiB 前保持
-append-only history 保护 DeepSeek prefix cache，并把 session continuity 放在
-cache-friendly prefix。未生效的 `cache_strategy` 标签已删除；当前唯一活动 vNext 不走
-这个 Legacy owner，只通过仍然相同的请求开头自然形成 provider 可自动命中的前缀，
+旧 `agent/loop.py` 已随 AgentRunner 删除。未生效的 `cache_strategy` 标签也已删除；当前唯一
+活动 vNext 只通过请求中自然相同的开头形成 provider 可能自动命中的前缀，
 不主动发送 OpenAI `prompt_cache_key`、Anthropic `cache_control` 或 Gemini
 `cachedContent`，也不会为了命中缓存恢复无界历史或重复旧截图。
 
@@ -407,31 +388,20 @@ Agent 包时仍能加载并完成一次 vNext goal admission。共享 `FrameAuth
 Renderer 的默认 legacy `startGraph/compileTask` 消费者已删除。该合同只覆盖产品 Goal 主线，
 不等于整个仓库已经没有兼容面。
 
-全面审查确认以下问题仍在代码中，文档不能掩盖：
+全面审查确认以下问题仍在代码或验收边界中，文档不能掩盖：
 
-1. ✅ 已删（2026-08-17 分支 `analysis/new-vs-old-architecture`，未合入）：`/api/v2/task-contracts/compile`、
-   TaskContractCompiler、StageRuntime/InteractionStageEngine、`/api/chat`、`/api/stop`、
-   `webui/`、`/mcp` ChatGPT MCP、`eval/`、`/api/session`、`/api/agent-schedules`、
-   AgentRunner 半边（loop/router/session/done_verifier/failure_classifier 等 15 文件）、
-   `src/ai-interface/`、`python/lobster_mcp/`、`scripts/gui_eval_run.py`。`tasking/`
-   只剩 `artifacts/execution_context/evidence` 三个共享模块。
-2. `agent/` 剩余 21 文件是 Studio ACTION_BATCH 的确定性执行器闭包
-   （`ToolSession`+mixins），`FastGuiController` 与 `SubgoalExecutor` 仍在 `fast/`；
-   在把 Studio ACTION_BATCH 迁移到 `fast.controller` 直连之前不能删除。
-3. `TaskContractCompiler`、`StageRuntime`、`InteractionStageEngine` 已删除；
-   `SubgoalExecutor` 与 Controller 的重复解释仍是 Studio 兼容面债务。
-4. 某些 communication/application adapter 仍含布局、别名或任务族特化
-   （`agent/desktop_tools.py` 的通信适配器方法已删；`tasking.adapters` 已删）。
-5. 原生配置已默认关闭 UIA/OCR，但 `fusion.observe` 等兼容入口仍保留旧 provider 顺序；必须继续防止非默认调用面把结构化信号升级成视觉语义或失败后的自动 fallback cascade。
-6. `/api/v2/arp/runs`（Studio 显式图执行）、FlowScript、旧 feature/F9 engine 和本地 7880
-   API 仍是兼容面；`/api/chat`、scheduler、Legacy ARP goal 编译、webui 已删。
-7. 当前整改版本尚未用真实 Electron 客户端完成 11 个任务和混合长任务的全量验收，不能继承历史 run 的通过结论或据此宣称通用成功率。
-8. connector transport 已有 fixture 与 GitHub 官方 remote 实证，但首个官方 GitHub
-   干净用户任务仍因模型选择未批准工具并停止失败；不得加入专属 formatter 或参数
-   修正。原生
-   Responses/Anthropic/Gemini 仍未经过真实 provider 调用，只能保持 provisional。
-9. connector 的 run trace 尚未持久化无正文 physical receipt；旧
-   `agent/mcp_tools.py`（绕过 Gateway 的 Legacy 重复 owner）已随删除批次移除。
+1. Studio ACTION_BATCH 已直连 `fast.controller`，旧 `agent/` / `ToolSession`、Task Contract、
+   StageRuntime、固定 capability broker/profile、独立 evidence/canary/hash 链均已删除。
+2. `/api/v2/arp/runs`（Studio 显式图执行）、FlowScript、Memory/Replay、旧 feature/F9 engine 和
+   本地 7880 API 仍是有真实消费者的兼容面，只能继续按消费者逐项收敛。
+3. 原生配置默认关闭 UIA/OCR；兼容 perception 模块仍在，但不得把结构化信号升级成视觉语义，
+   也不得在模型失败后自动形成 fallback cascade。
+4. 当前可见 Electron 已通过受控套件 `18/18`、安全真实应用 `5/5` 和 Studio `2/2`；这仍不是
+   11 个历史任务、任意软件或不可逆外部动作的通用成功率。
+5. 可见 Stop 按钮触发 held input 释放尚无独立命名 E2E；异步 trace 队列在本轮零丢失，
+   但持续超过队列容量的压力边界尚未做真实客户端验收。
+6. connector transport 与原生 provider 协议仍需用当前 credential/接口重新验收；不得加入
+   服务专属 formatter、参数修正或第二模型来掩盖模型/供应商失败。
 
 当前切片的删除顺序与退出门见 [vNext 迁移](vnext-migration.md)，更广泛的整改优先级见 [GUI Agent 架构审计](GUI_AGENT_ARCHITECTURE_AUDIT.md)。
 

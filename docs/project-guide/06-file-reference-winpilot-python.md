@@ -3,6 +3,10 @@
 > 本卷是 2026-08-15 的源码审计入口。当前路径与顶层符号可按需运行
 > `python scripts/generate_project_guide.py --prefix python/winpilot_home/winpilot/` 查看；
 > 仓库不再提交逐文件 SHA 清单。当前 owner 事实以源码和 `CLAUDE.md` 顶部章节为准。
+> 重要：本卷正文保留 2026-08-15 的逐文件历史快照，不能把其中的 `CapabilityBroker`、
+> `agent/` / `ToolSession`、StageRuntime、evidence journal、projection fingerprint 或已删除路径
+> 当成当前实现。2026-08-19 已删除这些 owner；Studio ACTION_BATCH 当前直连
+> `fast.controller`，vNext 为 `LiveVisualActor → MissionRuntime → AtomicDesktopAdapter → RawDevice`。
 
 ## 1. 范围、计数和阅读约定
 

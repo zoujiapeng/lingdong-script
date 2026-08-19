@@ -90,9 +90,8 @@ sidecar。审计发现的 provider 误切 wire 与 Anthropic 丢失 canonical `s
 修复，相关 5 个测试文件 `214 passed`；三条线路尚未经过真实 provider credential
 调用，只能作为 provisional 实现，外部兼容仍是未验证边界。
 
-缓存审计删除了从未生效的 `cache_strategy` 标签，但仓库整体不是零稳定前缀：冻结
-Legacy `agent/loop.py` 在 32 KiB 前保持 append-only history，并把 session continuity
-放在 cache-friendly prefix。当前唯一活动 vNext 不走该 owner，也不创建
+缓存审计删除了从未生效的 `cache_strategy` 标签；旧 `agent/loop.py` 已随 AgentRunner 删除。
+当前唯一活动 vNext 不创建
 `prompt_cache_key`、`cache_control` 或 `cachedContent`；它只利用请求自然稳定部分的
 provider 自动缓存。20-turn 报告累计 `21626` prompt、`13248` cache hit、`8378`
 miss、`0` creation；`agent_usage` / run `model_usage` 已真实记录这些上游字段，但观测
@@ -128,12 +127,12 @@ Pi 只有在能整体替换并删除 Python 模型循环 owner、且跨任务 E2
 | 兼容面 | 暂留用途 | 禁止事项 |
 | --- | --- | --- |
 | `POST /api/v2/arp/runs` | Studio、显式图执行和兼容测试 | 不得接回智能代理页；不得作为 vNext 失败 fallback |
-| `agent/` 剩余 ToolSession/mixins | Studio ACTION_BATCH 的确定性执行器 | 不得重新成为模型循环或产品 fallback |
+| `fast.controller` | Studio ACTION_BATCH 的确定性执行器 | 不得重新成为模型循环或产品 fallback |
 | legacy IPC、FlowScript、旧 feature system | 仍有明确消费者的兼容功能 | 不得决定主 Agent 行为 |
 
-2026-08-17 删除批次（分支 `analysis/new-vs-old-architecture`）已移除：
+2026-08-17 删除批次已合入 `master`，并在 2026-08-19 继续完成 Studio 直连与旧包删除。已移除：
 `/api/v2/task-contracts/compile`、Task Contract/TASK_STAGE 执行与校验、
-`StageRuntime`/`InteractionStageEngine`、AgentRunner 半边、`/api/chat`、`/api/stop`、
+`StageRuntime`/`InteractionStageEngine`、整个 AgentRunner/ToolSession、`/api/chat`、`/api/stop`、
 `/api/agent-schedules`、`/api/session`、webui、ChatGPT MCP、`eval/`、
 `src/ai-interface`、`gui_eval_run.py`。`tasking/` 只剩 artifacts/execution_context/evidence。
 
@@ -147,16 +146,16 @@ Pi 只有在能整体替换并删除 Python 模型循环 owner、且跨任务 E2
 
 - 智能代理页及其恢复、重试、继续入口都只调用 `/api/v2/goals/runs`；
 - 删除主产品中的 runtime selector、客户端构图和 Legacy 自动降级；
-- 为 CLI、scheduler、integration 等入口分类：自然语言 Agent 目标接 Goal Admission，Studio/显式自动化保留清楚标识；
+- 为 CLI、integration 等入口分类：自然语言 Agent 目标接 Goal Admission，Studio/显式自动化保留清楚标识；
 - trace 能区分 product goal、Studio graph 和兼容 run。
 
 退出门：生产主 Agent 路径中不存在 `/task-contracts/compile` 或客户端 `/arp/runs` 调用，vNext 不可用时能观察到明确失败而非 Legacy run。
 
-### 2. 补齐 vNext 能力与证据
+### 2. 补齐 vNext 能力与机械可观测性
 
 - 将仍只存在于 Legacy 的通用 GUI 能力逐项迁入 vNext；
 - 同一语义 Agent 直接选择全部允许工具，不增加 Task Profiler、任务关键词表或应用专属 prompt；
-- trace 记录模型实际选择的工具、执行媒介和 terminal evidence，不记录前端策略状态；
+- trace 记录模型实际选择的工具、物理尝试和完成回执，不记录前端策略状态，也不承担语义复判；
 - 对 shell、provider 和 GUI 工具做对抗性测试，确保没有确定性 owner 替模型预选任务路线。
 
 退出门：目标任务族在 vNext 达到约定的功能与失败语义；用户口头要求、实际工具选择和外部结果能够由同一 run 追溯。
@@ -173,16 +172,17 @@ Pi 只有在能整体替换并删除 Python 模型循环 owner、且跨任务 E2
 
 ### 4. 隔离 Studio/兼容消费者
 
-- 给 `/task-contracts/compile` 和 `/arp/runs` 的剩余调用建立可枚举清单；
+- 已删除 `/task-contracts/compile`、Task Contract、TASK_STAGE、StageRuntime 和 AgentRunner；
+- 给 `/arp/runs`、Automation IR、Replay、Memory 与旧 Flow/feature 的剩余调用建立可枚举清单；
 - 把 Studio/自动化编辑与主 Agent 的类型、UI 和 telemetry 分开；
-- 停止向 Task Contract、TASK_STAGE、StageRuntime 和 AgentRunner 增加新 GUI 行为；
 - 迁移或淘汰每个仍依赖 Legacy runtime 的显式调用方。
 
 退出门：Legacy 入口只服务已登记的兼容消费者；连续约定发布窗口内没有未知生产调用。
 
 ### 5. 从上游到下游删除
 
-按依赖链逐段删除：
+下面这条旧依赖链中的 Task Contract、StageRuntime 和 AgentRunner 段已于 2026-08-19 删除；
+它保留为历史顺序，不是待恢复的架构：
 
 ```text
 Legacy 产品/兼容消费者
@@ -371,9 +371,8 @@ Paint 井字棋、QQ 群摘要与网易云播放/音量也分别由应用外部�
 不新增模型角色、摘要或长期 memory。
 
 2026-08-02 开始按消费者优先实际删除旧架构。`FrameAuthority` 已从 `agent` 移到共享
-`visual_runtime`，vNext composition 的完整内部 import 闭包由 AST 测试禁止回到
-`winpilot.agent`。server 的旧 Runner/router/session/adapters 改为旧路由调用时才加载；显式
-阻断整个旧 Agent 包的独立进程仍能加载 app 并完成一次 vNext goal admission。Electron 的
+`visual_runtime`，vNext composition 的完整内部 import 闭包由 AST 测试禁止回到旧
+`winpilot.agent`。Electron 的
 `python -m agent`、环境变量自动启动、agent IPC/local API/event 链已删除，Renderer 中默认
 提交 legacy 的 `startGraph/compileTask` 消费者也已删除。按 rename detection 统计，生产 diff
 `+55/-678`、净删 623 行；`FrameAuthority` 文件迁移只改 1 行归属说明，没有增加提示、
@@ -381,9 +380,9 @@ Paint 井字棋、QQ 群摘要与网易云播放/音量也分别由应用外部�
 
 打包 Electron 还做了物理缺席验收：测试包中的旧 Agent 目录改名后，真实前端仍显示运行时
 在线并能再次提交目标；旧包存在/不存在两臂都在模型调用前得到同一“未配置视觉端点”错误。
-因此新 Goal 启动/admission 的独立性已成立，但真实任务成功未验证，失败属于 provider 配置
-基础设施。`/api/chat`、scheduler、Legacy ARP/Studio、外部 ChatGPT MCP 旧 ToolSession、
-本地 7880 API/feature/F9 engine 仍是待删兼容面，不得把本切片写成旧架构整体删除完成。
+因此新 Goal 启动/admission 的独立性已成立。后续 `agent/` / ToolSession、`/api/chat`、WinPilot Agent scheduler
+与外部 ChatGPT MCP 旧桥均已删除；Legacy ARP/Studio、本地 7880 API/feature/F9 engine 仍是
+有真实消费者的兼容面，不得把本切片写成整个仓库已经没有兼容代码。
 
 下一批唯一候选是删除 `LEGACY_FLOW` 的执行 owner，同时保留旧文件读取与明确迁移错误；只有
 可见 Studio 的 canonical `input_text` 和 `screenshot` 两族外部 oracle 都通过才保留。

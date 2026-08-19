@@ -59,8 +59,8 @@ flowchart LR
 | 代码线 | 用户/开发入口 | 当前 owner | 可以做什么 | 不能据此声称什么 |
 | --- | --- | --- | --- | --- |
 | 产品 vNext | Electron“智能代理” → `/api/v2/goals/runs` | `orchestrator/live_agent.py` 组合的单一 `LiveVisualActor` + `MissionRuntime` | 直接回复、显式只读 connector、按需租约、当前帧上的通用 GUI 动作 | 旧 Agent/Flow 已成为 fallback；受控靶场通过等于任意软件可靠 |
-| Studio/确定性自动化 | 流程工作台把当前 FlowScript 导出为 `runtime.kind=arp_graph` 的 Automation IR；资料页另走 `/api/replay` | `arp_graph` 进入 ARP；仅 `ACTION_BATCH` 复用 ToolSession；replay 由 Replayer/RuntimeJob 持有 | 编辑、验证、零模型确定性节点、录制/导出/重放 | Studio 节点矩阵等于自然语言 Agent 能力，或 API v2 都属于产品 vNext |
-| 兼容与开发接口 | `:7880`、CLI、旧 engine、scheduler、feature（`/api/chat`、webui、AI interface 已随旧 Agent 线删除） | 各自旧 owner | 保持旧消费者、调试、迁移、脚本或外部集成 | 它们是当前 GUI 产品的第二条规划或兜底链 |
+| Studio/确定性自动化 | 流程工作台把当前 FlowScript 导出为 `runtime.kind=arp_graph` 的 Automation IR；资料页另走 `/api/replay` | `arp_graph` 进入 ARP；`ACTION_BATCH` 直连 `fast.controller`；replay 由 Replayer/RuntimeJob 持有 | 编辑、验证、零模型确定性节点、录制/导出/重放 | Studio 节点矩阵等于自然语言 Agent 能力，或 API v2 都属于产品 vNext |
+| 兼容与开发接口 | `:7880`、CLI、旧 engine、feature、本地模板 scheduler（WinPilot Agent schedule API、`/api/chat`、webui、AI interface 已删除） | 各自旧 owner | 保持旧消费者、调试、迁移、脚本或外部集成 | 它们是当前 GUI 产品的第二条规划或兜底链 |
 
 当前源码已经删除 `LEGACY_FLOW` 的执行 handler：枚举仍用于识别历史文件，但 validation 会给出迁移错误并 fail closed。旧模块仍大量存在不等于 vNext 会调用它们。
 
@@ -71,14 +71,13 @@ flowchart LR
 | `src/main/` | Electron 生命周期、可信 preload、IPC、托管 Python、旧本地 API/调度/feature 桥 | 负责进程和前台交接，不做 Agent 语义规划 |
 | `src/renderer/` | 智能代理、Studio、运行记录、资产、设置、Flow 编辑器 | `ControlPlaneClient` 只消费 Python API；浏览器状态不是服务端权威 |
 | `src/cli/` | 旧命令行入口 | 是开发/兼容面，不是 GUI E2E 入口（`src/ai-interface/` 已删除） |
-| `python/winpilot_home/winpilot/vnext/` | Actor、MissionRuntime、Broker、桌面 adapter 与仍在退役的 Mission/Evidence 合同 | 当前 live 执行内核；Mission/Evidence 包装不是应继续扩张的新架构 |
+| `python/winpilot_home/winpilot/vnext/` | Actor、MissionRuntime、桌面 adapter 与最小运行合同 | 当前 live 执行内核；不得恢复固定 Broker/profile 或独立 Evidence Plane |
 | `python/winpilot_home/winpilot/orchestrator/` | ARP 图/执行、goal admission、Thread、live 组合根 | `live_agent.py` 是产品主链的 canonical composition owner |
 | `python/winpilot_home/winpilot/action/` | RawDevice、单写入队列、执行与 Studio/回放仍使用的旧验证基础 | 物理动作层不解释应用语义 |
 | `python/winpilot_home/winpilot/visual_runtime/` | 帧权威、观察、坐标与视觉状态 | 当前 JPEG 和窗口身份的机械真相 |
 | `python/winpilot_home/winpilot/modeling/` | 模型调用、协议 adapter、超时与 attempt | 不新增第二 planner 或 answer fixer |
 | `python/winpilot_home/winpilot/integrations/` | 显式 MCP connector gateway | 当前只允许重新核验过的只读、非 destructive 工具 |
-| `python/winpilot_home/winpilot/agent/` | AgentRunner 已删除；剩余 13 个跟踪文件服务 Studio ACTION_BATCH（`ToolSession` + mixins） | 迁移/兼容输入，不是当前在线产品依赖；迁走真实消费者后再删 |
-| `python/winpilot_home/winpilot/fast/` | Legacy 快速 Controller 与 GUI 能力 | 仍有测试和复用候选，但不能整体接回主循环 |
+| `python/winpilot_home/winpilot/fast/` | Studio ACTION_BATCH 的确定性 Controller 与 GUI 能力 | 服务显式离线流程，不能整体接回主循环 |
 | `python/winpilot_home/winpilot/perception/` | Win32/UIA/OCR/CV/应用发现等 | 结构化感知是可审计辅助，不替代当前像素语义 |
 | `python/winpilot_home/winpilot/tasking/` | 仅剩 vNext/Studio 共享模块：`artifacts.py`（工件存储）、`execution_context.py`（桌面上下文）、`evidence.py`（技能证据） | Task Contract 编译链与 StageRuntime 已删除 |
 | `python/winpilot_home/winpilot/memory/` | Memory Graph、compiler、store、feedback | 记忆只加速，不能成为冷启动硬实力补丁 |

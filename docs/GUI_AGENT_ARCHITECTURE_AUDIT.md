@@ -1,5 +1,9 @@
 # GUI Agent 架构审计
 
+> 历史快照（2026-07-18）。文中列出的 Task Contract、StageRuntime、AgentRunner、
+> ToolSession、ledger/done gate 等旧 owner 此后已删除。当前实现与维护边界以
+> `CLAUDE.md`、`docs/architecture.md` 和 `docs/testing.md` 为准；不得从本文恢复旧架构。
+
 审计日期：2026-07-18
 审计范围：`python/winpilot_home/winpilot`、`src`、`scripts`、产品入口、测试入口和长期文档。
 

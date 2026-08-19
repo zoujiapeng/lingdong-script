@@ -10,9 +10,8 @@
 `vnext/model_roles/visual_actor.py` 的单一 `LiveVisualActor` 通过
 `modeling/ModelCallRuntime` 调用模型；默认仍是 OpenAI-compatible Chat
 Completions，只有配置显式给出 `api.protocol` 或 `api.api_style` 时才会改走 OpenAI
-Responses、Anthropic Messages 或 Gemini `generateContent`。Legacy
-`AgentRunner`、编程/仓库 profile 和较大工具历史仍为兼容路径，不能反向决定
-vNext 行为。
+Responses、Anthropic Messages 或 Gemini `generateContent`。旧 `AgentRunner` 与其较大工具历史
+已删除；CLI/旧 engine 的模型调用是独立兼容面，不能反向决定 vNext 行为。
 
 共享的 provider 代码仍保持薄适配：
 
@@ -113,14 +112,14 @@ text-only 路径不会收到不可见的截图字节。它必须依赖 UIA、Win
 当前可复现 vNext 基线明确使用：
 
 - `api.thinking=false`；
-- Visual Actor `temperature=0.3`；
+- Visual Actor `temperature=0.0`；
 - 每个决策最多一次 provider attempt；
 - 最近一笔原生 tool exchange；若 provider 返回 `reasoning_content`，只随该交换
   原样回传一次。
 
 在相同 corridor 上临时设置 `thinking=true` 仍失败且更慢，因此已经回退，没有把
-`adaptive` reasoning 策略接入 vNext。配置和 Legacy `AgentRunner` 中仍存在
-`controller.native_visual_thinking_mode`，它属于兼容债务，不是当前产品主线的
+`adaptive` reasoning 策略接入 vNext。配置中仍残留无生产消费者的
+`controller.native_visual_thinking_mode`，它属于待删除兼容键，不是当前产品主线的
 目标架构。未来模型需要不同 reasoning 参数时，应作为显式模型 profile 在同一
 E2E 矩阵 A/B；不能根据任务词、应用名或失败类型自动切换。
 

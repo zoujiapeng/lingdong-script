@@ -3,6 +3,10 @@
 > 本文只记录可以由当前 Studio 编译为 canonical ARP、且不会落入
 > `legacy_flow` 的产品节点。编译测试、mock handler 测试和可见 Electron
 > 端到端是三种不同证据，不能互相冒充。
+>
+> 2026-08-19 更新：下文保留 2026-08-02 的逐项证据作为历史记录；当前
+> `ACTION_BATCH` 已直接复用 run 内 `FastGuiController`，整个 `ToolSession` / `agent/`
+> 实现已经删除。不要按历史修复说明恢复它们。
 
 ## 当前边界
 
@@ -68,12 +72,13 @@
 运行前先验证了两种 fail-closed 行为：
 
 1. 纯 `start -> click -> end` 被目标 scope guard 拒绝，外部 `click_count` 保持 0；
-2. 目标建立和点击拆在两个 `action_batch` 后，旧实现因每个节点新建 `ToolSession` 而丢失绑定，
-   仍被 scope guard 拒绝且没有物理点击。
+2. 目标建立和点击拆在两个 `action_batch` 后，当时的旧实现因每个节点新建 `ToolSession` 而
+   丢失绑定，仍被 scope guard 拒绝且没有物理点击。
 
-通用修复是同一 ARP run 的 `action_batch` 共享一个 `ToolSession`，在 run 结束时统一关闭；同时
-Renderer 与 Python graph contract 都做 path-sensitive 目标校验：空间动作之前必须在同一路径上
-已建立目标，分支合流时任一前驱路径缺目标都会拒绝。修复没有增加应用配方、坐标补偿或任务分类。
+2026-08-02 的过渡修复曾让同一 ARP run 的 `action_batch` 共享一个 `ToolSession`。这不是当前
+架构：2026-08-19 Studio 已改为 run 内共享 `FastGuiController` 并直连 canonical action，随后删除
+`ToolSession`。Renderer 与 Python graph contract 仍做 path-sensitive 结构校验；修复没有增加应用
+配方、坐标补偿或任务分类。
 
 最终 run `arp-20260802-052309-82cf06` 为 `done`，5 个节点全部 `ok`，
 `trace_integrity=complete`，模型调用为 0。Runtime 之外的 JSON oracle 显示

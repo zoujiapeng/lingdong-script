@@ -110,6 +110,8 @@ coding task 只使用 manual/factual notes：`fact`、`preference`、`rule` 或 
 
 memory 系统初始化失败、SQLite 损坏或 FTS5 不可用时，Agent 会退化为无长期记忆运行；FTS5 不可用会自动 fallback 到 LIKE 搜索。
 
-运行时还必须通过 contract v2 和源码指纹检查。工作区源码变化后应重启 Python 服务，再判断某条记忆或 Skill 的表现；旧进程、旧 commit 与新前端混跑得到的结果不能作为记忆质量结论。
+运行时还必须通过 contract v3 和 loaded/current source stamp 检查。工作区源码变化后应重启
+Python 服务，再判断某条记忆或 Skill 的表现；旧进程、旧 commit 与新前端混跑得到的结果
+不能作为记忆质量结论。
 
 `controller.multi_input_cooperation` 和 Desktop Action Queue 属于当前执行安全策略，不属于 Skill 参数。Replay/Memory 不能通过记住旧配置绕开物理输入 single-writer、人类焦点/光标所有权或目标窗口 scope guard。

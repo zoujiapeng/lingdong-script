@@ -194,21 +194,22 @@ Oracle设置可以用命令行，但若原始 goal要求GUI，命令行只能搭
 
 ## 8. 当前 HEAD 的真实证据快照
 
-以 `CLAUDE.md` 最后更新章节为准：
+以 `CLAUDE.md` 最后更新章节为准。2026-08-19 当前回归为：
 
 | 场景 | 结果 | 首分歧/结论 |
 | --- | ---: | --- |
-| 受控视觉矩阵（旧基线） | `6/10` | 试卷、精确/有序点击、普通拖放、滑块、dynamic hold通过；4个corridor失败 |
-| 受控视觉 smoke（screen-first 后） | `3/4` | drag-fit、slider、dynamic-hold 通过；game-drag-v2 走廊失败属模型轨迹几何 |
-| Corridor | `0/4` | raw model path = canonical path = physical attempt；路径切角/出界，首分歧在模型参数 |
-| Native Notepad精确替换 | 通过 | 文字与外部终态精确一致，说明基本视觉+键盘链可用 |
-| Calculator `43×17` 两次 | 失败 | 模型误认数字/运算键并错误停止；不是映射或SendInput偏移 |
-| Studio `input_text` + screenshot | 通过 | 5节点、模型调用0、trace完整、外部Tk文本和独立像素匹配 |
-| 严格离线节点独立矩阵 | `3/19` | 只计已有独立DUT oracle的节点；未覆盖不等于失败 |
+| 受控视觉全套 | `18/18` | click/type/scroll、精确与有序点击、拖放、slider、hold/chord、draw，以及4个 corridor 全部由外部浏览器状态判定通过 |
+| 安全真实应用随机探针 | `5/5` | Notepad、Calculator、聊天后继续 Notepad、缺失文件的诚实回答、Paint 画线均由应用外 oracle 判定 |
+| Studio 可见流程 | `2/2` | click fixture 与 clipboard/condition/screenshot fixture；模型调用均为0，节点、外部状态和 trace 一致 |
+| 物理动作与 trace | `133/133` | 受控矩阵99次、真实应用34次；attempt/receipt逐一对应，全部 `applied/input_completed`，无丢失、孤儿或写失败 |
+| 释放清理 | `43/43` | 全部需要 cleanup 的动作都记录 release，终态无按键/指针残留 |
+| 静态与构建 | 通过 | Python `2508 passed`、renderer `327 passed`、typecheck、project-guide check、`build` 与 `build:all` 全通过 |
 
-最新记录的回归：WinPilot `3613 passed, 13 skipped, 1 warning`、renderer `317 passed`、typecheck通过。更早文档中的 `2/19` 是加入 `input_text` 前的历史快照。
+尚未覆盖的明确缺口是“从可见 Electron Stop 按钮中断正在按住的输入”这一整条 UI E2E；
+cancel/release 的单元与集成覆盖不能冒充该项。更早的 `6/10`、`3/4`、`0/4` corridor、
+Calculator 失败和 `3613 passed` 等数字都是历史快照，不代表当前基线。
 
-## 9. MiMo 到底“差不差”
+## 9. 历史 MiMo 样本说明了什么
 
 根据当前证据，准确说法不是“完全不会”，也不是“Runtime已经足够所以模型必然能做”：
 

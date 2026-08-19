@@ -84,14 +84,14 @@ python -m pytest tests -q
 
 只改文档时至少运行 `git diff --check`，并检查所有相对链接和命令仍然有效。
 
-GUI、Controller、感知、坐标、截图范围、上下文或 done gate 发生变化时，单元测试
+GUI、Controller、感知、坐标、截图范围、上下文或完成判断发生变化时，单元测试
 通过还不够。必须从可见 Electron 客户端运行至少一个受影响的非破坏性任务；
-`/api/chat` 和直接 `/api/v2` 调用只能补充集成证据。核对：
+直接 `/api/v2` 调用只能补充集成证据；旧 `/api/chat` 已删除。核对：
 
 - 模型实际收到的截图范围和新鲜度；
 - 每个工具调用是否与当时画面一致；
 - 动作后的真实截图；
-- trace 中的 request/response、tool result 和 done evidence；
+- trace 中的 request/response、物理尝试和 RawDevice 回执；
 - 失败时是否停止或换策略，而不是盲目重试。
 - outer/child run 与 trace 是否准确绑定；
 - 是否有独立 external oracle，而不是 runtime 自报成功。

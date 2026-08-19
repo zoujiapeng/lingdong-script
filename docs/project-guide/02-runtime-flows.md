@@ -281,16 +281,14 @@ flowchart TD
   Target --> Observer["FrameObserver"]
   Observer --> Authority["FrameAuthority"]
   Authority --> State["_LiveRuntimeState"]
-  Catalog["8-tool ToolCatalog"] --> Broker["CapabilityBroker"]
   Actor["同一个 LiveVisualActor"] --> Runtime["MissionRuntime"]
   Mission --> Runtime
   State --> Runtime
-  Broker --> Runtime
   Adapter["AtomicDesktopAdapter"] --> Runtime
-  Registry["EvidenceRegistry"] --> Runtime
 ```
 
-组合时只核对一次 Runtime、Reducer、Broker、Catalog 与 Registry 的共享 owner；binder 不在每轮 proposal 上重放整套 Mission/Broker 组合校验。
+组合时只建立 Runtime、Reducer、Actor、FrameAuthority 与 Atomic adapter 的共享 owner；binder
+不在每轮 proposal 上重放整套 Mission 或工具 schema 组合校验。
 
 ## 9. 每个视觉 Turn 的完整算法
 
@@ -309,14 +307,13 @@ run_one_turn(turn_index):
   turn = project_actor_turn_input(
     original mission card,
     current frame facts,
-    broker tool views,
+    fixed Actor tool schemas,
     bounded task_state,
-    previous action local intent,
-    safe completed action summaries
+    previous action local intent
   )
 
   raw_decision = actor.propose(turn, current JPEG, exact submitted_size):
-    同时暴露本轮 Broker action/terminal tools 与两个 connector 元工具
+    同时暴露固定 action/terminal tools 与两个 connector 元工具
     若选择 connector -> Gateway 执行只读调用并把 tool result 交回同一 Actor
     本地只读工具链（status/shell/connector/window_text）只受剩余 model-call budget 约束
     模型可调用 refresh_desktop 主动结束局部工具链换取新整屏，最终提交一笔 action / claim / blocked
@@ -324,20 +321,22 @@ run_one_turn(turn_index):
   在 MissionRuntime 入口把 raw proposal 做唯一一次 typed parse
 
   再取 current snapshot：
-    若 frame/target/broker projection 在模型思考期间变化 -> STALE_DISCARDED
+    若 frame/target/pointer 在模型思考期间变化 -> STALE_DISCARDED
 
   bind ActorDecisionEnvelope 到：
     mission/run/revision/obligation
     frame/target/submitted image
-    allowed evidence scope
-    broker projection
+    pointer disposition / lease
 
   如果是 desktop action -> 执行一笔机械调用
   如果是 claim -> 记录并完成 Mission
   如果是 blocked -> 写 obligation_blocked
 ```
 
-Actor 每次都收到原始 goal，而不是仅收到局部计划。Connector 不只存在于初始分流：每个视觉 Turn 的 `propose` 也可在当前 JPEG 和 Broker 工具旁调用 connector，只受剩余 model-call 预算约束；同一个 Actor 在同一 Turn 最终提交恰好一笔 Runtime action、claim 或 blocked。`task_state` 与紧邻一笔 provider 原生 exchange 只帮助短期连续性；它们不是 Runtime 计划或完成判据。
+Actor 每次都收到原始 goal，而不是仅收到局部计划。Connector 不只存在于初始分流：每个视觉
+Turn 的 `propose` 也可在当前 JPEG 和固定通用工具旁调用 connector，只受剩余 model-call 预算
+约束；同一个 Actor 在同一 Turn 最终提交恰好一笔 Runtime action、claim 或 blocked。
+`task_state` 与紧邻一笔 provider 原生 exchange 只帮助短期连续性；它们不是 Runtime 计划或完成判据。
 
 ## 10. 模型响应的单次边界解析
 
@@ -431,7 +430,9 @@ sequenceDiagram
 
 ### 13.6 held pointer
 
-当 drag 设 `keep_holding=true` 且物理输入完成，Adapter保留一个 run-owned lease。下一帧 Broker只提供 drag；新 drag 可以继续移动并再次保持，或释放。超时、异常、取消、close 都会做有界 `mouse_up` 清理。
+当 drag 设 `keep_holding=true` 且物理输入完成，Adapter 保留一个 run-owned lease。下一帧
+Runtime 只接受后续 drag/释放语义；新 drag 可以继续移动并再次保持，或释放。超时、异常、
+取消、close 都会做有界 `mouse_up` 清理。
 
 ### 13.7 launch 与复制当前画面
 
@@ -538,11 +539,11 @@ flowchart LR
   OldReplay --> Replayer
 
   LegacyARP --> Nodes{"节点 kind"}
-  Nodes -->|ACTION_BATCH| ToolSession["run 内复用 ToolSession"]
+  Nodes -->|ACTION_BATCH| FastController["run 内复用 FastGuiController"]
   Nodes -->|REPLAY_STEP| SharedReplayer["共享 Replayer"]
   Nodes -->|control built-ins| Direct["直接执行"]
-  Nodes -->|SKILL_REPLAY / TASK_STAGE| Handler["各自 handler"]
-  Nodes -->|AGENT_GOAL| OldAgent["旧 AgentRunner"]
+  Nodes -->|SKILL_REPLAY| Handler["memory replay handler"]
+  Nodes -->|AGENT_GOAL / TASK_STAGE / LEGACY_FLOW| Removed["明确迁移错误"]
 ```
 
 通俗伪代码：
@@ -556,10 +557,9 @@ flowchart LR
   编译为 ARP graph；未显式 runtime_version 时使用 legacy ARP runtime
   对每条控制流路径检查 spatial action 前已有 target
   control built-ins 直接执行
-  只有 ACTION_BATCH 在 run 内复用 ToolSession
-  REPLAY_STEP 用共享 Replayer；SKILL_REPLAY/TASK_STAGE 用各自 handler
-  AGENT_GOAL 明确调用旧 AgentRunner，不是产品 LiveVisualActor
-  未知/历史 LEGACY_FLOW -> 明确迁移错误，禁止 fallback
+  ACTION_BATCH 在 run 内复用 FastGuiController，直接执行 canonical action
+  REPLAY_STEP 用共享 Replayer；SKILL_REPLAY 用 memory handler
+  AGENT_GOAL / TASK_STAGE / LEGACY_FLOW -> 明确迁移错误，禁止 fallback
   每节点都记录 history 并发布 arp_node_done
   只有 NodeResult.evidence 非空才追加/发布 evidence
   End 按 graph policy / contract 检查已有 evidence
@@ -572,7 +572,8 @@ flowchart LR
   走旧 /api/replay，不经过 Studio startAutomation
 ```
 
-无模型确定性节点的 run 应有 `model_calls=0`。如果一个旧节点仍需要模型，这必须由该节点明确 owner；例如 Studio catalog 的 `agent.goal` 当前就是 Legacy `AgentRunner`，不能因为路由带 `/api/v2/` 就称它为产品 Visual Actor。
+无模型确定性节点的 run 应有 `model_calls=0`。历史 `agent.goal` / `TASK_STAGE` 节点没有当前
+handler，validation 必须给出迁移错误；不能因为路由带 `/api/v2/` 就称它为产品 Visual Actor。
 
 ## 20. Human Apprentice、导出和 replay
 
@@ -580,9 +581,6 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  HumanA["普通 /api/human/start|stop"] --> RecorderA["HumanRecorder"]
-  RecorderA --> WPS["WPS + 可导出的 IR"]
-
   HumanB["Apprentice start|stop"] --> RecorderB["HumanRecorder + metadata"]
   RecorderB --> Canonical["canonical Automation IR"]
   Canonical --> Provisional["直接创建 provisional memory"]
@@ -595,9 +593,10 @@ flowchart TD
   Partial -. "可选" .-> Studio
 ```
 
-- 普通 Human recording 只生成 WPS/IR；Apprentice 才追加 metadata 并在 stop 时直接创建 provisional memory，Studio 审查是可选步骤；
+- Apprentice recording 生成 WPS/IR、追加 metadata，并在 stop 时创建 provisional memory；
 - Human recording 证明“录下的人类动作可否规范化并忠实重放”；
-- Thread export 证明“已有 Agent trace 中哪些普通动作可提取”；held gesture 等不完整类型可以被明确拒绝并标为 partial；
+- Thread export 证明“已有 Agent trace 中哪些普通动作可提取”；跨 decision held gesture 当前
+  降级为各段落点 click，不能声称忠实恢复连续拖拽；
 - Memory verification 证明某个 recipe 在当前条件下重放通过；不证明冷启动 Actor 能自主完成任务；
 - replay 忠实复制错误动作时，重放链可能通过忠实性检查，但原 Agent目标仍失败。
 
@@ -609,12 +608,11 @@ flowchart TD
 
 ## 22. 退出清理
 
-Electron `window-all-closed` / `before-quit` 会停止旧 engine、feature 子进程、托管 WinPilot、兼容 API、scheduler 和全局快捷键。Python session 的 finally 块关闭：
+Electron `window-all-closed` / `before-quit` 会停止旧 engine、feature 子进程、托管 WinPilot、兼容 API 和全局快捷键。Python session 的 finally 块关闭：
 
 - held pointer；
-- evidence journal 并生成 anchor；
 - 模型/connector 资源；
-- completion snapshot；
+- controller / desktop lease 资源；
 - BUS terminal event。
 
-如果任务未验证且清理失败，终态会进一步降为 fail closed；只有已验证结果不会因非语义 telemetry 清理问题被任意改写。
+释放清理不完整是物理边界错误，必须 fail closed；非语义 trace/telemetry 失败不得改写模型已经在真实屏幕上判断的任务结果。

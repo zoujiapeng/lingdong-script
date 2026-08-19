@@ -59,7 +59,7 @@ Windows 客户端使用 Electron 42+ 的透明无框 `BrowserWindow`、Windows �
   → POST /api/v2/goals/runs { original goal, execution_context }
   → Goal Admission
   → one full-goal mission / LiveVisualActor
-  → CapabilityBroker / AtomicDesktopAdapter / RawDevice
+  → MissionRuntime / AtomicDesktopAdapter / RawDevice
   → BUS + WebSocket
   → GET /api/v2/runs/current（活跃详情）
   → GET /api/v2/runs/{run_id}（按需历史详情）

@@ -8,6 +8,13 @@ requirements and must not be restored to teach the 11 samples. See
 [`visual-runtime-principles.md`](visual-runtime-principles.md) for the
 invariants and client-entry contract.
 
+最近一次当前源码验证（2026-08-19）从可见 Electron 客户端完成受控桌面 `18/18`、
+安全真实应用 `5/5` 和 Studio 离线流程 `2/2`。受控与真实应用共 133 次
+`physical_attempt` 对应 133 次 `raw_receipt`，全部 `applied/input_completed`；43 次释放清理
+全部完成，trace dropped/write failure 均为 0。静态门为 Python `2508 passed`、Renderer
+`327 passed`、TypeScript typecheck、Electron/CLI build 与项目路径扫描通过。以下带更早日期的
+段落是历史探针，不覆盖这一当前基线，也不能单独证明当前源码。
+
 最近一次受控矩阵验证（2026-08-01）使用可见 Electron 客户端、空 session、
 操作系统鼠标键盘输入和独立浏览器 oracle。UIA 只定位控件和读回目标，不写入
 目标或代替点击。10 项中 6 项通过：`answer-all-questions` 取得 6/6，另有
@@ -77,9 +84,10 @@ grounded pass，但原始第二轮“只追加一次”的任务结果不算干�
 独立剪贴板 oracle 再次得到同一 68 字符串与同一 SHA-256。这是当前源码的
 可见重放证据，但仍不改写上述原始 Agent 第二轮受测结果。
 
-这不证明整场对话的所有普通 ARP 动作都可导出。跨 decision 的 held gesture 含
-`started_held` / `keep_holding`，当前被导出器拒绝并得到 0 步；缺少 durable run -> Thread
-owner index 也使完整归属只能靠约 14 秒的全量 trace 扫描核对。这两项属于基础设施缺口。
+这不证明整场对话的所有普通 ARP 动作都可忠实导出。跨 decision 的 held gesture 含
+`started_held` / `keep_holding`，当前会按各段落点投影成普通 click，不再得到 0 步，但不能
+冒充连续拖拽；缺少 durable run -> Thread owner index 也使完整归属只能靠约 14 秒的全量
+trace 扫描核对。这两项属于基础设施/语义保真缺口。
 轻量 owner scan 一度把本机耗时降到约 1.36 秒，但可能漏掉归属/完整性异常而 false-complete，
 实验已完整回退。当前选择较慢但可证明的全量扫描。
 
@@ -98,11 +106,10 @@ SHA-256=`7a04783ba7c6d80ba81d0da86fd991b9e158a5315dc7608dd51b0c690e775e04`。
 业务 click 通过只依据外部 JSON；managed screenshot 只提供真实 artifact evidence，不是业务
 oracle，因此 `focus_window` 与 `screenshot` 都不计为独立通过。
 
-该探针保留了三项通用基础设施修复：同一 ARP run 的 action batch 共享一个 `ToolSession`，
-Renderer/Python 对每条控制流路径验证 spatial action 前已建立 target，managed screenshot 的
-artifact id/hash 显式进入 verified evidence。纯 `start -> click -> end` 仍会 fail closed；旧实现
-在 focus 与 click 分属两个节点时丢失 target 的失败已经修复。测试中一次 stale target baseline
-属于测试干扰，重置后排除。
+该历史探针证明了 spatial action 前 target 建立与 managed screenshot 工件路径。当前 Studio
+ACTION_BATCH 已改为直连 `fast.controller`，不再创建 `ToolSession`；2026-08-19 又从可见 Studio
+复测 click 与 clipboard/screenshot 两条 fixture，外部 click 计数与剪贴板结果均通过，两个 run
+trace 完整且零模型调用。managed screenshot 是真实工件，不是独立业务 oracle。
 
 同日又从真实属性面板直接框选 screenshot 区域。先按 `Esc` 取消，节点参数未改变且没有新
 run；在 125% DPI 屏幕再次框选后，属性面板与 canonical action 都保存物理区域
@@ -328,16 +335,10 @@ A/B 成本、延迟和任务完成率，不能用扩大历史或重复截图换�
 
 ## 冷启动与上下文
 
-冷启动用于证明硬实力不依赖历史经验。`cold_start=true` 必须让同一个 run 的：
-
-- Task Contract；
-- ARP；
-- RuntimeProfile；
-- StageRuntime；
-- AgentRunner；
-- trace
-
-共享 `experience_policy=disabled`。测试需验证没有 experience prompt、Skill replay、Memory Pack、经验写入和反馈。
+冷启动用于证明硬实力不依赖历史经验。当前产品 vNext 每个 run 都固定
+`experience_policy=disabled`，不会经过已删除的 Task Contract、StageRuntime、RuntimeProfile 或
+AgentRunner。测试需验证同一条 `LiveVisualActor → MissionRuntime` 链没有 experience prompt、
+Skill replay、Memory Pack、经验写入和反馈；Studio/Replay 的兼容记忆不能泄漏进产品 goal。
 
 冷启动不等于删除用户当前对话。上下文规则如下：
 

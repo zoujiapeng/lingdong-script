@@ -456,13 +456,10 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 | GET | `/api/automation-ir/{file}` | 读取IR |
 | PUT | `/api/script/{file}` | 保存脚本 |
 
-### 14.7 Human recording、replay、memory 与 session
+### 14.7 Apprentice recording、replay 与 memory
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| POST | `/api/human/start` | 开始普通人类录制 |
-| POST | `/api/human/stop` | 停止并生成脚本/IR |
-| GET | `/api/human/status` | 录制状态 |
 | POST | `/api/v2/replay/apprentice/start` | 开始示教录制 |
 | POST | `/api/v2/replay/apprentice/stop` | 停止示教 |
 | GET | `/api/v2/replay/apprentice/status` | 示教状态 |

@@ -7,6 +7,31 @@
 > 13.20–13.28 已进入或正在进入主线；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、
 > 通用 connector、history-depth 证据或 provisional native-provider 边界。
 
+## 2026-08-19 当前单分支收敛与回归
+
+当前只在 `master` 继续开发；旧图标分支的 tip 已保存为只读 tag
+`archive/agent-update-app-icon-20260819`，本地与远端不再保留并行产品分支。本轮按真实消费者
+逐步删除旧架构，没有增加新的模型角色、应用配方或验证层：
+
+- Studio `ACTION_BATCH` 已改为直连 `fast.controller`，随后删除整个旧 `agent/` / `ToolSession`
+  架构；离线流程仍经同一 Desktop Action Queue 和 RawDevice 执行。
+- 删除 sealed canary、hash inventory、live evidence registry/projection、action-effect audit、
+  Automation IR projection fingerprint、固定 capability broker/profile，以及零消费者的 perception
+  fallback/helpers。`decision_id` 不再做内容自校或 tamper-evident gate；当前实现仍用本地摘要
+  生成稳定关联 id，这是后续可单独审查的剩余简化点，不得把它描述成安全证明。
+- replay 不再重复已经发生的物理动作；flow fragment 只做结构校验与本地 proposal/version
+  一致性检查。trace 仍保留事件队列完整性和动作完成回执，但动作截图改为 worker 异步、
+  completion-only 的 best-effort 诊断帧，不进入物理输入热路径，也不冒充独立结果证明。
+- 仍保留且不得削弱的机械边界只有：物理输入单写入、按键/指针释放清理、凭据不泄漏和
+  不可逆外部动作同意。
+
+当前源码的回归结果：Python `2508 passed`，Renderer `327 passed`，TypeScript typecheck、
+`npm run build`、`npm run build:all` 和项目索引检查均通过；可见 Electron 受控桌面套件
+`18/18`、安全真实应用 `5/5`、Studio 离线流程 `2/2`。受控与真实应用共 133 次
+`physical_attempt` 对应 133 次 `raw_receipt`，全部 `applied/input_completed`；43 次释放清理
+全部完成，trace dropped/write failure 均为 0。当前诚实缺口是还没有“可见 Stop 按钮按下后
+释放 held input”的独立命名 E2E；该边界目前由单元/集成测试覆盖。
+
 ## 2026-08-17 旧架构删除批次（已提交 `a5582bb`，在 master）
 
 分析报告：`docs/legacy-vs-vnext-analysis.md`。本批已实际删除并全量回归通过：
@@ -43,7 +68,7 @@
 - `playbooks/*.json` 数据与 `playbooks_enabled` 配置键删除。
 - 关联 47 个旧包测试文件删除，5 个共享件测试修正。
 
-**仍然保留（有真实消费者，未动）**：`agent/` 剩余 13 个跟踪文件 = Studio 确定性执行器
+**当时仍然保留（历史状态；已由上面的 2026-08-19 当前状态取代）**：`agent/` 剩余 13 个跟踪文件 = Studio 确定性执行器
 （`ToolSession` + mixins + `scope_guard`/`runtime_profile`/`task_rules`；`planner`/
 `plan_tools`/`coding_tools`/`file_tools`/`memory_tools`/`working_set_tools`/`mcp_tools`
 已在 2026-08-18 批次删除），
@@ -85,7 +110,7 @@ renderer `325 passed`、TypeScript typecheck 通过。
    `test_plan_tools`/`test_unified_coding_runtime`）删除；`ToolSession` 从 11 个 mixin
    瘦身到 6 个（只留 Desktop/Window/Perception/Interaction/System/Fast）。
 
-**尚未做（诚实边界）**：`agent/` 整包删除与 `action/verify.py` 删除依赖方案 A
+**当时尚未做（历史状态；`agent/` / `ToolSession` 现已删除）**：`agent/` 整包删除与 `action/verify.py` 删除依赖方案 A
 （ToolSession→`fast.controller` 直连）：`fast/controller.py` 每个动作都经
 `session._t_*` 处理器（UIA 锚定 + `verify.run_with_verify` expect 校验），直连等于
 迁移约 2000 行动作处理器；且 `action/verify.py` 的真实消费者全在 Studio 离线执行路径
@@ -234,9 +259,9 @@ P2（只记录不拦截，删除候选）：
   `0 cherry-pick / 0 merge / 0 Runtime 修改`。旧分支剩余主要是重复 target pipeline、
   profiler、第二 verifier 和前端 Runtime selector，不解释当前首分歧。
 - 审计当时，本地 head、`origin` 远端 head、GitHub branches API 和默认分支四处都只剩
-  `master`，且只有一个 worktree、零开放 PR。2026-08-02 再次 fetch 后出现只改两份二进制
-  icon、从旧基线分叉的 `origin/agent/update-app-icon`；它不是产品主线，本轮只作只读审计输入，
-  未合并也未删除，必须另做可见图标验收后才能归档收口。PR10 历史由
+  `master`，且只有一个 worktree、零开放 PR。2026-08-02 后出现的旧基线图标分支没有合入；
+  其 tip 已于 2026-08-19 归档为 `archive/agent-update-app-icon-20260819`，本地与远端分支均已删除。
+  PR10 历史由
   `archive/pr10-vnext-agent-core-20260726` 保存，PR15 证据由
   `evidence/pr15-legacy-electron-oracle-20260726` 保存；这些 tag 只作只读恢复输入，
   不得继续开发或整体 merge。
@@ -270,21 +295,20 @@ Electron「智能代理」
   -> 只有 observe_desktop 才建立 run-bound lease，Electron 随后让出前台并冻结 target
   -> 同一 Actor 继续读取权威 JPEG + 有界 task state + 紧邻一笔 provider 原生 tool exchange
   -> 模型选择一笔通用 GUI 工具调用
-  -> CapabilityBroker 只投影机械可用工具
   -> AtomicDesktopAdapter 唯一一次坐标映射
   -> RawDevice / SendInput 真实鼠标键盘
   -> 新权威帧与回执
   -> 模型继续、claim 或 blocked
 ```
 
-`/api/chat`、CLI、scheduler、FlowScript、`/task-contracts/compile`、服务端直接提交
-`/arp/runs` 和 Legacy AgentRunner 仍是开发、Studio 或兼容面，不得成为产品 vNext 的
+`/api/chat`、WinPilot Agent scheduler/routes、`/task-contracts/compile` 和 Legacy AgentRunner 已删除。CLI、
+FlowScript 与服务端直接提交 `/arp/runs` 仍是开发、Studio 或兼容面，不得成为产品 vNext 的
 fallback，也不得冒充真实客户端 E2E。Renderer 中默认提交 legacy graph/task contract 的
 客户端方法已经删除。MCP 只通过当前 `ConnectorGateway` 进入同一
 Actor：必须显式配置、延迟发现、只读注解通过、物理调用前重检 descriptor；冻结 Legacy
 MCP 直调不是产品 connector owner。
 
-前端执行约束选项及其 request/admission/Broker/evidence 状态链已经删除。用户口头说
+前端执行约束选项及其 request/admission/evidence 状态链已经删除。用户口头说
 “必须使用 GUI”时，只保留在原始 goal 中，由同一个模型理解。未来加入 shell 或
 provider 后，它们必须与 GUI 工具同时对该模型可见；不能恢复前端开关、Task
 Profiler、关键词预路由或另一个 planner。
@@ -329,7 +353,7 @@ Studio 另有显式“一句话生成片段”辅助：短生命周期的 `FlowF
 provider/model/protocol/budget plumbing，不创建第二个 `LiveVisualActor`，也不把图编排职责
 塞进主 Actor。它只在用户主动提交时进行一次 opt-in 调用；provider 消息为一个 user JSON、
 零 system/developer message，不观察桌面、不读当前 Thread、不取得 connector 或执行权限。
-结果必须经过结构/fingerprint 校验和参数预览，用户确认后才作为一个 undo checkpoint 插入
+结果必须经过结构校验、本地 proposal/version 一致性检查和参数预览，用户确认后才作为一个 undo checkpoint 插入
 右侧空白区；不自动连入主图，也不自动运行。可见 Electron 已把“点击坐标 420,300，等待
 1 秒，然后输入文本 hello”生成 `click -> wait -> input_text` 三节点片段，应用后 `Ctrl+Z`
 恢复原来的 16 节点/15 连线/14 动作。它是在线编辑器辅助调用，不属于完全离线节点执行，
@@ -370,7 +394,6 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 | `ProviderProtocolAdapter` | 显式 wire 翻译和原生签名/tool exchange 回放 | provider 猜测、重试、模型选择 |
 | `MissionRuntime` | 驱动模型→动作→新帧的顺序循环 | 编译任务步骤、纠正模型答案 |
 | `FrameAuthority` / workspace | 当前窗口、区域、frame id、epoch、JPEG | 解释画面 |
-| `CapabilityBroker` | schema、当前可写性、帧/窗口/指针所有权 | 选择任务路线 |
 | `AtomicDesktopAdapter` | 把提交图片坐标唯一映射到物理桌面并执行一次 | snap、offset、目标中心、重瞄 |
 | `RawDevice` | 真实 SendInput、完成/不确定回执、按键释放清理 | 判断语义成功 |
 | 外部 E2E oracle | 判断测试任务真实结果 | 向生产 Agent 暴露答案或坐标 |
@@ -1317,7 +1340,7 @@ strict fail 是 ordered-clicks：外部状态 `succeeded=true`、最终 `click_s
   `profile_id`、`state_fingerprint`、`capability_grant_ids`、
   `accepted_mission_event_ids` 等 envelope 身份行李；envelope 的 decision_id 内容自校
   （tamper-evident 校验）删除，保留 decision_id 作为 trace 关联 id。
-- **遗留债务（已评估，未删）**：reducer 的 `obligation_claimed`/`verification_recorded`/
+- **当时的遗留债务（后续已删）**：reducer 的 `obligation_claimed`/`verification_recorded`/
   `mission_verified` 事件分支（生产不发出，但 wire 测试与 canary 阅读器仍 pin）；
   Broker 内部 fingerprint 自校（构造期自洽，无跨层 gating）；trace 日志哈希链。
 

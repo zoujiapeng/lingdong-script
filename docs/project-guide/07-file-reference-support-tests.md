@@ -225,7 +225,7 @@ flowchart LR
 | `kill-electron.ps1` | 强制终止系统中全部 Electron 后报告剩余数；开发清理脚本，不做仓库范围 PID 绑定。 |
 | `lobster.bat` | 把参数转给不存在于当前跟踪树的 `cli/lobster.py`；历史/失效入口，当前 CLI 是 npm bin。 |
 | `lobster.ps1` | 同上，调用缺失的 `cli/lobster.py`；不能作为当前启动说明。 |
-| `_e2e_harness.py` | 临时真实桌面单任务 harness：直接导入旧 `winpilot.agent.loop`，并行排空事件、保存截图；是开发诊断入口，不是严格客户端 E2E。 |
+| `_e2e_harness.py` | 已删除的旧 AgentRunner 诊断入口；不得作为当前客户端 E2E 启动方式。 |
 | `run_mimo_demo.py` | 旧 MiMo 实操演示，导入当前树中不存在的 `agent.mimo_agent`；意图是逐步截屏与裁模板，当前不可作为有效入口。 |
 | `demo_complex.flow` | 文本 DSL 演示：Win+D/Win+R/记事本、循环、条件说明、变量、截图；包含示范性固定坐标/文本，历史样例。 |
 | `test_complex.flow` | 最小旧 DSL：点击、等待、输入、回车、截图；手工 smoke fixture。 |

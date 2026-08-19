@@ -69,23 +69,29 @@ Studio 提供显式的“一句话生成片段”辅助，但不进入 Agent 默
 当前生产运行链：
 
 ```text
-Flow editor state -> automation-ir/1(runtime.arp_graph + fingerprint) -> validation -> RuntimeJob
+Flow editor state -> automation-ir/1(runtime.arp_graph) -> validation -> RuntimeJob
 ```
 
-`toAutomationIR()` 只编译一次当前 Flow state，并把 `arp/1` graph 与 projection fingerprint 存入 `runtime`；Studio 直接把该 IR 提交到 `/api/v2/automation-ir/runs`。保存默认写 `.automation.json`；旧 FlowScript/WPS 可导入。`store/executor.ts` 与 `python/engine/` 仍是兼容执行入口，不是新工作台的主运行时。
+`toAutomationIR()` 只编译一次当前 Flow state，并把 `arp/1` graph 存入 `runtime`；Studio
+直接把该 IR 提交到 `/api/v2/automation-ir/runs`。保存默认写 `.automation.json`；旧
+FlowScript/WPS 可导入。`store/executor.ts` 与 `python/engine/` 仍是兼容执行入口，不是新工作台
+的主运行时。
 
-当前可放入生产画布的节点包括 agent goal、action batch、verified skill replay、replay step、evidence/human gate、基础 GUI action、condition、delay 和 set variable。预置模板与其搜索元数据由同一 registry 生成；未知模板 ID 会报错，不再静默回退到第一个模板。默认模板都能完整编译成非 legacy ARP graph，并包含与目标一致的证据 gate。
+当前可放入画布的节点包括 action batch、verified skill replay、replay step、evidence/human gate、
+基础 GUI action、condition、delay 和 set variable。历史 `agent_goal` 只可读取，validation 会给出
+迁移错误。预置模板与其搜索元数据由同一 registry 生成；未知模板 ID 会报错，不再静默回退。
 
-运行前还有两层独立兼容检查：
+运行前还有两层兼容检查：
 
-- Automation IR 的 projection fingerprint 必须与当前 steps/variables/graph 一致，避免陈旧投影或被篡改的 graph 运行。
-- renderer 只接受 runtime contract v2，且要求 Python 进程启动时源码指纹、当前源码指纹和 Git revision 一致。源码更新后旧服务会被标记为 drifted，流程工作台禁止继续提交并要求重启。
+- Automation IR 必须通过当前 steps/variables/graph 的结构和参数校验；不再维护 projection fingerprint。
+- renderer 只接受 runtime contract v3，且要求 Python 进程 loaded/current source stamp 与 Git
+  revision 一致。源码更新后旧服务会被标记为 drifted，流程工作台禁止继续提交并要求重启。
 
 空间动作还有一条与应用无关的目标合同。Renderer 和 Python graph contract 都沿图路径追踪
 “是否已建立真实目标”：`focus_window` 可以在同一 `action_batch` 的空间动作之前建立目标，
 也可以在前一节点建立后供后续节点使用；如果空间动作早于目标建立，或分支合流的任一路径
-没有目标，校验必须 fail closed。同一 ARP run 的多个 `action_batch` 共享一个 `ToolSession`，
-所以已验证的目标绑定可以跨节点保留，并在 run 结束时统一释放。这是单条物理执行线的会话
+没有目标，校验必须 fail closed。同一 ARP run 的多个 `action_batch` 共享一个
+`FastGuiController`，所以目标绑定可以跨节点保留，并在 run 结束时统一释放。这是单条物理执行线的会话
 连续性，不是任务分类、窗口配方或第二套 controller。
 
 这两个 fingerprint 解决的是不同问题：前者保护 artifact 投影，后者保护正在运行的解释器；不能只通过其中一个就认为运行环境可信。
@@ -139,15 +145,19 @@ renderer 的统一搜索不再维护动态 feature 索引或“功能”结果�
 
 ## 与 WinPilot 的桥
 
-WinPilot 成功 trace 会生成规范 `.automation.json`，并保留 `.wps.json` 兼容导出。`src/renderer/utils/automationIR.ts` 负责 IR/Flow/WPS adapter、运行投影和 fingerprint；后端会重新计算 fingerprint，拒绝 steps/variables/graph 不一致的陈旧投影。Agent 不需要直接理解 FlowScript 内部结构。
+WinPilot trace 可以生成规范 `.automation.json`，并保留 `.wps.json` 兼容导出。
+`src/renderer/utils/automationIR.ts` 负责 IR/Flow/WPS adapter 与运行图结构校验；当前不再计算或
+核对 projection fingerprint。Agent 不需要直接理解 FlowScript 内部结构。
 
 这个桥只做导入、检查和迁移，不改变 WinPilot 的重放来源：离线 0-token 重放仍由 `python/winpilot_home/winpilot/recorder/trace.py` 的 Replayer 执行。`draw_strokes`、`run_detached`、`tray_click`、未知步骤以及 `while` / `until` 控制流导入 FlowScript 时会保留为带 `_requires_wps_replay` 的占位；占位不等于 `@feature` executor 已经能运行，也不会进入新流程节点库。WPS 导入和浏览器兼容执行都要求真实 feature；不能桥接或桥接失败时应让流程失败。
 
 ## 计划与证据边界
 
-- Flow/ARP graph 是用户编辑并保存的编排 artifact，不等同于 Agent 的内部工作计划。运行到 `agent_goal` 时，同一 `AgentRunner` 仍可根据新鲜画面调整自己的工作状态；这些变化不是公开流程工具调用，也不会静默改写已保存的 Flow 节点。
-- 客户端收到新的 `agent_plan` 快照后应整体更新显示，不能继续使用旧索引。计划项被标记完成只表示局部工作状态，不是 ARP `evidence_gate` 或最终任务成功证据。
-- `action_batch` 返回成功、画面发生变化、preview 走完、replay 结束或 graph 到达 `end` 都不能替代目标 evidence。需要可信完成时，图中必须保留与用户目标匹配的 evidence gate，或由 `agent_goal` 的新鲜画面/确定性 done gate 核验。
+- Flow/ARP graph 是用户编辑并保存的编排 artifact，不等同于在线 Agent 的内部工作计划。
+  历史 `agent_goal` 节点没有执行 handler，只能显示迁移错误。
+- `action_batch` 返回成功、画面发生变化、preview 走完、replay 结束或 graph 到达 `end` 都不能
+  替代外部业务结果。确定性图可以用显式 evidence gate 管理自己的结构化条件；测试仍必须用
+  Runtime 之外的 oracle 判定用户目标。
 - managed `screenshot` 在真实工件具有 `artifact_id` 和 SHA-256 时可以产生
   `artifact.screenshot` 完成证据，让确定性 graph 到达可审计终态；它只证明截图工件被捕获，
   不能单独证明同一图中的点击、输入或外部业务结果。那些语义仍需 Runtime 之外的 oracle。

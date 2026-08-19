@@ -387,7 +387,7 @@ CLAUDE.md 明令不得接回。
 
 | 文件 | 职责与关键符号 | 直接依赖 / 调用者 | 运行阶段 |
 | --- | --- | --- | --- |
-| `src/renderer/utils/automationIR.ts` | Automation IR 权威 adapter：WPS/Flow→IR、稳定 SHA-256 projection fingerprint、runtime graph 提取、最小结构/参数检查、IR→WPS/Flow、导入归一化与旧安全字段清理。 | App、Studio、store、fragment helpers；automationIR/platform tests。 | 打开、保存、运行与用户主动诊断。 |
+| `src/renderer/utils/automationIR.ts` | Automation IR 权威 adapter：WPS/Flow→IR、runtime graph 提取、最小结构/参数检查、IR→WPS/Flow、导入归一化与旧安全字段清理。 | App、Studio、store、fragment helpers；automationIR/platform tests。 | 打开、保存、运行与用户主动诊断。 |
 | `src/renderer/utils/constants.ts` | 节点尺寸、画布 zoom/grid、默认 flow/wait/similarity/LLM 元数据、storage key 与旧类别常量；`getNodeDimensions()` 区分 start/end/subflow。 | Canvas、store、definitions/tests。 | 编辑器布局和默认值。 |
 | `src/renderer/utils/displayLabels.ts` | 把搜索 token、来源、reason 机器字符串映射成人类中文；未知值原样保留。 | NodeLibrary、ScriptBrowser、UnifiedSearchDialog。 | 搜索结果渲染。 |
 | `src/renderer/utils/editorDrafts.ts` | 全局 `Set` 注册/注销 draft committer；`commitEditorDrafts()` 依次提交，首个错误立即返回。 | App、store save/replace、ARP JSON editor、FragmentComposer。 | 保存、打开、新建、关闭或 fragment 前。 |

@@ -10,7 +10,7 @@
 2. 一个语义 Actor：同一个 `LiveVisualActor` 决定直接回复、只读 connector 或桌面观察；进入桌面后仍是它选择下一笔动作。
 3. 一条视觉执行线：默认把当前完整真实屏幕交给模型；一笔动作后重新观察，窗口裁剪只作显式 opt-in。
 4. 小而通用的工具面：当前 Runtime 只有 `click`、`double_click`、`move_mouse`、`drag`、`scroll`、`type_text`、`hotkey`、`input_sequence`、`launch_application`、`observe`、`claim_obligation_done`、`blocked`。
-5. 物理层无应用语义：Broker 投影当前工具；Adapter 只做一次坐标映射，队列和 RawDevice 只负责单写入与释放清理，不知道“保存”“答题”“播放”等任务。
+5. 物理层无应用语义：Actor 直接持有固定通用工具面；Adapter 只做一次坐标映射，队列和 RawDevice 只负责单写入与释放清理，不知道“保存”“答题”“播放”等任务。
 6. 完成由模型自验：生产 Runtime 接受同一个 Actor 基于当前真实屏幕作出的 claim。trace、运行详情和 memory 只诊断首分歧，不是 task-pass 门，也不作第二次语义裁决。
 7. 无静默 Legacy fallback：`vnext.live_agent_enabled` 未开启或主链不可用时失败；不会退回 `/api/chat`、AgentRunner、FlowScript 或旧 planner。
 8. 失败按首分歧修复：`model arguments → canonical arguments → physical_attempt → external state`。
@@ -131,9 +131,7 @@ flowchart TD
   Lease --> Session["_build_live_session"]
   Session --> Mission["MissionDefinition + one obligation"]
   Session --> Frame["FrameAuthority + _LiveRuntimeState"]
-  Session --> Broker["CapabilityBroker + ToolCatalog"]
   Session --> Adapter["AtomicDesktopAdapter"]
-  Session --> Registry["EvidenceRegistry\nframe refs; not task-pass"]
   Session --> Runtime["MissionRuntime"]
 ```
 
@@ -148,7 +146,7 @@ flowchart TD
 | 初始 reply/connector/desktop 选择 | `LiveVisualActor.begin_turn` | Gateway执行已选只读工具 | 前端 task classifier 预选执行媒介 |
 | 当前桌面目标 | `DesktopLeaseSlot` + 冻结 `TargetBinding` | Electron提供让出后的目标事实 | 模型或旧 router 偷换 HWND/PID |
 | 当前权威帧 | `FrameAuthority` | `_LiveRuntimeState` 投影为 RuntimeFrame | 从旧截图继续执行空间动作 |
-| 当前可用工具 | `CapabilityBroker` | Actor只看 projection | 根据任务关键词加/删工具 |
+| 当前可用工具 | `LiveVisualActor` 的固定通用 schema | Runtime只校验本次调用参数与当前机械状态 | 根据任务关键词加/删工具 |
 | 一笔语义动作 | `LiveVisualActor.propose` + `MissionRuntime` | Actor 解码 provider call；Runtime入口只做一次 typed parse；Envelope只绑定当前身份 | Controller修改目标点、重复跑 schema 或替模型重试 |
 | 物理参数与输入 | `AtomicDesktopAdapter` + `RawDeviceExecutor` | trace旁路记录参数和 receipt | snap、offset、目标吸附、应用宏、前台/hit-test veto |
 | Mission 状态 | `MissionReducer` | Runtime提交事件 | UI根据文字猜状态 |
@@ -218,15 +216,13 @@ obligations = [
 `MissionRuntime._validate_minimal_scope` 还要求：
 
 - 只有一个 obligation；
-- 固定 STANDARD / `safe_default` profile；
 - planner、obligation verifier、mission verifier、visual inspector、deep reasoning 均关闭；
-- ToolCatalog 恰好等于十二个批准工具；
-- 每个工具都由 Visual Actor route 拥有；
+- 工具名属于批准的固定 Visual Actor 面；
 - GUI mutation、无输入 observation 与 outcome/control 工具类型严格对应；
 - observation workspace 必须预先建立 binding；full-desktop 输入不因此限制在该窗口；
-- Runtime、Reducer、Registry、Broker 和 Catalog 的共享 owner 只在 session 构造时核对一次。
+- Runtime、Reducer、Actor、FrameAuthority 与 Adapter 的共享 owner 只在 session 构造时核对一次。
 
-这些 session 级核对不在每个 Actor proposal 上重放；每轮 binder 只附加当前 mission/frame/Broker 身份。
+这些 session 级核对不在每个 Actor proposal 上重放；每轮 binder 只附加当前 mission/frame/pointer 身份。
 
 ## 7. 模型层
 
@@ -295,24 +291,18 @@ ConnectorGateway 不是新 Agent。它只给同一个 Actor两项通用工具：
 
 ## 9. 桌面执行层
 
-### 9.1 Broker 是纯投影器
+### 9.1 工具面由 Actor 直接持有
 
-`CapabilityBroker` 只根据已接受事实投影工具：Mission 状态、profile、目标是否绑定、帧是否权威新鲜、Runtime是否可写、pointer 是否释放/被本 run 持有、capability 与授权等。
-
-它不会：
-
-- 看截图内容；
-- 识别任务类别或应用；
-- 根据一次失败自动启用 OCR/UIA；
-- 判断按钮在哪里；
-- 决定下一步语义动作。
+固定 `CapabilityBroker` / profile 已删除。`LiveVisualActor` 直接看到小而稳定的通用工具 schema；
+`MissionRuntime` 只检查参数、当前帧、指针持有状态和 Runtime 可写性等机械事实。它不看任务关键词
+增删工具，不因一次失败自动启用 OCR/UIA，也不判断按钮位置或下一步语义。
 
 ### 9.2 Adapter 是一笔机械调用
 
 `LiveVisualActor` 把 provider function call 解码成 raw proposal；`MissionRuntime` 入口对它
 做唯一一次 typed parse，再取得当前快照并用 `bind_actor_decision` 附加
-mission/frame/Broker 身份。格式错误的辅助 `task_state_update` 只被丢弃，不会连带否决
-可执行动作。binder 不重新序列化后验证整套 Mission、Broker 或工具 schema，
+mission/frame/pointer 身份。格式错误的辅助 `task_state_update` 只被丢弃，不会连带否决
+可执行动作。binder 不重新序列化后验证整套 Mission 或工具 schema，
 `AtomicDesktopAdapter` 也不重复解析 proposal。Adapter只：
 
 1. 在 `FrameAuthority.run_if_current` 内确认所引用帧仍是当前帧；
@@ -330,7 +320,9 @@ Actor恢复。瞬态清理成功后只保留“输入结果未知”并交回新
 
 ### 9.3 跨帧 held pointer
 
-`drag(..., keep_holding=true)` 是唯一允许跨帧保留物理按住的当前模型入口。Broker 在 pointer held 时只投影 `drag`；lease 有过期时间，取消、异常、失焦或 close 都尝试强制 `mouse_up`。旧帧坐标不能跨帧复用，下一段路径仍由新 JPEG 决定。
+`drag(..., keep_holding=true)` 是唯一允许跨帧保留物理按住的当前模型入口。pointer held 时
+Runtime 只接受后续 drag/释放语义；lease 有过期时间，取消、异常、失焦或 close 都尝试强制
+`mouse_up`。旧帧坐标不能跨帧复用，下一段路径仍由新 JPEG 决定。
 
 ### 9.4 通用窗口与画面剪贴板工具
 
@@ -356,27 +348,30 @@ flowchart TB
   Product["/api/v2/goals/runs"] --> Live["orchestrator/live_agent.py"]
   Live --> VNext["vnext/**"]
 
-  Studio["Studio 运行按钮\narp_graph Automation IR"] --> ARP["ARP legacy runtime\nACTION_BATCH 才复用 ToolSession"]
+  Studio["Studio 运行按钮\narp_graph Automation IR"] --> ARP["ARP compatibility runtime\nACTION_BATCH → fast.controller"]
   WPS["Automation IR wps_replay API /\n资料页旧 /api/replay"] --> Replay["RuntimeJob + Replayer"]
   Local7880["Electron :7880"] --> OldBridges["engine/features/macros"]
   CLI["src/cli"] --> OldBridges
 
-  AgentRunner -. "不得 fallback" .-> Live
   OldBridges -. "不得注入工具" .-> VNext
   Studio -. "共享基础设施必须显式证明" .-> VNext
 ```
 
-`/api/chat`、`webui/**`、`src/ai-interface/**`、`winpilot/eval/**`、
-`integrations/chatgpt_mcp.py` 与 `/mcp` 旧 ChatGPT desktop MCP mount 已随旧 Agent 线
-删除；图中 `agent/loop.py` 现只由 scheduler 与 Studio TASK_STAGE 兼容链可达。
+`/api/chat`、WinPilot Agent scheduler/routes、`webui/**`、`src/ai-interface/**`、`winpilot/eval/**`、整个
+`winpilot/agent/**`、`integrations/chatgpt_mcp.py` 与 `/mcp` 旧 ChatGPT desktop MCP mount
+均已删除。
 
-依赖方向上，current live 路径应能在阻断 `winpilot.agent` 包时完成 import/admission。Legacy 可以依赖通用基础设施；vNext 不应为了复用方便重新 import 整个 Legacy owner。
+依赖方向上，current live 路径不应重新创建或导入另一套 Agent owner。兼容代码可以依赖通用
+机械基础设施；vNext 不应为了复用方便接回 Studio/Flow 的确定性执行链。
 
 ## 12. 为什么“高级架构”仍会做不好简单任务
 
 架构主要保证的是：模型看到哪张图、坐标如何映射、谁拥有指针、动作是否真正发出、结果是否可追踪。这些保证能消除“点到了别处”“旧图动作晚到”“前台被 Electron 抢回”“工具说 ok 但没发输入”等基础设施错误，却不会自动赋予模型更强的视觉定位、算术、几何规划或停止判断。
 
-当前有效证据中，MiMo 能完成精确点击、普通拖放、滑块、动态按住和 Notepad 精确文本，却在窄 corridor 和 Calculator 上把错误目标或路径直接提交出来；canonical 与 physical 层忠实执行了它的选择。因此复杂合同不是替模型思考，而是让团队能确定“这次到底是谁错了”。
+2026-07 的 MiMo 历史样本曾在窄 corridor 和 Calculator 上把错误目标或路径直接提交出来，
+而 canonical 与 physical 层忠实执行了它的选择。2026-08-19 的当前客户端回归则让受控视觉
+`18/18`、安全真实应用 `5/5` 全部通过。两者共同说明：基础层应提供可定位首分歧的机械事实，
+但不应把某次模型成败固化成复杂合同、应用规则或第二套 verifier。
 
 正确的改进方向是固定相同 goal、截图、工具 schema 和预算，比较可见真实终态做 provider/模型盲 A/B，或修复确实发生分歧的基础层。错误方向是把当前失败样本重新编码成 prompt 教程、坐标修正器、应用 recipe、答案器、target snapping 或第二语义角色。
 
