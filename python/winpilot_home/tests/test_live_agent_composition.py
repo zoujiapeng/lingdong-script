@@ -97,17 +97,6 @@ _PRIVATE_EVIDENCE_FIELDS = {
     "raw_model_response",
     "reasoning",
 }
-_PUBLIC_RUNTIME_EVIDENCE_FIELDS = {
-    "available",
-    "status",
-    "journal_head_sha256",
-    "journal_event_count",
-    "report_sha256",
-    "audit_locator",
-    "parameter_visibility",
-}
-
-
 def _nested_keys(value: Any) -> set[str]:
     if isinstance(value, dict):
         return set(map(str, value)).union(
@@ -477,22 +466,6 @@ class _FakeSession:
             "mission_id": self.mission_id,
             "run_id": self.run_id,
             "mission_status": "verified" if verified else "blocked",
-            "mission_verification_id": "mission-verification" if verified else None,
-            "obligation_verification_id": "obligation-verification" if verified else None,
-            "verified_evidence_refs": ["e-visual"] if verified else [],
-            "verified_evidence_bindings": (
-                [
-                    {
-                        "id": "e-visual",
-                        "mission_id": self.mission_id,
-                        "run_id": self.run_id,
-                        "obligation_id": "full-goal",
-                        "frame_id": 9,
-                    }
-                ]
-                if verified
-                else []
-            ),
             "target_binding_id": self.target_binding_id,
             "target_hwnd": HWND,
             "target_epoch": self.frame_epoch,
@@ -1684,26 +1657,17 @@ def test_exact_capture_rejects_clamping_and_decoded_dimension_mismatch(
     assert len(calls) == 2
 
 
-def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> None:
+def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
     session = _FakeSession(
         [
-            MissionRuntimeResult(
-                RuntimeStatus.ACTION_RECORDED,
-                accepted_event_ids=("event-action",),
-            ),
+            MissionRuntimeResult(RuntimeStatus.ACTION_RECORDED),
             MissionRuntimeResult(
                 RuntimeStatus.OBSERVATION_REQUESTED,
                 detail="refresh the whole desktop",
             ),
             MissionRuntimeResult(RuntimeStatus.STALE_DISCARDED),
-            MissionRuntimeResult(
-                RuntimeStatus.VERIFICATION_RECORDED,
-                accepted_event_ids=("event-verification-recorded",),
-            ),
-            MissionRuntimeResult(
-                RuntimeStatus.MISSION_VERIFIED,
-                accepted_event_ids=("event-verified",),
-            ),
+            MissionRuntimeResult(RuntimeStatus.VERIFICATION_RECORDED),
+            MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
         ]
     )
     events: list[dict[str, Any]] = []
@@ -1734,6 +1698,14 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert snapshot["result"]["turns_used"] == 5
     assert snapshot["result"]["model_calls"] == 6
     assert snapshot["result"]["no_legacy_fallback"] is True
+    assert not {
+        "accepted_event_ids",
+        "mission_verification_id",
+        "obligation_verification_id",
+        "runtime_evidence",
+        "verified_evidence_bindings",
+        "verified_evidence_refs",
+    }.intersection(snapshot["result"])
     assert session.calls == 5
     assert session.model_calls == 6
     assert session.closed is True
@@ -1770,6 +1742,13 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     }
     assert starts[0]["no_legacy_fallback"] is True
     assert done[0]["status"] == "mission_verified"
+    assert not {
+        "mission_verification_id",
+        "obligation_verification_id",
+        "runtime_evidence",
+        "verified_evidence_refs",
+    }.intersection(done[0])
+    assert all("accepted_event_ids" not in turn for turn in turns)
     event_types = [item["type"] for item in events]
     assert event_types.index("vnext_model_call") < event_types.index(
         "live_agent_activity"
@@ -1796,10 +1775,7 @@ def test_handler_recovers_from_one_invalid_proposal_without_prompt_repair() -> N
                 RuntimeStatus.INVALID_PROPOSAL,
                 detail=private_detail,
             ),
-            MissionRuntimeResult(
-                RuntimeStatus.MISSION_VERIFIED,
-                accepted_event_ids=("event-verified",),
-            ),
+            MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
         ]
     )
     events: list[dict[str, Any]] = []
@@ -2110,7 +2086,7 @@ def test_completion_snapshot_error_does_not_overturn_runtime_completion() -> Non
     assert snapshot["evidence"] == []
 
 
-def test_verified_result_survives_unavailable_diagnostic_summary(
+def test_verified_result_survives_diagnostic_cleanup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class VerifiedSessionWithoutDiagnosticAnchor(_FakeSession):
@@ -2148,7 +2124,7 @@ def test_verified_result_survives_unavailable_diagnostic_summary(
 
     assert snapshot["status"] == ArpRunStatus.DONE.value
     assert snapshot["result"]["status"] == RuntimeStatus.MISSION_VERIFIED.value
-    assert snapshot["result"]["runtime_evidence"]["available"] is False
+    assert "runtime_evidence" not in snapshot["result"]
     assert session.closed is True
     assert (
         execution.runtime_state["user_result"]
@@ -2191,6 +2167,8 @@ def test_public_turn_projection_omits_private_failure_feedback() -> None:
     assert sentinel not in json.dumps(projected, sort_keys=True)
     assert "failure_message" not in projected
     assert "failure_summary" not in projected
+    assert "frame_evidence_refs" not in projected
+    assert "action_effect" not in projected
 
 
 def test_completion_projection_follows_current_workspace_target() -> None:
@@ -2234,6 +2212,13 @@ def test_completion_projection_follows_current_workspace_target() -> None:
 
     assert projected["target_binding_id"] == "vnext-workspace-successor"
     assert projected["target_hwnd"] == successor_hwnd
+    assert not {
+        "accepted_event_ids",
+        "mission_verification_id",
+        "obligation_verification_id",
+        "verified_evidence_bindings",
+        "verified_evidence_refs",
+    }.intersection(projected)
 
 
 def test_model_transport_payload_is_absent_from_bus_and_node_result() -> None:
@@ -2414,27 +2399,6 @@ def test_raw_receipt_trace_keeps_repeated_hotkey_completion_counts() -> None:
     }
 
 
-def test_runtime_evidence_summary_stays_unavailable() -> None:
-    """Per-action durable evidence was removed; the summary stays unavailable."""
-    summary = live_agent._unavailable_runtime_evidence_summary(
-        "mission-private",
-        "run-private",
-    )
-
-    assert summary == {
-        "available": False,
-        "status": "incomplete",
-        "journal_head_sha256": None,
-        "journal_event_count": 0,
-        "report_sha256": None,
-        "audit_locator": live_agent._runtime_evidence_audit_locator(
-            "mission-private",
-            "run-private",
-        ),
-        "parameter_visibility": "private_runtime_evidence",
-    }
-
-
 @pytest.mark.parametrize(
     ("mutate", "expected_result"),
     (
@@ -2452,12 +2416,6 @@ def test_runtime_evidence_summary_stays_unavailable() -> None:
         ),
         (
             lambda snapshot: snapshot.update({"frame_id": 10}),
-            "snapshot result",
-        ),
-        (
-            lambda snapshot: snapshot["verified_evidence_bindings"][0].update(
-                {"run_id": "other-run"}
-            ),
             "snapshot result",
         ),
     ),

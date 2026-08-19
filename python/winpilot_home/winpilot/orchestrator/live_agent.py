@@ -140,28 +140,6 @@ _CONTINUE_STATUSES = frozenset(
     }
 )
 _PRIVATE_RUNTIME_EVIDENCE = "private_runtime_evidence"
-_PUBLIC_ACTION_EFFECT_FIELDS = frozenset(
-    {
-        "format",
-        "comparator_version",
-        "action_id",
-        "input_completed",
-        "before_frame_id",
-        "after_frame_id",
-        "before_frame_evidence_ref",
-        "after_frame_evidence_ref",
-        "before_frame_payload_hash",
-        "after_frame_payload_hash",
-        "target_binding_valid",
-        "frame_comparable",
-        "local_visual_change",
-        "change_ratio",
-        "reason",
-        "semantic_completion",
-        "evidence_ref",
-        "payload_hash",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3173,30 +3151,6 @@ def _public_identity(value: Any) -> str:
     return value
 
 
-def _public_label(value: Any) -> str:
-    if (
-        type(value) is not str
-        or not 1 <= len(value) <= 96
-        or any(
-            not (character.isalnum() or character in "-_./:")
-            for character in value
-        )
-    ):
-        return ""
-    return value
-
-
-def _public_sha256(value: Any) -> str | None:
-    if (
-        type(value) is not str
-        or len(value) != 64
-        or value != value.lower()
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        return None
-    return value
-
-
 def _public_optional_positive_int(value: Any) -> int | None:
     if type(value) is not int or value <= 0:
         return None
@@ -3207,99 +3161,6 @@ def _public_optional_nonnegative_int(value: Any) -> int | None:
     if type(value) is not int or value < 0:
         return None
     return value
-
-
-def _public_identity_list(value: Any) -> list[str]:
-    if type(value) not in {list, tuple}:
-        return []
-    result: list[str] = []
-    for item in value:
-        identity = _public_identity(item)
-        if identity:
-            result.append(identity)
-    return result
-
-
-def _public_action_effect(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, Mapping):
-        return None
-    if not _PUBLIC_ACTION_EFFECT_FIELDS.issubset(value):
-        return None
-    result: dict[str, Any] = {
-        "format": _public_label(value.get("format")),
-        "comparator_version": _public_label(
-            value.get("comparator_version")
-        ),
-        "action_id": _public_identity(value.get("action_id")),
-        "input_completed": value.get("input_completed"),
-        "before_frame_id": _public_optional_positive_int(
-            value.get("before_frame_id")
-        ),
-        "after_frame_id": _public_optional_positive_int(
-            value.get("after_frame_id")
-        ),
-        "before_frame_evidence_ref": _public_identity(
-            value.get("before_frame_evidence_ref")
-        ),
-        "after_frame_evidence_ref": _public_identity(
-            value.get("after_frame_evidence_ref")
-        ),
-        "before_frame_payload_hash": _public_sha256(
-            value.get("before_frame_payload_hash")
-        ),
-        "after_frame_payload_hash": _public_sha256(
-            value.get("after_frame_payload_hash")
-        ),
-        "target_binding_valid": value.get("target_binding_valid"),
-        "frame_comparable": value.get("frame_comparable"),
-        "local_visual_change": value.get("local_visual_change"),
-        "change_ratio": value.get("change_ratio"),
-        "reason": value.get("reason"),
-        "semantic_completion": value.get("semantic_completion"),
-        "evidence_ref": _public_identity(value.get("evidence_ref")),
-        "payload_hash": _public_sha256(value.get("payload_hash")),
-    }
-    ratio = result["change_ratio"]
-    if ratio is not None:
-        if (
-            isinstance(ratio, bool)
-            or not isinstance(ratio, (int, float))
-            or not 0.0 <= float(ratio) <= 1.0
-        ):
-            return None
-        result["change_ratio"] = float(ratio)
-    if (
-        not result["format"]
-        or not result["comparator_version"]
-        or not result["action_id"]
-        or type(result["input_completed"]) is not bool
-        or result["before_frame_id"] is None
-        or result["after_frame_id"] is None
-        or not result["before_frame_evidence_ref"]
-        or not result["after_frame_evidence_ref"]
-        or result["before_frame_payload_hash"] is None
-        or result["after_frame_payload_hash"] is None
-        or type(result["target_binding_valid"]) is not bool
-        or type(result["frame_comparable"]) is not bool
-        or result["local_visual_change"]
-        not in {"changed", "unchanged", "unknown"}
-        or result["reason"]
-        not in {
-            "exact_payload",
-            "aligned_pixel_delta",
-            "input_not_executed",
-            "target_binding_changed",
-            "frame_not_comparable",
-            "decode_failed",
-            "decoded_size_mismatch",
-            "comparison_failed",
-        }
-        or result["semantic_completion"] != "unknown"
-        or not result["evidence_ref"]
-        or result["payload_hash"] is None
-    ):
-        return None
-    return result
 
 
 def _public_turn_snapshot(
@@ -3330,12 +3191,6 @@ def _public_turn_snapshot(
         "frame_epoch": _public_optional_nonnegative_int(
             source.get("frame_epoch")
         ),
-        "frame_evidence_refs": _public_identity_list(
-            source.get("frame_evidence_refs")
-        ),
-        "action_effect": _public_action_effect(
-            source.get("action_effect")
-        ),
     }
 
 
@@ -3357,28 +3212,6 @@ def _public_completion_snapshot(
         or len(result) > 16_384
     ):
         result = None
-    frame_id = _public_optional_positive_int(source.get("frame_id"))
-    bindings: list[dict[str, Any]] = []
-    raw_bindings = source.get("verified_evidence_bindings")
-    if type(raw_bindings) in {list, tuple}:
-        for raw_binding in raw_bindings:
-            if not isinstance(raw_binding, Mapping):
-                continue
-            identity = _public_identity(raw_binding.get("id"))
-            binding_frame_id = _public_optional_positive_int(
-                raw_binding.get("frame_id")
-            )
-            if not identity or binding_frame_id is None:
-                continue
-            bindings.append(
-                {
-                    "id": identity,
-                    "mission_id": mission_id,
-                    "run_id": run_id,
-                    "obligation_id": _OBLIGATION_ID,
-                    "frame_id": binding_frame_id,
-                }
-            )
     return {
         "mission_id": mission_id,
         "run_id": run_id,
@@ -3386,21 +3219,6 @@ def _public_completion_snapshot(
             source.get("mission_revision")
         ),
         "mission_status": mission_status,
-        "mission_verification_id": (
-            _public_identity(source.get("mission_verification_id"))
-            or None
-        ),
-        "obligation_verification_id": (
-            _public_identity(source.get("obligation_verification_id"))
-            or None
-        ),
-        "verified_evidence_refs": _public_identity_list(
-            source.get("verified_evidence_refs")
-        ),
-        "verified_evidence_bindings": bindings,
-        "accepted_event_ids": _public_identity_list(
-            source.get("accepted_event_ids")
-        ),
         "target_binding_id": (
             _public_identity(source.get("target_binding_id"))
             or target.binding_id
@@ -3409,42 +3227,11 @@ def _public_completion_snapshot(
             _public_optional_positive_int(source.get("target_hwnd"))
             or target.hwnd
         ),
-        "frame_id": frame_id,
+        "frame_id": _public_optional_positive_int(source.get("frame_id")),
         "frame_epoch": _public_optional_nonnegative_int(
             source.get("frame_epoch")
         ),
         "result": result,
-    }
-
-
-def _runtime_evidence_audit_locator(
-    mission_id: str,
-    run_id: str,
-) -> str:
-    digest = hashlib.sha256(
-        (
-            "vnext-runtime-evidence-audit\0"
-            f"{mission_id}\0{run_id}"
-        ).encode("utf-8")
-    ).hexdigest()
-    return f"vnext-audit-{digest[:32]}"
-
-
-def _unavailable_runtime_evidence_summary(
-    mission_id: str,
-    run_id: str,
-) -> dict[str, Any]:
-    return {
-        "available": False,
-        "status": "incomplete",
-        "journal_head_sha256": None,
-        "journal_event_count": 0,
-        "report_sha256": None,
-        "audit_locator": _runtime_evidence_audit_locator(
-            mission_id,
-            run_id,
-        ),
-        "parameter_visibility": _PRIVATE_RUNTIME_EVIDENCE,
     }
 
 
@@ -3767,17 +3554,10 @@ class _PreparedHandler:
                 },
                 error=detail,
             )
-        runtime_evidence_summary = (
-            _unavailable_runtime_evidence_summary(
-                mission_id,
-                run_id,
-            )
-        )
         session: _SessionPort | None = None
         turns_used = 0
         terminal_status = RuntimeStatus.STATE_REJECTED
         detail = ""
-        accepted_event_ids: tuple[str, ...] = ()
         session_build = _SessionBuild(
             graph=self._graph,
             goal=self._goal,
@@ -3898,7 +3678,6 @@ class _PreparedHandler:
                     ):
                         terminal_status = RuntimeStatus.STATE_REJECTED
                         detail = "vNext runtime time budget exhausted"
-                    accepted_event_ids = result.accepted_event_ids
                     try:
                         raw_turn_snapshot = session.turn_snapshot()
                         turn_snapshot = _public_turn_snapshot(
@@ -3924,9 +3703,6 @@ class _PreparedHandler:
                         narration=str(
                             getattr(session, "latest_narration", "") or ""
                         )[:4096],
-                        accepted_event_ids=list(
-                            result.accepted_event_ids
-                        ),
                         recovery=(
                             {
                                 "kind": (
@@ -4076,8 +3852,6 @@ class _PreparedHandler:
                 ),
                 "turns_used": turns_used,
                 "model_calls": model_calls,
-                "accepted_event_ids": list(accepted_event_ids),
-                "runtime_evidence": runtime_evidence_summary,
             }
             if model_usage.get("prompt_tokens") or model_usage.get(
                 "completion_tokens"
@@ -4096,21 +3870,10 @@ class _PreparedHandler:
                 model_calls=model_calls,
                 model_usage=model_usage,
                 detail=detail[:500],
-                runtime_evidence=runtime_evidence_summary,
                 target_binding_id=snapshot.get("target_binding_id"),
                 target_hwnd=snapshot.get("target_hwnd"),
                 frame_id=snapshot.get("frame_id"),
                 frame_epoch=snapshot.get("frame_epoch"),
-                mission_verification_id=snapshot.get(
-                    "mission_verification_id"
-                ),
-                obligation_verification_id=snapshot.get(
-                    "obligation_verification_id"
-                ),
-                verified_evidence_refs=snapshot.get(
-                    "verified_evidence_refs",
-                    [],
-                ),
             )
         if terminal_status is not RuntimeStatus.MISSION_VERIFIED:
             return NodeResult(
