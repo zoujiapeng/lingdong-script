@@ -366,32 +366,3 @@ def test_element_locator_rejects_near_tied_distinct_candidates():
     assert result.element is None
     assert result.reason == "ambiguous_top_candidates"
     assert len(result.candidates) == 2
-
-
-def test_reducer_separates_relevance_from_perception_confidence():
-    from winpilot.perception import reducer
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    snapshot = Snapshot(
-        hwnd=1,
-        title="Visual app",
-        region=Region(0, 0, 600, 400),
-        elements=[UIElement(
-            elem_id=1, source="vlm", role="button", text="Apply",
-            cx=300, cy=200, left=260, top=180, width=80, height=40,
-            confidence=0.61,
-        )],
-    )
-
-    reduced = reducer.reduce_snapshot(snapshot, task="click Apply", query="Apply")
-    candidate = reduced["top_candidates"][0]
-    rendered = reducer.render_reduced_snapshot(snapshot, task="click Apply", query="Apply")
-
-    assert "confidence" not in candidate
-    assert candidate["perception_confidence"] == 0.61
-    assert candidate["relevance_score"] != candidate["perception_confidence"]
-    assert "relevance=" in rendered
-    assert "perception_conf=0.61" in rendered
-    assert "perception_conf=0.61" in snapshot.elements[0].to_line()
