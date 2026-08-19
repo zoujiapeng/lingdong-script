@@ -11,6 +11,7 @@ import {
 } from '../platform/client';
 import { edgeBranch, flowToArpGraph, RUNNABLE_FLOW_NODE_TYPES } from '../platform/flowToArpGraph';
 import { automationIrFromFlowScript, validateAutomationLocally } from '../utils/automationIR';
+import { buildFlowFragmentRequestContext } from '../utils/flowFragmentProposal';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
 import { PRESET_TEMPLATE_META, PRESET_TEMPLATES } from '../store/defaults';
 
@@ -303,6 +304,41 @@ describe('control plane client contracts', () => {
       expect(submitted.automation.runtime.kind).toBe('arp_graph');
       expect(submitted.automation.runtime.graph.format).toBe('arp/1');
       expect(submitted.automation.runtime).not.toHaveProperty('projection_fingerprint');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('submits flow fragment context without a document fingerprint', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      const body = url.includes('/flow-fragments/proposals')
+        ? { ok: true, proposal_job_id: 'fragment-1' }
+        : {
+          ok: true,
+          job: {
+            status: 'done',
+            result: {
+              format: 'flow-fragment-proposal/1',
+              summary: 'wait',
+              nodes: [{ local_id: 'wait', type: 'wait', params: { wait_type: 'time', duration: 1 } }],
+              edges: [],
+            },
+          },
+        };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const client = new ControlPlaneClient('http://127.0.0.1:8765');
+      const context = buildFlowFragmentRequestContext(scriptFixture());
+      await expect(client.proposeFlowFragment('wait', context)).resolves.toMatchObject({ summary: 'wait' });
+
+      const submitted = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+      expect(Object.keys(submitted).sort()).toEqual(['catalog', 'document', 'goal']);
     } finally {
       vi.unstubAllGlobals();
     }

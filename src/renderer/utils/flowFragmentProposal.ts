@@ -2,7 +2,6 @@ import type { FlowEdge, FlowNode, FlowScript, NodeType } from '../types';
 import { RUNNABLE_FLOW_NODE_TYPES } from '../platform/flowToArpGraph';
 import {
   automationIrFromFlowScript,
-  automationProjectionFingerprint,
   validateAutomationLocally,
 } from './automationIR';
 import { NODE_DEFINITIONS } from './nodeDefinitions';
@@ -24,14 +23,12 @@ export interface FlowFragmentEdgeDraft {
 
 export interface FlowFragmentProposal {
   format: typeof FLOW_FRAGMENT_PROPOSAL_FORMAT;
-  base_fingerprint: string;
   summary: string;
   nodes: FlowFragmentNodeDraft[];
   edges: FlowFragmentEdgeDraft[];
 }
 
 export interface FlowFragmentRequestContext {
-  base_fingerprint: string;
   document: {
     node_count: number;
     edge_count: number;
@@ -98,18 +95,8 @@ function text(value: unknown, name: string, maxLength = 512): string {
   return result;
 }
 
-export function flowDocumentFingerprint(script: FlowScript): string {
-  const automation = automationIrFromFlowScript(script, `air-${script.meta.id}`);
-  const runtime = automation.runtime;
-  if (!runtime || runtime.kind !== 'arp_graph') throw new Error('当前流程没有可校验的 ARP 投影。');
-  const graph = JSON.parse(JSON.stringify(runtime.graph));
-  if (graph.metadata && typeof graph.metadata === 'object') delete graph.metadata.compiled_at;
-  return automationProjectionFingerprint(automation.steps, automation.variables, graph);
-}
-
 export function buildFlowFragmentRequestContext(script: FlowScript): FlowFragmentRequestContext {
   return {
-    base_fingerprint: flowDocumentFingerprint(script),
     document: {
       node_count: script.nodes.length,
       edge_count: script.edges.length,
@@ -127,15 +114,9 @@ export function buildFlowFragmentRequestContext(script: FlowScript): FlowFragmen
   };
 }
 
-export function normalizeFlowFragmentProposal(
-  value: unknown,
-  expectedFingerprint: string,
-): FlowFragmentProposal {
+export function normalizeFlowFragmentProposal(value: unknown): FlowFragmentProposal {
   const proposal = record(value, '流程片段');
   if (proposal.format !== FLOW_FRAGMENT_PROPOSAL_FORMAT) throw new Error('流程片段格式不受支持。');
-  if (proposal.base_fingerprint !== expectedFingerprint) {
-    throw new Error('生成期间当前流程已经变化，请重新生成片段。');
-  }
   const rawNodes = proposal.nodes;
   const rawEdges = proposal.edges;
   if (!Array.isArray(rawNodes) || rawNodes.length === 0 || rawNodes.length > 32) {
@@ -226,7 +207,6 @@ export function normalizeFlowFragmentProposal(
 
   return {
     format: FLOW_FRAGMENT_PROPOSAL_FORMAT,
-    base_fingerprint: expectedFingerprint,
     summary: typeof proposal.summary === 'string' ? proposal.summary.trim().slice(0, 1000) : '',
     nodes,
     edges,

@@ -81,7 +81,6 @@ class FlowFragmentProposalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(min_length=1, max_length=4000)
-    base_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     document: dict[str, Any]
     catalog: list[dict[str, Any]] = Field(min_length=1, max_length=32)
 
@@ -1004,7 +1003,6 @@ def propose_flow_fragment(req: FlowFragmentProposalRequest) -> dict[str, Any]:
 
         return propose_live_flow_fragment(
             req.goal,
-            base_fingerprint=req.base_fingerprint,
             document=req.document,
             catalog=req.catalog,
             config_snapshot=frozen_config,

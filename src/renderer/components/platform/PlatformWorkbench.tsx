@@ -57,7 +57,7 @@ import { NodeLibrary } from '../NodeLibrary/NodeLibrary';
 import { PropertyPanel } from '../PropertyPanel/PropertyPanel';
 import { FlowFragmentComposer } from '../FlowFragment/FlowFragmentComposer';
 import { confirmDocumentReplacement, useStore } from '../../store';
-import type { UIState } from '../../types';
+import type { FlowScript, UIState } from '../../types';
 import { useControlPlane } from '../../platform/useControlPlane';
 import type {
   ArpExecutionSnapshot,
@@ -83,7 +83,6 @@ import {
   validateAutomationLocally,
   type AutomationIR,
 } from '../../utils/automationIR';
-import { flowDocumentFingerprint } from '../../utils/flowFragmentProposal';
 import {
   isTerminalTaskStatus,
   readableFailureStage,
@@ -1819,13 +1818,9 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
     () => automationIrFromFlowScript(script, `air-${script.meta.id}`),
     [script],
   );
-  const validatedDocumentFingerprint = useMemo(
-    () => flowDocumentFingerprint(script),
-    [script],
-  );
-  const assertCurrentDocument = () => {
+  const assertCurrentDocument = (baseScript: FlowScript) => {
     const currentScript = useStore.getState().script;
-    if (flowDocumentFingerprint(currentScript) !== validatedDocumentFingerprint) {
+    if (currentScript !== baseScript) {
       throw new Error('流程在验证期间已发生变化；旧结果已丢弃，请重新验证或运行当前版本。');
     }
   };
@@ -1871,6 +1866,7 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
   }, [plane.events]);
 
   const validate = useCallback(async () => {
+    const baseScript = script;
     setBusy(true); setError('');
     try {
       const local = validateAutomationLocally(automation);
@@ -1886,7 +1882,7 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
         return offlineResult;
       }
       const result = await plane.validateAutomation(automation);
-      assertCurrentDocument();
+      assertCurrentDocument(baseScript);
       setValidationSource('runtime');
       setValidation(result);
       return result;
@@ -1894,7 +1890,7 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
       setError(validateError instanceof Error ? validateError.message : String(validateError));
       return null;
     } finally { setBusy(false); }
-  }, [plane, automation]);
+  }, [plane, automation, script]);
 
   const run = async () => {
     setBusy(true); setError('');

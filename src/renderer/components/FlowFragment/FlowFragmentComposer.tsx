@@ -4,7 +4,6 @@ import { useStore } from '../../store';
 import { commitEditorDrafts } from '../../utils/editorDrafts';
 import {
   buildFlowFragmentRequestContext,
-  flowDocumentFingerprint,
   normalizeFlowFragmentProposal,
   validateFlowFragmentProposal,
   type FlowFragmentProposal,
@@ -26,6 +25,7 @@ export function FlowFragmentComposer({
   const [error, setError] = useState('');
   const [proposal, setProposal] = useState<FlowFragmentProposal | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const proposalBaseRef = useRef<ReturnType<typeof useStore.getState>['script'] | null>(null);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -40,16 +40,22 @@ export function FlowFragmentComposer({
     setBusy(true);
     setError('');
     setProposal(null);
+    proposalBaseRef.current = null;
     const aborter = new AbortController();
     abortRef.current = aborter;
     try {
-      const context = buildFlowFragmentRequestContext(useStore.getState().script);
+      const baseScript = useStore.getState().script;
+      const context = buildFlowFragmentRequestContext(baseScript);
       const raw = await propose(request, context, aborter.signal);
       if (aborter.signal.aborted) return;
       const current = useStore.getState().script;
-      const normalized = normalizeFlowFragmentProposal(raw, flowDocumentFingerprint(current));
+      if (current !== baseScript) {
+        throw new Error('生成期间当前流程已经变化，请重新生成片段。');
+      }
+      const normalized = normalizeFlowFragmentProposal(raw);
       const localErrors = validateFlowFragmentProposal(normalized, current);
       if (localErrors.length) throw new Error(`片段未通过本地结构检查：${localErrors.join(' · ')}`);
+      proposalBaseRef.current = baseScript;
       setProposal(normalized);
     } catch (generateError) {
       if (!aborter.signal.aborted) {
@@ -71,8 +77,9 @@ export function FlowFragmentComposer({
       return;
     }
     const state = useStore.getState();
-    if (flowDocumentFingerprint(state.script) !== proposal.base_fingerprint) {
+    if (state.script !== proposalBaseRef.current) {
       setProposal(null);
+      proposalBaseRef.current = null;
       setError('当前流程已变化，请重新生成片段。');
       return;
     }
@@ -92,6 +99,7 @@ export function FlowFragmentComposer({
     setOpen(false);
     setGoal('');
     setProposal(null);
+    proposalBaseRef.current = null;
     setError('');
   };
 
@@ -99,6 +107,7 @@ export function FlowFragmentComposer({
     abortRef.current?.abort();
     setOpen(false);
     setProposal(null);
+    proposalBaseRef.current = null;
     setError('');
   };
 

@@ -1436,6 +1436,7 @@ def test_flow_fragment_job_waits_for_interactive_resource_and_is_cancelable(
     blocker_entered = threading.Event()
     release_blocker = threading.Event()
     proposal_entered = threading.Event()
+    proposal_kwargs = {}
 
     def hold_interactive_resource(_stop_event):
         blocker_entered.set()
@@ -1443,6 +1444,7 @@ def test_flow_fragment_job_waits_for_interactive_resource_and_is_cancelable(
         return {"ok": True}
 
     def fake_proposal(*_args, stop_event, **_kwargs):
+        proposal_kwargs.update(_kwargs)
         proposal_entered.set()
         stop_event.wait(2)
         return {"ok": False, "error": "canceled"}
@@ -1460,7 +1462,6 @@ def test_flow_fragment_job_waits_for_interactive_resource_and_is_cancelable(
             "/api/v2/flow-fragments/proposals",
             json={
                 "goal": "click",
-                "base_fingerprint": f"sha256:{'0' * 64}",
                 "document": {
                     "node_count": 2,
                     "edge_count": 1,
@@ -1486,6 +1487,7 @@ def test_flow_fragment_job_waits_for_interactive_resource_and_is_cancelable(
 
         release_blocker.set()
         assert proposal_entered.wait(1)
+        assert set(proposal_kwargs) == {"document", "catalog", "config_snapshot"}
         canceled = client.post(f"/api/v2/jobs/{proposal_job.id}/cancel")
         assert canceled.status_code == 200
         assert proposal_job.done.wait(1)

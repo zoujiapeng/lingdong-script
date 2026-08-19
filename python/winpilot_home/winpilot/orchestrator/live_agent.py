@@ -3736,7 +3736,6 @@ def prepare_live_vnext_execution(
 def propose_live_flow_fragment(
     goal: str,
     *,
-    base_fingerprint: str,
     document: Mapping[str, Any],
     catalog: list[dict[str, Any]],
     config_snapshot: dict[str, Any],
@@ -3751,13 +3750,6 @@ def propose_live_flow_fragment(
 
     if type(goal) is not str or not goal.strip() or len(goal.strip()) > 4000:
         raise ValueError("flow fragment goal must be 1 to 4000 characters")
-    if (
-        type(base_fingerprint) is not str
-        or not base_fingerprint.startswith("sha256:")
-        or len(base_fingerprint) != 71
-        or any(char not in "0123456789abcdef" for char in base_fingerprint[7:])
-    ):
-        raise ValueError("flow fragment base_fingerprint is invalid")
     if not isinstance(document, Mapping) or set(document) != {
         "node_count", "edge_count", "node_types"
     }:
@@ -3824,7 +3816,6 @@ def propose_live_flow_fragment(
         )
         return {
             "format": "flow-fragment-proposal/1",
-            "base_fingerprint": base_fingerprint,
             "proposal_usage": {
                 "model_calls": actor_bundle.counter.count,
                 "tokens": actor_bundle.usage_total,

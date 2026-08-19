@@ -1,9 +1,8 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FlowFragmentComposer } from '../components/FlowFragment/FlowFragmentComposer';
 import { useStore } from '../store';
-import { flowDocumentFingerprint } from '../utils/flowFragmentProposal';
 
 beforeEach(() => {
   useStore.getState().newScript();
@@ -35,10 +34,8 @@ describe('flow fragment composer UX', () => {
 
   it('centers an applied fragment in the canvas viewport rather than the window', async () => {
     const user = userEvent.setup();
-    const fingerprint = flowDocumentFingerprint(useStore.getState().script);
     const propose = vi.fn(async () => ({
       format: 'flow-fragment-proposal/1' as const,
-      base_fingerprint: fingerprint,
       summary: '等待一下',
       nodes: [{ local_id: 'wait', type: 'wait' as const, label: '等待', params: { wait_type: 'time', duration: 1 } }],
       edges: [],
@@ -74,5 +71,57 @@ describe('flow fragment composer UX', () => {
       x: 200 - (inserted.x + 110),
       y: 150 - (inserted.y + 40),
     });
+  });
+
+  it('discards a proposal when the script object changes while generation is pending', async () => {
+    const user = userEvent.setup();
+    let resolveProposal!: (proposal: {
+      format: 'flow-fragment-proposal/1';
+      summary: string;
+      nodes: Array<{ local_id: string; type: 'wait'; params: Record<string, unknown> }>;
+      edges: [];
+    }) => void;
+    const propose = vi.fn(() => new Promise<Parameters<typeof resolveProposal>[0]>((resolve) => {
+      resolveProposal = resolve;
+    }));
+    render(<FlowFragmentComposer propose={propose} />);
+
+    await user.click(screen.getByRole('button', { name: '一句话生成流程片段' }));
+    await user.type(screen.getByRole('textbox', { name: '描述要插入的机械流程' }), '等待');
+    await user.click(screen.getByRole('button', { name: '生成预览' }));
+    await waitFor(() => expect(propose).toHaveBeenCalledOnce());
+
+    act(() => { useStore.getState().addNode('wait', 10, 10); });
+    resolveProposal({
+      format: 'flow-fragment-proposal/1',
+      summary: '等待',
+      nodes: [{ local_id: 'wait', type: 'wait', params: { wait_type: 'time', duration: 1 } }],
+      edges: [],
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('生成期间当前流程已经变化');
+    expect(screen.queryByRole('button', { name: '应用到空白处' })).not.toBeInTheDocument();
+  });
+
+  it('discards a preview when the script object changes before apply', async () => {
+    const user = userEvent.setup();
+    const propose = vi.fn(async () => ({
+      format: 'flow-fragment-proposal/1' as const,
+      summary: '等待',
+      nodes: [{ local_id: 'wait', type: 'wait' as const, params: { wait_type: 'time', duration: 1 } }],
+      edges: [],
+    }));
+    render(<FlowFragmentComposer propose={propose} />);
+
+    await user.click(screen.getByRole('button', { name: '一句话生成流程片段' }));
+    await user.type(screen.getByRole('textbox', { name: '描述要插入的机械流程' }), '等待');
+    await user.click(screen.getByRole('button', { name: '生成预览' }));
+    const apply = await screen.findByRole('button', { name: '应用到空白处' });
+
+    act(() => { useStore.getState().addNode('wait', 10, 10); });
+    await user.click(apply);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('当前流程已变化');
+    expect(screen.queryByRole('button', { name: '应用到空白处' })).not.toBeInTheDocument();
   });
 });
