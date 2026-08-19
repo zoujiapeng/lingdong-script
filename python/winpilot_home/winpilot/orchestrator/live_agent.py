@@ -55,18 +55,6 @@ from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS
 from ..utils.screenshot import Region, virtual_screen_region, window_region
 from ..visual_runtime.frame_observer import FrameObserver
-from ..vnext.capabilities import (
-    BrokerRuntimeState,
-    CapabilityBroker,
-    ExecutionMedium,
-    MutationKind,
-    PointerDisposition,
-    PointerLeaseState,
-    TargetState,
-    ToolCatalog,
-    ToolRoute,
-    ToolSpec,
-)
 from ..vnext.desktop_adapter import (
     AtomicDesktopAdapter,
     DesktopWorkspace,
@@ -87,10 +75,12 @@ from ..vnext.model_roles import (
     LiveVisualActor,
     VisualActorTurnAdmission,
 )
-from ..vnext.profiling import ExecutionPolicy
 from ..vnext.runtime import (
+    ActorToolView,
     MissionRuntime,
     MissionRuntimeResult,
+    PointerDisposition,
+    PointerLeaseState,
     RuntimeFrame,
     RuntimeSnapshot,
     RuntimeStatus,
@@ -1213,7 +1203,7 @@ def _object_schema(properties: dict[str, Any], required: list[str]) -> dict[str,
     }
 
 
-def _tool_catalog() -> ToolCatalog:
+def _actor_tools() -> tuple[ActorToolView, ...]:
     point_properties = {
         "image_x": {"type": "number"},
         "image_y": {"type": "number"},
@@ -1423,41 +1413,14 @@ def _tool_catalog() -> ToolCatalog:
         "claim_obligation_done",
         "blocked",
     )
-    tools = []
-    for index, name in enumerate(names, start=1):
-        order = (
-            20
-            if name == "claim_obligation_done"
-            else 21
-            if name == "blocked"
-            else index
-        )
-        mutation = (
-            MutationKind.GUI
-            if name in _APPROVED_ACTIONS
-            else MutationKind.NONE
-        )
-        tools.append(
-            ToolSpec(
+    return tuple(
+            ActorToolView(
                 name=name,
                 schema=schemas[name],
-                route=ToolRoute.VISUAL_ACTOR,
-                mutation_kind=mutation,
-                execution_medium=(
-                    ExecutionMedium.GUI
-                    if mutation is MutationKind.GUI
-                    else ExecutionMedium.CONTROL
-                ),
-                required_any_capabilities=(),
-                # The current screen and physical pointer ownership are
-                # projected once by the Broker.  Tool-local window/capability
-                # gates used to duplicate that decision and hide ordinary
-                # mouse/keyboard actions from the model.
-                prerequisites=(),
-                order=order,
+                requires_local_intent=name in _APPROVED_ACTIONS,
             )
-        )
-    return ToolCatalog(tuple(tools))
+            for name in names
+    )
 
 
 def _launch_application_primitive(
@@ -1710,7 +1673,7 @@ class _LiveRuntimeState:
             run_id=self._reducer.definition.run_id,
             mission_id=self._reducer.definition.mission_id,
             obligation_id=_OBLIGATION_ID,
-            execution_medium=ExecutionMedium.CONTROL.value,
+            execution_medium="control",
             observation_kind="fresh_authoritative_desktop_frame",
             target_binding_id=binding.binding_id,
             target_hwnd=binding.hwnd,
@@ -1735,7 +1698,7 @@ class _LiveRuntimeState:
             image_sha256=state.image_sha256,
         )
 
-    def _snapshot(self, state: FrameState, *, turn_index: int) -> RuntimeSnapshot:
+    def _snapshot(self, state: FrameState) -> RuntimeSnapshot:
         binding = self._workspace.binding
         if (
             state.scope not in {"target_window", "full_desktop"}
@@ -1754,53 +1717,19 @@ class _LiveRuntimeState:
         frame = self._runtime_frame(state)
         paused = bool(getattr(self._pause_controller, "paused", False))
         return RuntimeSnapshot(
-            broker_state=BrokerRuntimeState(
-                turn_index=turn_index,
-                available_capabilities=(),
-                target=TargetState(
-                    binding_id=binding.binding_id,
-                    hwnd=binding.hwnd,
-                    epoch=binding.epoch,
-                    live=True,
-                ),
-                frame=frame.broker_frame(
-                    authoritative=True,
-                    fresh=True,
-                ),
-                pointer=(
-                    PointerLeaseState(PointerDisposition.RELEASED)
-                    if self._pointer_state_reader is None
-                    else self._pointer_state_reader()
-                ),
-                runtime_healthy=True,
-                paused=paused,
-                canceled=False,
-            ),
             frame=frame,
             target=RuntimeTargetIdentity.from_binding(binding),
+            pointer=(
+                PointerLeaseState(PointerDisposition.RELEASED)
+                if self._pointer_state_reader is None
+                else self._pointer_state_reader()
+            ),
+            paused=paused,
+            canceled=False,
         )
 
-    def observe(
-        self,
-        _projection: Any,
-        *,
-        turn_index: int,
-    ) -> RuntimeSnapshot:
-        return self._snapshot(
-            self._capture_current(),
-            turn_index=turn_index,
-        )
-
-    def current(
-        self,
-        _projection: Any,
-        *,
-        turn_index: int,
-    ) -> RuntimeSnapshot:
-        state = self._authority.current
-        if state is None:
-            raise RuntimeError("authoritative frame is unavailable")
-        return self._snapshot(state, turn_index=turn_index)
+    def observe(self) -> RuntimeSnapshot:
+        return self._snapshot(self._capture_current())
 
 
 class _ModelCallCounter:
@@ -2767,14 +2696,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
     try:
         actor_bundle = build.actor_bundle
         counter = actor_bundle.counter
-        catalog = _tool_catalog()
-        profile = ExecutionPolicy(
-            provider_availability=(),
-        ).safe_default(
-            build.mission_id,
-            definition.goal_revision,
-            available_capabilities=(),
-        )
+        tools = _actor_tools()
         # One mechanical fuel gauge per turn: remaining turns, model calls
         # and wall time as facts only.  The Actor decides how to pace long
         # multi-part goals; the runtime never spends on its behalf.
@@ -2798,9 +2720,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
 
         runtime = MissionRuntime(
             reducer=reducer,
-            profile=profile,
-            broker=CapabilityBroker(catalog),
-            catalog=catalog,
+            tools=tools,
             actor=actor_bundle.actor,
             state=state,
             controller=controller,

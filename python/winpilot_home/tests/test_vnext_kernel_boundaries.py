@@ -24,25 +24,13 @@ LIVE_COMPOSITION_ROOT = (
 )
 LIVE_COMPOSITION_MODULE = "winpilot.orchestrator.live_agent"
 LIVE_COMPOSITION_VNEXT_MODULES = (
-    "winpilot.vnext.capabilities",
     "winpilot.vnext.desktop_adapter",
     "winpilot.vnext.desktop_ops",
     "winpilot.vnext.mission",
     "winpilot.vnext.model_roles",
-    "winpilot.vnext.profiling",
     "winpilot.vnext.runtime",
 )
 LIVE_COMPOSITION_VNEXT_BINDINGS = (
-    ("winpilot.vnext.capabilities", "BrokerRuntimeState", None),
-    ("winpilot.vnext.capabilities", "CapabilityBroker", None),
-    ("winpilot.vnext.capabilities", "ExecutionMedium", None),
-    ("winpilot.vnext.capabilities", "MutationKind", None),
-    ("winpilot.vnext.capabilities", "PointerDisposition", None),
-    ("winpilot.vnext.capabilities", "PointerLeaseState", None),
-    ("winpilot.vnext.capabilities", "TargetState", None),
-    ("winpilot.vnext.capabilities", "ToolCatalog", None),
-    ("winpilot.vnext.capabilities", "ToolRoute", None),
-    ("winpilot.vnext.capabilities", "ToolSpec", None),
     ("winpilot.vnext.desktop_adapter", "AtomicDesktopAdapter", None),
     ("winpilot.vnext.desktop_adapter", "DesktopWorkspace", None),
     ("winpilot.vnext.desktop_adapter", "LiveTargetSnapshot", None),
@@ -59,9 +47,11 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.model_roles", "FlowFragmentProposer", None),
     ("winpilot.vnext.model_roles", "LiveVisualActor", None),
     ("winpilot.vnext.model_roles", "VisualActorTurnAdmission", None),
-    ("winpilot.vnext.profiling", "ExecutionPolicy", None),
+    ("winpilot.vnext.runtime", "ActorToolView", None),
     ("winpilot.vnext.runtime", "MissionRuntime", None),
     ("winpilot.vnext.runtime", "MissionRuntimeResult", None),
+    ("winpilot.vnext.runtime", "PointerDisposition", None),
+    ("winpilot.vnext.runtime", "PointerLeaseState", None),
     ("winpilot.vnext.runtime", "RuntimeFrame", None),
     ("winpilot.vnext.runtime", "RuntimeSnapshot", None),
     ("winpilot.vnext.runtime", "RuntimeStatus", None),
@@ -93,8 +83,6 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "winpilot.tasking",
     "winpilot.vnext.actor",
     "winpilot.vnext.bridge",
-    "winpilot.vnext.capabilities",
-    "winpilot.vnext.profiling",
     "winpilot.vnext.runtime",
     "winpilot.vnext.targeting",
     "winpilot.vnext.verification",
@@ -189,7 +177,6 @@ MODEL_ROLE_FORBIDDEN_IMPORT_PREFIXES = (
     "winpilot.visual_runtime",
     "winpilot.vnext.bridge",
     "winpilot.vnext.desktop_adapter",
-    "winpilot.vnext.profiling",
     "winpilot.vnext.targeting",
 )
 

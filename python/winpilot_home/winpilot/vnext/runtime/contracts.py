@@ -13,15 +13,6 @@ import re
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
-from ..capabilities import (
-    AuthoritativeFrameState,
-    BrokerProjection,
-    BrokerRuntimeState,
-    ExecutionRoute,
-    MutationKind,
-    ToolCatalog,
-    ToolRoute,
-)
 from ..json_contract import BoundedJSONError, bounded_json_copy
 from ..mission import (
     MissionCard,
@@ -76,6 +67,12 @@ _MAX_FACTS = 64
 
 class RuntimeContractError(ValueError):
     """A Runtime boundary value is not canonical."""
+
+
+class PointerDisposition(str, Enum):
+    RELEASED = "released"
+    HELD = "held"
+    UNKNOWN = "unknown"
 
 
 def _identity(value: Any, name: str) -> str:
@@ -405,64 +402,76 @@ class RuntimeFrame:
     def authority_key(self) -> tuple[Any, ...]:
         return (self.identity,)
 
-    def broker_frame(
-        self,
-        *,
-        authoritative: bool = True,
-        fresh: bool = True,
-    ) -> AuthoritativeFrameState:
-        return AuthoritativeFrameState(
-            frame_id=self.frame_id,
-            hwnd=self.hwnd,
-            epoch=self.epoch,
-            authoritative=authoritative,
-            fresh=fresh,
-            scope=self.scope,
-        )
+
+
+@dataclass(frozen=True, slots=True)
+class PointerLeaseState:
+    disposition: PointerDisposition | str = PointerDisposition.UNKNOWN
+    lease_id: str | None = None
+    physically_owned: bool = False
+
+    def __post_init__(self) -> None:
+        try:
+            disposition = PointerDisposition(self.disposition)
+        except Exception as exc:
+            raise RuntimeContractError(
+                "invalid pointer disposition"
+            ) from exc
+        if type(self.physically_owned) is not bool:
+            raise RuntimeContractError(
+                "pointer physically_owned must be boolean"
+            )
+        lease_id = self.lease_id
+        if lease_id is not None:
+            lease_id = _identity(lease_id, "lease_id")
+        if disposition is PointerDisposition.HELD and lease_id is None:
+            raise RuntimeContractError("held pointer requires lease_id")
+        if disposition is PointerDisposition.RELEASED and lease_id is not None:
+            raise RuntimeContractError(
+                "released pointer cannot retain lease_id"
+            )
+        if self.physically_owned and disposition is not PointerDisposition.HELD:
+            raise RuntimeContractError(
+                "only a held pointer may be physically owned"
+            )
+        object.__setattr__(self, "disposition", disposition)
+        object.__setattr__(self, "lease_id", lease_id)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "disposition": self.disposition.value,
+            "lease_id": self.lease_id,
+            "physically_owned": self.physically_owned,
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeSnapshot:
-    """One injected pre-bound target/frame observation for Broker and Runtime."""
+    """One fresh target/frame observation plus physical runtime state."""
 
-    broker_state: BrokerRuntimeState
     frame: RuntimeFrame
     target: RuntimeTargetIdentity
+    pointer: PointerLeaseState
+    paused: bool = False
+    canceled: bool = False
     format: str = RUNTIME_SNAPSHOT_FORMAT
 
     def __post_init__(self) -> None:
         if self.format != RUNTIME_SNAPSHOT_FORMAT:
             raise RuntimeContractError("unsupported RuntimeSnapshot format")
-        if type(self.broker_state) is not BrokerRuntimeState:
-            raise RuntimeContractError(
-                "broker_state must be canonical BrokerRuntimeState"
-            )
         if type(self.frame) is not RuntimeFrame:
             raise RuntimeContractError("frame must be RuntimeFrame")
         if type(self.target) is not RuntimeTargetIdentity:
             raise RuntimeContractError(
                 "target must be RuntimeTargetIdentity"
             )
-        state_target = self.broker_state.target
-        state_frame = self.broker_state.frame
-        if (
-            not state_target.live
-            or state_target.binding_id != self.target.binding_id
-            or state_target.hwnd != self.target.hwnd
-            or state_target.epoch != self.target.epoch
-        ):
+        if type(self.pointer) is not PointerLeaseState:
             raise RuntimeContractError(
-                "Broker target and full target identity disagree"
+                "pointer must be PointerLeaseState"
             )
-        if (
-            state_frame.frame_id != self.frame.frame_id
-            or state_frame.hwnd != self.frame.hwnd
-            or state_frame.epoch != self.frame.epoch
-            or state_frame.scope != self.frame.scope
-        ):
-            raise RuntimeContractError(
-                "Broker frame and RuntimeFrame identity disagree"
-            )
+        for name in ("paused", "canceled"):
+            if type(getattr(self, name)) is not bool:
+                raise RuntimeContractError(f"{name} must be boolean")
         RuntimeCommitIdentity(self.frame.identity, self.target)
 
     @property
@@ -472,9 +481,11 @@ class RuntimeSnapshot:
     @property
     def authority_key(self) -> tuple[Any, ...]:
         return (
-            self.broker_state,
             self.frame.authority_key,
             self.target,
+            self.pointer,
+            self.paused,
+            self.canceled,
         )
 
 
@@ -815,9 +826,8 @@ class ActorTurnInput:
 
 def project_actor_turn_input(
     card: MissionCard,
-    frame_state: AuthoritativeFrameState,
-    catalog: ToolCatalog,
-    projection: BrokerProjection,
+    snapshot: RuntimeSnapshot,
+    tools: tuple[ActorToolView, ...],
     *,
     task_state: ActorTaskState | None = None,
     previous_action_local_intent: str | None = None,
@@ -833,39 +843,15 @@ def project_actor_turn_input(
         raise RuntimeContractError(
             "Actor projection requires ActorBudgetView or null"
         )
-    if type(frame_state) is not AuthoritativeFrameState:
-        raise RuntimeContractError(
-            "Actor projection requires AuthoritativeFrameState"
-        )
-    if type(catalog) is not ToolCatalog:
-        raise RuntimeContractError("Actor projection requires ToolCatalog")
-    if type(projection) is not BrokerProjection:
-        raise RuntimeContractError(
-            "Actor projection requires BrokerProjection"
-        )
-    if (
-        card.mission_revision != projection.mission_revision
-        or card.active_obligation_id != projection.obligation_id
-    ):
-        raise RuntimeContractError(
-            "MissionCard and BrokerProjection identity disagree"
-        )
-    if (
-        frame_state.frame_id != projection.frame_id
-        or frame_state.scope not in {"target_window", "full_desktop"}
-        or not frame_state.authoritative
-        or not frame_state.fresh
-    ):
-        raise RuntimeContractError(
-            "Actor projection requires a fresh authoritative frame"
-        )
-    if frame_state.scope == "target_window":
+    if type(snapshot) is not RuntimeSnapshot:
+        raise RuntimeContractError("Actor projection requires RuntimeSnapshot")
+    if snapshot.frame.scope == "target_window":
         binding = card.target_binding
         if (
             binding is None
-            or binding.binding_id != projection.target_binding_id
-            or frame_state.hwnd != binding.hwnd
-            or frame_state.epoch != binding.epoch
+            or binding.binding_id != snapshot.target.binding_id
+            or snapshot.frame.hwnd != binding.hwnd
+            or snapshot.frame.epoch != binding.epoch
         ):
             raise RuntimeContractError(
                 "Target-window projection requires its current binding"
@@ -902,48 +888,21 @@ def project_actor_turn_input(
             visible_effect=transition.visible_effect,
             error_kind=transition.error_kind,
         )
-    tools: list[ActorToolView] = []
-    for name in projection.tool_names:
-        if name not in APPROVED_RUNTIME_TOOLS:
-            raise RuntimeContractError(
-                f"Broker projected unsupported Runtime tool {name!r}"
-            )
-        spec = catalog.get(name)
-        if spec.route is not ToolRoute.VISUAL_ACTOR:
-            raise RuntimeContractError(
-                f"tool {name!r} is not a Visual Actor tool"
-            )
-        expected_mutation = (
-            MutationKind.GUI
-            if name in APPROVED_DESKTOP_ACTIONS
-            else MutationKind.NONE
-        )
-        if spec.mutation_kind is not expected_mutation:
-            raise RuntimeContractError(
-                f"tool {name!r} mutation contract is invalid"
-            )
-        tools.append(
-            ActorToolView(
-                name=name,
-                schema=spec.schema,
-                requires_local_intent=(
-                    spec.mutation_kind is MutationKind.GUI
-                ),
-            )
-        )
     return ActorTurnInput(
         mission=mission,
         frame=ActorFrameView(
-            image_available=frame_state.frame_id is not None,
-            authoritative=frame_state.authoritative,
-            fresh=frame_state.fresh,
-            window_hwnd=frame_state.hwnd,
+            image_available=True,
+            authoritative=True,
+            fresh=True,
+            window_hwnd=snapshot.frame.hwnd,
         ),
-        tools=tuple(tools),
+        tools=tools,
         task_state=task_state,
         budget=budget,
         previous_action=previous,
-        pointer_held=projection.pointer_lease_id is not None,
+        pointer_held=(
+            snapshot.pointer.disposition is PointerDisposition.HELD
+        ),
     )
 
 
@@ -1060,7 +1019,6 @@ class RuntimeStatus(str, Enum):
 @dataclass(frozen=True, slots=True)
 class MissionRuntimeResult:
     status: RuntimeStatus | str
-    route: ExecutionRoute | str | None = None
     proposal_kind: str | None = None
     decision_id: str | None = None
     detail: str = ""
@@ -1075,13 +1033,6 @@ class MissionRuntimeResult:
             object.__setattr__(self, "status", RuntimeStatus(self.status))
         except Exception as exc:
             raise RuntimeContractError("invalid Runtime status") from exc
-        if self.route is not None:
-            try:
-                object.__setattr__(
-                    self, "route", ExecutionRoute(self.route)
-                )
-            except Exception as exc:
-                raise RuntimeContractError("invalid execution route") from exc
         if self.proposal_kind is not None:
             object.__setattr__(
                 self,
@@ -1120,6 +1071,8 @@ __all__ = [
     "APPROVED_OUTCOME_TOOLS",
     "APPROVED_RUNTIME_TOOLS",
     "RuntimeContractError",
+    "PointerDisposition",
+    "PointerLeaseState",
     "RuntimeFrameIdentity",
     "RuntimeTargetIdentity",
     "RuntimeCommitIdentity",

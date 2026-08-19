@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import math
 from pathlib import Path
@@ -18,7 +18,6 @@ from winpilot.vnext.actor import (
     ACTOR_PROPOSAL_FORMAT,
     ActorDecisionEnvelope,
     BlockedReport,
-    CapabilityRequest,
     ClaimObligationDone,
     DesktopActionProposal,
     ImageRegion,
@@ -32,21 +31,6 @@ from winpilot.vnext.actor import (
     bind_actor_decision,
     parse_actor_proposal,
     proposal_tool_name,
-)
-from winpilot.vnext.capabilities import (
-    AuthoritativeFrameState,
-    BrokerProjection,
-    BrokerRuntimeState,
-    CapabilityBroker,
-    ExecutionRoute,
-    ExecutorOffer,
-    MutationKind,
-    PointerDisposition,
-    PointerLeaseState,
-    TargetState,
-    ToolCatalog,
-    ToolRoute,
-    ToolSpec,
 )
 from winpilot.vnext.json_contract import (
     MAX_JSON_ARRAY_ITEMS,
@@ -63,25 +47,7 @@ from winpilot.vnext.mission import (
     ObligationSpec,
     TargetBinding,
 )
-from winpilot.vnext.profiling import (
-    DEFAULT_CAPABILITY_CATALOG,
-    ExecutionPolicy,
-    TaskDimensions,
-    TaskProfileProposal,
-)
-
-
-ALL_CAPABILITIES = tuple(sorted(DEFAULT_CAPABILITY_CATALOG))
-GUI_GATES = (
-    "target_bound",
-    "authoritative_frame",
-    "runtime_healthy",
-)
-DRAG_GATES = (
-    "target_bound",
-    "authoritative_frame",
-    "runtime_healthy",
-)
+from winpilot.vnext.runtime import PointerDisposition, PointerLeaseState
 
 
 def _module_name(path: Path, package_root: Path) -> str:
@@ -174,78 +140,6 @@ def _drag_schema() -> dict:
     }
 
 
-def _tool(
-    name: str,
-    mutation: MutationKind,
-    *,
-    route: ToolRoute = ToolRoute.VISUAL_ACTOR,
-    capabilities: tuple[str, ...] = (),
-    prerequisites: tuple[str, ...] = (),
-    authorization_scope: str | None = None,
-    schema: dict | None = None,
-    order: int,
-) -> ToolSpec:
-    return ToolSpec(
-        name=name,
-        schema=schema or _schema(),
-        route=route,
-        mutation_kind=mutation,
-        required_any_capabilities=capabilities,
-        prerequisites=prerequisites,
-        authorization_scope=authorization_scope,
-        order=order,
-    )
-
-
-def _catalog() -> ToolCatalog:
-    tools = []
-    for order, name in enumerate(
-        ("click", "double_click", "scroll", "type_text", "hotkey"),
-        start=1,
-    ):
-        tools.append(
-            _tool(
-                name,
-                MutationKind.GUI,
-                capabilities=("visual.interact",),
-                prerequisites=GUI_GATES,
-                schema=(
-                    _point_schema()
-                    if name in {"click", "double_click"}
-                    else _schema()
-                ),
-                order=order,
-            )
-        )
-    for order, name in enumerate(
-        (
-            "observe",
-            "request_capability",
-            "claim_obligation_done",
-            "blocked",
-        ),
-        start=20,
-    ):
-        tools.append(_tool(name, MutationKind.NONE, order=order))
-    return ToolCatalog(tuple(tools))
-
-
-def _catalog_with_drag() -> ToolCatalog:
-    return ToolCatalog(
-        (
-            *_catalog().tools,
-            _tool(
-                "drag",
-                MutationKind.GUI,
-                capabilities=("visual.interact",),
-                prerequisites=DRAG_GATES,
-                schema=_drag_schema(),
-                order=6,
-            ),
-        )
-    )
-
-
 def _mission_reducer(
     capability: str = "visual.interact",
     *,
@@ -295,56 +189,41 @@ def _mission(
     ).projection
 
 
-def _profile(mission):
-    required = mission.obligation_definition(
-        mission.active_obligation_id
-    ).required_capabilities
-    proposal = TaskProfileProposal(
-        dimensions=TaskDimensions(),
-        broad_capability_hypotheses=required,
-        confidence=1.0,
-        rationale=("deterministic actor test fixture",),
-    )
-    return ExecutionPolicy(min_confidence=0.0).evaluate(
-        proposal,
-        mission_id=mission.mission_id,
-        goal_revision=mission.definition.goal_revision,
-        available_capabilities=ALL_CAPABILITIES,
-    )
+@dataclass(frozen=True)
+class _FrameFacts:
+    frame_id: int = 82
+    epoch: int = 7
+    hwnd: int = 9123
+    scope: str = "target_window"
 
 
-def _state(**overrides) -> BrokerRuntimeState:
+@dataclass(frozen=True)
+class _BinderState:
+    turn_index: int
+    frame: _FrameFacts
+    pointer: PointerLeaseState
+
+
+def _state(**overrides) -> _BinderState:
     values = {
         "turn_index": 5,
-        "available_capabilities": ALL_CAPABILITIES,
-        "target": TargetState("binding-current", 9123, 7, True),
-        "frame": AuthoritativeFrameState(
-            82, 9123, 7, True, True, "target_window"
-        ),
+        "frame": _FrameFacts(),
         "pointer": PointerLeaseState(PointerDisposition.RELEASED),
-        "runtime_healthy": True,
     }
     values.update(overrides)
-    return BrokerRuntimeState(**values)
+    return _BinderState(**values)
 
 
 def _runtime(
     *,
     pointer: PointerLeaseState | None = None,
-    catalog: ToolCatalog | None = None,
 ):
     reducer = _mission_reducer()
     mission = reducer.projection
-    profile = _profile(mission)
     state = _state(
         **({} if pointer is None else {"pointer": pointer})
     )
-    catalog = catalog or _catalog()
-    projection = CapabilityBroker(catalog).project(
-        mission, profile, state
-    )
-    assert projection.execution_route is ExecutionRoute.VISUAL_ACTOR
-    return reducer, mission, profile, state, catalog, projection
+    return reducer, mission, None, state, None, None
 
 
 def _action(**overrides) -> DesktopActionProposal:
@@ -364,8 +243,14 @@ def _bind(**overrides) -> ActorDecisionEnvelope:
     del profile, catalog, projection
     values = {
         "mission_reducer": reducer,
-        "state": state,
         "proposal": _action(),
+        "turn_index": state.turn_index,
+        "frame_id": state.frame.frame_id,
+        "frame_epoch": state.frame.epoch,
+        "frame_hwnd": state.frame.hwnd,
+        "frame_scope": state.frame.scope,
+        "pointer_disposition": state.pointer.disposition.value,
+        "pointer_lease_id": state.pointer.lease_id,
         "frame_region": (-1200, 0, 1200, 800),
         "submitted_image_size": (900, 600),
         "frame_image_sha256": "b" * 64,
@@ -381,7 +266,6 @@ def _held_runtime():
             "pointer-lease-current",
             True,
         ),
-        catalog=_catalog_with_drag(),
     )
 
 
@@ -415,11 +299,6 @@ def _all_proposals():
                 x=1.0, y=2.0, width=30.0, height=40.0
             ),
             question="Describe the small control",
-        ),
-        CapabilityRequest(
-            format=ACTOR_PROPOSAL_FORMAT,
-            capability="pointer.dynamic",
-            reason="a future non-canary path may require another capability",
         ),
         InspectionRequest(
             format=ACTOR_PROPOSAL_FORMAT,
@@ -457,7 +336,6 @@ def test_all_proposal_variants_are_strict_identity_free_round_trips() -> None:
         "click",
         "observe",
         "observe",
-        "request_capability",
         "request_inspection",
         "claim_obligation_done",
         "blocked",
@@ -649,7 +527,7 @@ def test_proposal_text_is_preserved_and_canonical_tokens_are_not_trimmed() -> No
     assert proposal.local_intent == "  preserve these spaces  "
     with pytest.raises(InvalidActorProposal):
         _action(action=" click ")
-    with pytest.raises(InvalidActorProposal, match="canonical"):
+    with pytest.raises(InvalidActorProposal):
         parse_actor_proposal({
             "format": ACTOR_PROPOSAL_FORMAT,
             "kind": "request_capability",
@@ -857,25 +735,20 @@ def test_runtime_binder_derives_all_authority_and_round_trips() -> None:
 
 def test_full_desktop_binder_keeps_frame_facts_without_window_admission() -> None:
     reducer = _mission_reducer()
-    mission = reducer.projection
-    profile = _profile(mission)
     state = _state(
-        target=TargetState("foreground-anchor", 999, 4, True),
-        frame=AuthoritativeFrameState(
-            83, 999, 4, True, True, "full_desktop"
-        ),
-    )
-    catalog = _catalog()
-    CapabilityBroker(catalog).project(
-        mission,
-        profile,
-        state,
+        frame=_FrameFacts(83, 4, 999, "full_desktop"),
     )
 
     envelope = bind_actor_decision(
         mission_reducer=reducer,
-        state=state,
         proposal=_action(),
+        turn_index=state.turn_index,
+        frame_id=state.frame.frame_id,
+        frame_epoch=state.frame.epoch,
+        frame_hwnd=state.frame.hwnd,
+        frame_scope=state.frame.scope,
+        pointer_disposition=state.pointer.disposition.value,
+        pointer_lease_id=state.pointer.lease_id,
         frame_region=(-1200, 0, 1200, 800),
         submitted_image_size=(900, 600),
         frame_image_sha256="b" * 64,
@@ -888,11 +761,17 @@ def test_full_desktop_binder_keeps_frame_facts_without_window_admission() -> Non
 
 
 def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
-    reducer, _mission, _profile, state, _catalog, _projection = _held_runtime()
+    reducer, _mission, _unused, state, _unused2, _unused3 = _held_runtime()
     envelope = bind_actor_decision(
         mission_reducer=reducer,
-        state=state,
         proposal=_held_drag(),
+        turn_index=state.turn_index,
+        frame_id=state.frame.frame_id,
+        frame_epoch=state.frame.epoch,
+        frame_hwnd=state.frame.hwnd,
+        frame_scope=state.frame.scope,
+        pointer_disposition=state.pointer.disposition.value,
+        pointer_lease_id=state.pointer.lease_id,
         frame_region=(-1200, 0, 1200, 800),
         submitted_image_size=(900, 600),
         frame_image_sha256="b" * 64,
@@ -904,10 +783,16 @@ def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
 
 
 def test_held_envelope_accepts_mouse_keyboard_actions_and_tracks_lease() -> None:
-    reducer, _mission, _profile, state, _catalog, _projection = _held_runtime()
+    reducer, _mission, _unused, state, _unused2, _unused3 = _held_runtime()
     common = {
         "mission_reducer": reducer,
-        "state": state,
+        "turn_index": state.turn_index,
+        "frame_id": state.frame.frame_id,
+        "frame_epoch": state.frame.epoch,
+        "frame_hwnd": state.frame.hwnd,
+        "frame_scope": state.frame.scope,
+        "pointer_disposition": state.pointer.disposition.value,
+        "pointer_lease_id": state.pointer.lease_id,
         "frame_region": (-1200, 0, 1200, 800),
         "submitted_image_size": (900, 600),
         "frame_image_sha256": "b" * 64,
@@ -1231,26 +1116,16 @@ def test_envelope_structurally_pins_the_real_frame_authority() -> None:
         captured_at=1.0,
     )
     reducer = _mission_reducer()
-    mission = reducer.projection
-    profile = _profile(mission)
-    state = _state(frame=AuthoritativeFrameState(
-        frame.frame_id,
-        frame.hwnd,
-        frame.epoch,
-        True,
-        True,
-        frame.scope,
-    ))
-    catalog = _catalog()
-    CapabilityBroker(catalog).project(
-        mission,
-        profile,
-        state,
-    )
     envelope = bind_actor_decision(
         mission_reducer=reducer,
-        state=state,
         proposal=_action(),
+        turn_index=5,
+        frame_id=frame.frame_id,
+        frame_epoch=frame.epoch,
+        frame_hwnd=frame.hwnd,
+        frame_scope=frame.scope,
+        pointer_disposition="released",
+        pointer_lease_id=None,
         frame_region=frame.region,
         submitted_image_size=frame.submitted_size,
         frame_image_sha256=frame.image_sha256,
@@ -1350,11 +1225,9 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
 
     allowed_product_prefixes = (
         "winpilot.vnext.actor",
-        "winpilot.vnext.capabilities",
-        "winpilot.vnext.capability_names",
         "winpilot.vnext.json_contract",
         "winpilot.vnext.mission",
-        "winpilot.vnext.profiling",
+        "winpilot.vnext.runtime",
     )
     for path in actor_dir.glob("*.py"):
         product_imports = tuple(

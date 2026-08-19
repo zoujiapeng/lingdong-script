@@ -14,10 +14,6 @@ from pydantic import (
     model_validator,
 )
 
-from ..capabilities import (
-    BrokerRuntimeState,
-    PointerDisposition,
-)
 from ..mission import (
     MissionReducer,
     MissionStatus,
@@ -32,7 +28,6 @@ from ..json_contract import (
 from .proposals import (
     ActorProposal,
     BlockedReport,
-    CapabilityRequest,
     ClaimObligationDone,
     DesktopActionProposal,
     InspectionRequest,
@@ -152,7 +147,6 @@ def proposal_tool_name(proposal: ActorProposal) -> str:
         return proposal.action
     mapping = {
         ObserveProposal: "observe",
-        CapabilityRequest: "request_capability",
         InspectionRequest: "request_inspection",
         ClaimObligationDone: "claim_obligation_done",
         BlockedReport: "blocked",
@@ -245,7 +239,7 @@ class ActorDecisionEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _pointer_contract(self) -> "ActorDecisionEnvelope":
-        if self.pointer_disposition == PointerDisposition.RELEASED.value:
+        if self.pointer_disposition == "released":
             if self.pointer_lease_id is not None:
                 raise ValueError("released pointer cannot retain lease_id")
         elif self.pointer_lease_id is None:
@@ -349,8 +343,14 @@ class ActorDecisionEnvelope(BaseModel):
 def bind_actor_decision(
     *,
     mission_reducer: MissionReducer,
-    state: BrokerRuntimeState,
     proposal: ActorProposal,
+    turn_index: int,
+    frame_id: int,
+    frame_epoch: int,
+    frame_hwnd: int,
+    frame_scope: str,
+    pointer_disposition: str,
+    pointer_lease_id: str | None,
     frame_region: tuple[int, int, int, int],
     submitted_image_size: tuple[int, int],
     frame_image_sha256: str,
@@ -364,12 +364,9 @@ def bind_actor_decision(
     fake failures).
     """
 
-    if (
-        type(mission_reducer) is not MissionReducer
-        or type(state) is not BrokerRuntimeState
-    ):
+    if type(mission_reducer) is not MissionReducer:
         raise InvalidActorAdmission(
-            "Actor admission requires canonical MissionReducer/Broker values"
+            "Actor admission requires canonical MissionReducer"
         )
     try:
         mission = mission_reducer.projection
@@ -383,26 +380,26 @@ def bind_actor_decision(
         active_id = mission.active_obligation_id
         if mission.status is not MissionStatus.RUNNING or active_id is None:
             raise ValueError("Mission is not actionable")
-        pointer = state.pointer
         target = mission.target_binding
-        frame = state.frame
+        if target is None:
+            raise ValueError("Mission target binding is unavailable")
         material = {
             "format": ACTOR_ENVELOPE_FORMAT,
             "mission_id": mission.mission_id,
             "run_id": mission.run_id,
             "mission_revision": mission.revision,
             "obligation_id": active_id,
-            "turn_index": state.turn_index,
-            "frame_id": frame.frame_id,
-            "frame_epoch": frame.epoch,
-            "frame_hwnd": frame.hwnd,
-            "frame_scope": frame.scope,
+            "turn_index": turn_index,
+            "frame_id": frame_id,
+            "frame_epoch": frame_epoch,
+            "frame_hwnd": frame_hwnd,
+            "frame_scope": frame_scope,
             "frame_region": list(region),
             "submitted_image_size": list(image_size),
             "frame_image_sha256": image_sha,
             "target_binding_id": target.binding_id,
-            "pointer_disposition": pointer.disposition.value,
-            "pointer_lease_id": pointer.lease_id,
+            "pointer_disposition": pointer_disposition,
+            "pointer_lease_id": pointer_lease_id,
             "proposal": canonical_proposal,
         }
         decision_material = {

@@ -5,7 +5,6 @@ from threading import Event
 from typing import Any, Mapping, Protocol
 
 from ..actor import ActorDecisionEnvelope
-from ..mission import MissionProjection
 from .contracts import (
     ActorTurnInput,
     ControllerTransition,
@@ -33,16 +32,6 @@ class RuntimeStatePort(Protocol):
 
     def observe(
         self,
-        projection: MissionProjection,
-        *,
-        turn_index: int,
-    ) -> RuntimeSnapshot: ...
-
-    def current(
-        self,
-        projection: MissionProjection,
-        *,
-        turn_index: int,
     ) -> RuntimeSnapshot: ...
 
 

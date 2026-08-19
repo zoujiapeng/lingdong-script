@@ -45,9 +45,6 @@ from winpilot.utils.screenshot import Region
 from winpilot.visual_runtime.keyboard_contracts import HotkeyChord
 from winpilot.visual_runtime.frame_observer import FrameObserver
 from winpilot.vnext.actor import InvalidActorProposal, parse_actor_proposal
-from winpilot.vnext.capabilities import (
-    ExecutionMedium,
-)
 from winpilot.vnext.mission import (
     MissionDefinition,
     MissionReducer,
@@ -1480,11 +1477,11 @@ def test_desktop_shell_binding_adopts_live_identity_change(
     assert target.desktop_shell is True
 
 
-def test_tool_catalog_exposes_generic_mouse_keyboard_mechanics() -> None:
-    catalog = live_agent._tool_catalog()
+def test_actor_tools_expose_generic_mouse_keyboard_mechanics() -> None:
+    tools = live_agent._actor_tools()
     schemas = {
         tool.name: tool.schema
-        for tool in catalog.tools
+        for tool in tools
     }
 
     assert (
@@ -1535,17 +1532,17 @@ def test_tool_catalog_exposes_generic_mouse_keyboard_mechanics() -> None:
         ]
         == r"\S"
     )
-    media = {
-        tool.name: tool.execution_medium
-        for tool in catalog.tools
+    local_intent = {
+        tool.name: tool.requires_local_intent
+        for tool in tools
     }
     assert {
-        media[name]
+        local_intent[name]
         for name in live_agent._APPROVED_ACTIONS
-    } == {ExecutionMedium.GUI}
-    assert media["claim_obligation_done"] is ExecutionMedium.CONTROL
-    assert media["blocked"] is ExecutionMedium.CONTROL
-    assert media["observe"] is ExecutionMedium.CONTROL
+    } == {True}
+    assert local_intent["claim_obligation_done"] is False
+    assert local_intent["blocked"] is False
+    assert local_intent["observe"] is False
     assert tuple(schemas["observe"]["required"]) == ("question",)
 
     with pytest.raises(ValueError, match="ordered modifiers"):
@@ -2495,11 +2492,7 @@ def test_pause_state_is_independent_of_frame_updates() -> None:
         pause_controller=pause,
     )
 
-    initial_broker_state = state.current(
-        reducer.projection,
-        turn_index=0,
-    ).broker_state
-    assert initial_broker_state.paused is True
+    assert state._snapshot(first).paused is True
 
     second = authority.commit(
         epoch=7,
@@ -2512,7 +2505,7 @@ def test_pause_state_is_independent_of_frame_updates() -> None:
         captured_at=2.0,
         expected_previous_frame_id=first.frame_id,
     )
-    assert state.current(reducer.projection, turn_index=0).broker_state.paused is True
+    assert state._snapshot(second).paused is True
 
 
 class _RawClient:
@@ -2997,10 +2990,7 @@ def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
         assert first.status is RuntimeStatus.ACTION_RECORDED
         assert session._reducer.projection.target_binding.hwnd == HWND
 
-        observed = session._runtime._state.observe(
-            session._reducer.projection,
-            turn_index=1,
-        )
+        observed = session._runtime._state.observe()
         anchor = session._reducer.projection.target_binding
         assert anchor is not None
         assert anchor.hwnd == HWND
@@ -3089,10 +3079,7 @@ def test_screen_first_frame_shows_desktop_without_rebinding_visible_window(
         assert observation["frame_scope"] == "full_desktop"
         assert observation["target_hwnd"] == HWND
 
-        observed = session._runtime._state.observe(
-            session._reducer.projection,
-            turn_index=1,
-        )
+        observed = session._runtime._state.observe()
         anchor = session._reducer.projection.target_binding
         assert anchor is not None
         assert anchor.hwnd == HWND
@@ -3137,10 +3124,7 @@ def test_screen_first_observation_survives_missing_old_window(
     )
 
     try:
-        observed = session._runtime._state.observe(
-            session._reducer.projection,
-            turn_index=0,
-        )
+        observed = session._runtime._state.observe()
     finally:
         session.close()
 
@@ -3420,10 +3404,7 @@ def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
         assert turn_payload["budget"]["model_calls_used"] == 0
         assert turn_payload["budget"]["elapsed_s"] >= 0
 
-        observed = session._runtime._state.observe(
-            session._reducer.projection,
-            turn_index=1,
-        )
+        observed = session._runtime._state.observe()
         anchor = session._reducer.projection.target_binding
         assert anchor is not None
         assert anchor.hwnd == shell_hwnd
@@ -3647,10 +3628,7 @@ def test_observation_retries_one_target_transition_during_capture(
 
     monkeypatch.setattr(workspace, "snapshot", snapshot)
     try:
-        observed = session._runtime._state.observe(
-            session._reducer.projection,
-            turn_index=0,
-        )
+        observed = session._runtime._state.observe()
     finally:
         session.close()
 

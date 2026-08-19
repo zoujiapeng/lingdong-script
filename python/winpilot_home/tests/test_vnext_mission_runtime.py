@@ -9,20 +9,6 @@ from typing import Any, Callable, Mapping
 import pytest
 
 from winpilot.vnext.actor import ACTOR_PROPOSAL_FORMAT, ActorDecisionEnvelope
-from winpilot.vnext.capabilities import (
-    AuthoritativeFrameState,
-    BrokerRuntimeState,
-    CapabilityBroker,
-    ExecutionMedium,
-    ExecutionRoute,
-    MutationKind,
-    PointerDisposition,
-    PointerLeaseState,
-    TargetState,
-    ToolCatalog,
-    ToolRoute,
-    ToolSpec,
-)
 from winpilot.vnext.mission import (
     EvidencePolicy,
     MissionDefinition,
@@ -32,10 +18,10 @@ from winpilot.vnext.mission import (
     ObligationStatus,
     TargetBinding,
 )
-from winpilot.vnext.profiling import ExecutionPolicy
 from winpilot.vnext.runtime import (
     APPROVED_RUNTIME_TOOLS,
     ActorBudgetView,
+    ActorToolView,
     ActorTaskState,
     ActorTaskStateError,
     ActorTurnInput,
@@ -45,6 +31,8 @@ from winpilot.vnext.runtime import (
     ControllerTransition,
     MissionRuntime,
     MissionRuntimeConfigurationError,
+    PointerDisposition,
+    PointerLeaseState,
     RuntimeContractError,
     RuntimeFrame,
     RuntimeFrameIdentity,
@@ -61,18 +49,6 @@ GOAL = "Make the requested visible state exist"
 HWND = 9123
 PROCESS_ID = 44
 EPOCH = 7
-GUI_GATES = (
-    "target_bound",
-    "authoritative_frame",
-    "runtime_healthy",
-)
-DRAG_GATES = (
-    "target_bound",
-    "authoritative_frame",
-    "runtime_healthy",
-)
-
-
 def _empty_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -172,37 +148,17 @@ def _sequence_schema() -> dict[str, Any]:
 def _tool(
     name: str,
     *,
-    mutation: MutationKind,
+    requires_local_intent: bool,
     schema: dict[str, Any],
-    order: int,
-) -> ToolSpec:
-    return ToolSpec(
+) -> ActorToolView:
+    return ActorToolView(
         name=name,
         schema=schema,
-        route=ToolRoute.VISUAL_ACTOR,
-        mutation_kind=mutation,
-        execution_medium=(
-            ExecutionMedium.GUI
-            if mutation is MutationKind.GUI
-            else ExecutionMedium.CONTROL
-        ),
-        required_any_capabilities=(
-            ("visual.interact",)
-            if mutation is MutationKind.GUI
-            else ()
-        ),
-        prerequisites=(
-            DRAG_GATES
-            if name == "drag"
-            else GUI_GATES
-            if mutation is MutationKind.GUI
-            else ()
-        ),
-        order=order,
+        requires_local_intent=requires_local_intent,
     )
 
 
-def _catalog(*, include_extra: bool = False) -> ToolCatalog:
+def _catalog(*, omit_last: bool = False) -> tuple[ActorToolView, ...]:
     schemas = {
         "click": _point_schema(),
         "double_click": _point_schema(),
@@ -232,12 +188,10 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
     tools = [
         _tool(
             name,
-            mutation=MutationKind.GUI,
+            requires_local_intent=True,
             schema=schemas[name],
-            order=order,
         )
-        for order, name in enumerate(
-            (
+        for name in (
                 "click",
                 "double_click",
                 "move_mouse",
@@ -247,15 +201,13 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
                 "hotkey",
                 "input_sequence",
                 "launch_application",
-            ),
-            start=1,
         )
     ]
     tools.extend(
         (
             _tool(
                 "observe",
-                mutation=MutationKind.NONE,
+                requires_local_intent=False,
                 schema={
                     "type": "object",
                     "additionalProperties": False,
@@ -268,11 +220,10 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
                     },
                     "required": ["question"],
                 },
-                order=10,
             ),
             _tool(
                 "claim_obligation_done",
-                mutation=MutationKind.NONE,
+                requires_local_intent=False,
                 schema={
                     "type": "object",
                     "additionalProperties": False,
@@ -285,11 +236,10 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
                     },
                     "required": ["concise_claim"],
                 },
-                order=20,
             ),
             _tool(
                 "blocked",
-                mutation=MutationKind.NONE,
+                requires_local_intent=False,
                 schema={
                     "type": "object",
                     "additionalProperties": False,
@@ -312,20 +262,10 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
                     },
                     "required": ["blocker_kind", "observed_facts"],
                 },
-                order=21,
             ),
         )
     )
-    if include_extra:
-        tools.append(
-            _tool(
-                "request_capability",
-                mutation=MutationKind.NONE,
-                schema=_empty_schema(),
-                order=22,
-            )
-        )
-    return ToolCatalog(tuple(tools))
+    return tuple(tools[:-1] if omit_last else tools)
 
 
 def _action(
@@ -454,39 +394,9 @@ class FakeState:
         self.current_calls = 0
         self.raise_current_on: int | None = None
 
-    def _for_turn(self, turn_index: int) -> RuntimeSnapshot:
-        snapshot = RuntimeSnapshot(
-            broker_state=replace(
-                self.snapshot.broker_state,
-                turn_index=turn_index,
-            ),
-            frame=self.snapshot.frame,
-            target=self.snapshot.target,
-        )
-        self.snapshot = snapshot
-        return snapshot
-
-    def observe(
-        self,
-        projection: Any,
-        *,
-        turn_index: int,
-    ) -> RuntimeSnapshot:
-        del projection
+    def observe(self) -> RuntimeSnapshot:
         self.observe_calls += 1
-        return self._for_turn(turn_index)
-
-    def current(
-        self,
-        projection: Any,
-        *,
-        turn_index: int,
-    ) -> RuntimeSnapshot:
-        del projection
-        self.current_calls += 1
-        if self.current_calls == self.raise_current_on:
-            raise RuntimeError("synthetic current-state failure")
-        return self._for_turn(turn_index)
+        return self.snapshot
 
     def install_frame(
         self,
@@ -495,17 +405,11 @@ class FakeState:
         pointer: PointerLeaseState | None = None,
     ) -> None:
         self.snapshot = RuntimeSnapshot(
-            broker_state=replace(
-                self.snapshot.broker_state,
-                frame=frame.broker_frame(),
-                pointer=(
-                    self.snapshot.broker_state.pointer
-                    if pointer is None
-                    else pointer
-                ),
-            ),
             frame=frame,
             target=self.snapshot.target,
+            pointer=(self.snapshot.pointer if pointer is None else pointer),
+            paused=self.snapshot.paused,
+            canceled=self.snapshot.canceled,
         )
 
 
@@ -569,7 +473,7 @@ class FakeController:
         frame = self.make_post_frame(envelope)
         pointer_after = PointerLeaseState(PointerDisposition.RELEASED)
         if action == "drag" and args.get("keep_holding", False):
-            before_pointer = self.state.snapshot.broker_state.pointer
+            before_pointer = self.state.snapshot.pointer
             pointer_after = PointerLeaseState(
                 PointerDisposition.HELD,
                 (
@@ -601,7 +505,7 @@ class Harness:
     state: FakeState
     controller: FakeController
     runtime: MissionRuntime
-    catalog: ToolCatalog
+    catalog: tuple[ActorToolView, ...]
 
     def make_frame(
         self,
@@ -654,9 +558,8 @@ def _definition(
 def _harness(
     *proposals: ActorTurnDecision | Mapping[str, Any],
     definition: MissionDefinition | None = None,
-    catalog: ToolCatalog | None = None,
+    catalog: tuple[ActorToolView, ...] | None = None,
     bind_target: bool = True,
-    profile_provider: bool = False,
     budget_provider: Callable[[int], Mapping[str, Any]] | None = None,
 ) -> Harness:
     definition = definition or _definition()
@@ -701,21 +604,9 @@ def _harness(
         image_sha256=digest,
     )
     snapshot = RuntimeSnapshot(
-        broker_state=BrokerRuntimeState(
-            turn_index=0,
-            available_capabilities=("visual.interact",),
-            target=TargetState(
-                binding.binding_id,
-                binding.hwnd,
-                binding.epoch,
-                True,
-            ),
-            frame=frame.broker_frame(),
-            pointer=PointerLeaseState(PointerDisposition.RELEASED),
-            runtime_healthy=True,
-        ),
         frame=frame,
         target=RuntimeTargetIdentity.from_binding(binding),
+        pointer=PointerLeaseState(PointerDisposition.RELEASED),
     )
     state = FakeState(snapshot)
     holder: dict[str, Harness] = {}
@@ -732,21 +623,9 @@ def _harness(
         state=state,
         make_post_frame=make_post_frame,
     )
-    profile = ExecutionPolicy(
-        provider_availability=(
-            ("obligation_verifier",) if profile_provider else ()
-        ),
-    ).safe_default(
-        definition.mission_id,
-        definition.goal_revision,
-        available_capabilities=("visual.interact",),
-    )
-    broker = CapabilityBroker(catalog)
     runtime = MissionRuntime(
         reducer=reducer,
-        profile=profile,
-        broker=broker,
-        catalog=catalog,
+        tools=catalog,
         actor=actor,
         state=state,
         controller=controller,
@@ -806,11 +685,11 @@ def test_cross_frame_held_drag_preserves_then_releases_one_lease() -> None:
     )
 
     first = harness.runtime.run_one_turn(turn_index=0)
-    first_pointer = harness.state.snapshot.broker_state.pointer
+    first_pointer = harness.state.snapshot.pointer
     second = harness.runtime.run_one_turn(turn_index=1)
-    second_pointer = harness.state.snapshot.broker_state.pointer
+    second_pointer = harness.state.snapshot.pointer
     third = harness.runtime.run_one_turn(turn_index=2)
-    third_pointer = harness.state.snapshot.broker_state.pointer
+    third_pointer = harness.state.snapshot.pointer
 
     assert (
         first.status,
@@ -939,30 +818,6 @@ def test_visible_claim_supersedes_stale_actor_remaining_items() -> None:
     )
     assert harness.reducer.projection.status is MissionStatus.VERIFIED
     assert harness.reducer.events[-1].kind == "actor_completed"
-
-
-def test_claim_fails_closed_without_fresh_observation() -> None:
-    harness = _harness(_claim())
-    stale_frame = replace(
-        harness.state.snapshot.broker_state.frame,
-        fresh=False,
-    )
-    harness.state.snapshot = RuntimeSnapshot(
-        broker_state=replace(
-            harness.state.snapshot.broker_state,
-            frame=stale_frame,
-        ),
-        frame=harness.state.snapshot.frame,
-        target=harness.state.snapshot.target,
-    )
-
-    result = harness.runtime.run_one_turn(turn_index=0)
-
-    assert result.status is RuntimeStatus.UNAVAILABLE
-    assert result.route is ExecutionRoute.BLOCKED
-    assert harness.actor.calls == 0
-    assert harness.controller.calls == 0
-    assert harness.reducer.projection.status is MissionStatus.RUNNING
 
 
 def test_type_text_is_absent_from_mission_bus_and_reducer_state() -> None:
@@ -1436,21 +1291,9 @@ def test_full_desktop_snapshot_is_not_rejected_by_window_binding() -> None:
         epoch=identity.epoch,
     )
     harness.state.snapshot = RuntimeSnapshot(
-        broker_state=BrokerRuntimeState(
-            turn_index=0,
-            available_capabilities=("visual.interact",),
-            target=TargetState(
-                target.binding_id,
-                target.hwnd,
-                target.epoch,
-                True,
-            ),
-            frame=frame.broker_frame(),
-            pointer=PointerLeaseState(PointerDisposition.RELEASED),
-            runtime_healthy=True,
-        ),
         frame=frame,
         target=target,
+        pointer=PointerLeaseState(PointerDisposition.RELEASED),
     )
 
     result = harness.runtime.run_one_turn(turn_index=0)
@@ -1799,13 +1642,7 @@ def test_minimal_runtime_rejects_scope_expansion_at_construction() -> None:
         MissionRuntimeConfigurationError,
         match="exactly the minimal live-agent surface",
     ):
-        _harness(_action(), catalog=_catalog(include_extra=True))
-
-    with pytest.raises(
-        MissionRuntimeConfigurationError,
-        match="fixed safe STANDARD profile",
-    ):
-        _harness(_action(), profile_provider=True)
+        _harness(_action(), catalog=_catalog(omit_last=True))
 
 
 def test_actor_sees_exact_minimal_tool_surface_and_invalid_action_fails_closed() -> None:

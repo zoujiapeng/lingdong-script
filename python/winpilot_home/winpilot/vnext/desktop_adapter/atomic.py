@@ -51,14 +51,12 @@ from ...visual_runtime.keyboard_contracts import (
     normalize_hotkey_args,
 )
 from ..actor import ActorDecisionEnvelope, DesktopActionProposal
-from ..capabilities import (
-    PointerDisposition,
-    PointerLeaseState,
-)
 from ..mission import TargetBinding
 from ..runtime import (
     ControllerOutcome,
     ControllerTransition,
+    PointerDisposition,
+    PointerLeaseState,
     RuntimeFrame,
     RuntimeFrameIdentity,
     RuntimeTargetIdentity,

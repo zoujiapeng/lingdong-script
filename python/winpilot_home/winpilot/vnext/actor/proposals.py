@@ -17,7 +17,6 @@ from pydantic import (
     model_validator,
 )
 
-from ..capability_names import InvalidCapability, canonical_capability
 from ..json_contract import (
     BoundedJSONError,
     MAX_JSON_ARRAY_ITEMS,
@@ -184,28 +183,6 @@ class ObserveProposal(_ActorModel):
         return self
 
 
-class CapabilityRequest(_ActorModel):
-    kind: Literal["request_capability"] = "request_capability"
-    capability: str
-    reason: str
-
-    @field_validator("capability")
-    @classmethod
-    def _capability(cls, value: Any) -> str:
-        try:
-            result = canonical_capability(value)
-        except InvalidCapability as exc:
-            raise ValueError(str(exc)) from exc
-        if result != value:
-            raise ValueError("capability must already be canonical")
-        return result
-
-    @field_validator("reason")
-    @classmethod
-    def _reason(cls, value: Any) -> str:
-        return _text(value, "reason")
-
-
 class InspectionRequest(_ActorModel):
     kind: Literal["request_inspection"] = "request_inspection"
     region: ImageRegion
@@ -278,7 +255,6 @@ ActorProposal: TypeAlias = Annotated[
     Union[
         DesktopActionProposal,
         ObserveProposal,
-        CapabilityRequest,
         InspectionRequest,
         ClaimObligationDone,
         BlockedReport,
@@ -290,7 +266,6 @@ _ADAPTER = TypeAdapter(ActorProposal)
 _PROPOSAL_TYPES = (
     DesktopActionProposal,
     ObserveProposal,
-    CapabilityRequest,
     InspectionRequest,
     ClaimObligationDone,
     BlockedReport,
@@ -326,7 +301,6 @@ __all__ = [
     "ImageRegion",
     "DesktopActionProposal",
     "ObserveProposal",
-    "CapabilityRequest",
     "InspectionRequest",
     "ClaimObligationDone",
     "BlockedReport",

@@ -6,11 +6,9 @@ second completion/evidence ledger.
 """
 from __future__ import annotations
 
-import json
 import threading
 from typing import Any, Callable, Mapping
 
-from ...utils.log import logger
 from ..actor import (
     ActorDecisionEnvelope,
     BlockedReport,
@@ -22,28 +20,20 @@ from ..actor import (
     parse_actor_proposal,
     proposal_tool_name,
 )
-from ..capabilities import (
-    BrokerProjection,
-    CapabilityBroker,
-    ExecutionRoute,
-    MutationKind,
-    ToolCatalog,
-    ToolRoute,
-)
 from ..mission import (
     MissionError,
     MissionReducer,
     MissionStatus,
-    StaleRevisionError,
 )
-from ..profiling import ExecutionDepth, ExecutionProfile
 from .contracts import (
     APPROVED_DESKTOP_ACTIONS,
     APPROVED_RUNTIME_TOOLS,
     ActorBudgetView,
+    ActorToolView,
     ControllerOutcome,
     ControllerTransition,
     MissionRuntimeResult,
+    PointerDisposition,
     RuntimeSnapshot,
     RuntimeStatus,
     RuntimeTargetIdentity,
@@ -74,9 +64,7 @@ class MissionRuntime:
         self,
         *,
         reducer: MissionReducer,
-        profile: ExecutionProfile,
-        broker: CapabilityBroker,
-        catalog: ToolCatalog,
+        tools: tuple[ActorToolView, ...],
         actor: ActorPort,
         state: RuntimeStatePort,
         controller: ControllerPort,
@@ -84,31 +72,20 @@ class MissionRuntime:
     ) -> None:
         if type(reducer) is not MissionReducer:
             raise TypeError("reducer must be MissionReducer")
-        if type(profile) is not ExecutionProfile:
-            raise TypeError("profile must be ExecutionProfile")
-        if type(broker) is not CapabilityBroker:
-            raise TypeError("broker must be CapabilityBroker")
-        if type(catalog) is not ToolCatalog or broker.catalog != catalog:
-            raise TypeError(
-                "Runtime and Broker must share one ToolCatalog"
-            )
         for value, method, name in (
             (actor, "propose", "actor"),
             (state, "observe", "state"),
-            (state, "current", "state"),
             (controller, "execute", "controller"),
         ):
             if not callable(getattr(value, method, None)):
                 raise TypeError(f"{name} must provide {method}()")
         self._validate_minimal_scope(
             reducer=reducer,
-            profile=profile,
-            catalog=catalog,
+            tools=tools,
         )
         self._reducer = reducer
-        self._profile = profile
-        self._broker = broker
-        self._catalog = catalog
+        self._tools = tuple(tools)
+        self._tool_names = frozenset(tool.name for tool in self._tools)
         self._actor = actor
         self._state = state
         self._controller = controller
@@ -127,8 +104,7 @@ class MissionRuntime:
     def _validate_minimal_scope(
         *,
         reducer: MissionReducer,
-        profile: ExecutionProfile,
-        catalog: ToolCatalog,
+        tools: tuple[ActorToolView, ...],
     ) -> None:
         definition = reducer.definition
         if len(definition.obligations) != 1:
@@ -150,41 +126,26 @@ class MissionRuntime:
             raise MissionRuntimeConfigurationError(
                 "live Actor claim must not enable a second visual verifier"
             )
-        services = profile.services
-        if (
-            profile.mission_id != definition.mission_id
-            or profile.goal_revision != definition.goal_revision
-            or profile.accepted_depth is not ExecutionDepth.STANDARD
-            or profile.source != "safe_default"
-            or profile.upgrade_triggers
-            or profile.downgrade_conditions
-            or services.planner
-            or services.obligation_verifier
-            or services.mission_verifier
-            or services.visual_inspector
-            or services.deep_reasoning
+        if not isinstance(tools, tuple) or any(
+            type(tool) is not ActorToolView for tool in tools
         ):
             raise MissionRuntimeConfigurationError(
-                "Runtime requires the fixed safe STANDARD profile"
+                "tools must be canonical ActorToolView values"
             )
-        names = frozenset(tool.name for tool in catalog.tools)
-        if names != APPROVED_RUNTIME_TOOLS:
+        names = tuple(tool.name for tool in tools)
+        if (
+            frozenset(names) != APPROVED_RUNTIME_TOOLS
+            or len(names) != len(set(names))
+        ):
             raise MissionRuntimeConfigurationError(
-                "ToolCatalog must contain exactly the minimal live-agent surface"
+                "tools must contain exactly the minimal live-agent surface"
             )
-        for tool in catalog.tools:
-            if tool.route is not ToolRoute.VISUAL_ACTOR:
+        for tool in tools:
+            if tool.requires_local_intent != (
+                tool.name in APPROVED_DESKTOP_ACTIONS
+            ):
                 raise MissionRuntimeConfigurationError(
-                    "minimal tools must be Visual Actor owned"
-                )
-            expected = (
-                MutationKind.GUI
-                if tool.name in APPROVED_DESKTOP_ACTIONS
-                else MutationKind.NONE
-            )
-            if tool.mutation_kind is not expected:
-                raise MissionRuntimeConfigurationError(
-                    f"invalid mutation contract for {tool.name!r}"
+                    f"invalid local-intent contract for {tool.name!r}"
                 )
         binding = reducer.projection.target_binding
         if binding is None:
@@ -223,14 +184,12 @@ class MissionRuntime:
     def _result(
         status: RuntimeStatus,
         *,
-        route: ExecutionRoute | None = None,
         proposal_kind: str | None = None,
         decision_id: str | None = None,
         detail: str = "",
     ) -> MissionRuntimeResult:
         return MissionRuntimeResult(
             status=status,
-            route=route,
             proposal_kind=proposal_kind,
             decision_id=decision_id,
             detail=detail,
@@ -282,18 +241,10 @@ class MissionRuntime:
             detail=detail,
         )
 
-    def _project(self, snapshot: RuntimeSnapshot) -> BrokerProjection:
-        return self._broker.project(
-            self._reducer.projection,
-            self._profile,
-            snapshot.broker_state,
-        )
-
     def _block_unknown(
         self,
         *,
         obligation_id: str,
-        route: ExecutionRoute,
         proposal_kind: str,
         decision_id: str,
         detail: str,
@@ -327,7 +278,6 @@ class MissionRuntime:
             )
         return self._result(
             RuntimeStatus.BLOCKED,
-            route=route,
             proposal_kind=proposal_kind,
             decision_id=decision_id,
             detail=detail,
@@ -365,8 +315,6 @@ class MissionRuntime:
         self,
         proposal: ClaimObligationDone,
         envelope: ActorDecisionEnvelope,
-        *,
-        route: ExecutionRoute,
     ) -> MissionRuntimeResult:
         # The Actor's completion judgment on the current real screen is the
         # semantic truth. No mechanical gate may veto it: neither the deadline
@@ -388,7 +336,6 @@ class MissionRuntime:
             diagnostics.append(f"completion history unavailable: {exc}")
         return self._result(
             RuntimeStatus.MISSION_VERIFIED,
-            route=route,
             proposal_kind=proposal_kind,
             decision_id=envelope.decision_id,
             detail="; ".join(diagnostics),
@@ -430,7 +377,6 @@ class MissionRuntime:
         proposal: DesktopActionProposal,
         envelope: ActorDecisionEnvelope,
         *,
-        route: ExecutionRoute,
         stop_event: threading.Event | None,
     ) -> MissionRuntimeResult:
         proposal_kind = proposal.kind
@@ -449,7 +395,6 @@ class MissionRuntime:
             # confirmed release-cleanup failure is a physical boundary.
             return self._result(
                 RuntimeStatus.STALE_DISCARDED,
-                route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 detail=(
@@ -461,7 +406,6 @@ class MissionRuntime:
         if type(transition) is not ControllerTransition:
             return self._result(
                 RuntimeStatus.STALE_DISCARDED,
-                route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 detail=(
@@ -485,7 +429,6 @@ class MissionRuntime:
         if not identity_matches:
             return self._result(
                 RuntimeStatus.STALE_DISCARDED,
-                route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 detail=(
@@ -497,7 +440,6 @@ class MissionRuntime:
             if transition.error_kind == "release_cleanup_incomplete":
                 return self._block_unknown(
                     obligation_id=obligation_id,
-                    route=route,
                     proposal_kind=proposal_kind,
                     decision_id=envelope.decision_id,
                     detail=(
@@ -508,7 +450,6 @@ class MissionRuntime:
             if transition.input_completed is not True:
                 return self._result(
                     RuntimeStatus.STALE_DISCARDED,
-                    route=route,
                     proposal_kind=proposal_kind,
                     decision_id=envelope.decision_id,
                     detail=(
@@ -543,7 +484,6 @@ class MissionRuntime:
                 )
             return self._result(
                 RuntimeStatus.ACTION_RECORDED,
-                route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 detail=(
@@ -575,7 +515,6 @@ class MissionRuntime:
                 rejection_evidence_error = exc
             return self._result(
                 RuntimeStatus.STALE_DISCARDED,
-                route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 detail=(
@@ -618,7 +557,6 @@ class MissionRuntime:
             )
         return self._result(
             RuntimeStatus.ACTION_RECORDED,
-            route=route,
             proposal_kind=proposal_kind,
             decision_id=envelope.decision_id,
             detail="; ".join(diagnostics),
@@ -675,30 +613,43 @@ class MissionRuntime:
         if self._stopped(stop_event):
             return self._cancel()
         try:
-            initial = self._state.observe(
-                projection,
-                turn_index=turn_index,
-            )
-            broker_projection = self._project(initial)
+            initial = self._state.observe()
         except Exception as exc:
             return self._result(
                 RuntimeStatus.STATE_REJECTED,
                 detail=str(exc),
             )
-        route = broker_projection.execution_route
-        if route is not ExecutionRoute.VISUAL_ACTOR:
+        if type(initial) is not RuntimeSnapshot:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                detail="state.observe() did not return RuntimeSnapshot",
+            )
+        if initial.canceled:
+            return self._cancel(detail="runtime cancellation was requested")
+        if initial.paused:
             return self._result(
                 RuntimeStatus.UNAVAILABLE,
-                route=route,
-                detail="Broker route is not Visual Actor",
+                detail="runtime is paused",
+            )
+        if initial.pointer.disposition is PointerDisposition.UNKNOWN:
+            return self._result(
+                RuntimeStatus.UNAVAILABLE,
+                detail="physical pointer state is unknown",
+            )
+        if (
+            initial.pointer.disposition is PointerDisposition.HELD
+            and not initial.pointer.physically_owned
+        ):
+            return self._result(
+                RuntimeStatus.UNAVAILABLE,
+                detail="held pointer is not physically owned by this runtime",
             )
         try:
             budget = self._project_budget(turn_index)
             turn = project_actor_turn_input(
                 self._reducer.card,
-                initial.broker_state.frame,
-                self._catalog,
-                broker_projection,
+                initial,
+                self._tools,
                 task_state=self._task_state,
                 previous_action_local_intent=(
                     self._previous_action_local_intent
@@ -708,7 +659,6 @@ class MissionRuntime:
         except Exception as exc:
             return self._result(
                 RuntimeStatus.ACTOR_ERROR,
-                route=route,
                 detail=str(exc),
             )
         try:
@@ -727,7 +677,6 @@ class MissionRuntime:
                 )
             return self._result(
                 RuntimeStatus.INVALID_PROPOSAL,
-                route=route,
                 detail=str(exc),
             )
         except Exception as exc:
@@ -737,7 +686,6 @@ class MissionRuntime:
                 )
             return self._result(
                 RuntimeStatus.ACTOR_ERROR,
-                route=route,
                 detail=str(exc),
             )
         raw = actor_decision
@@ -755,7 +703,6 @@ class MissionRuntime:
         except InvalidActorProposal as exc:
             return self._result(
                 RuntimeStatus.INVALID_PROPOSAL,
-                route=route,
                 detail=str(exc),
             )
         proposal_kind = proposal.kind
@@ -763,26 +710,30 @@ class MissionRuntime:
             tool_name = proposal_tool_name(proposal)
             if (
                 tool_name not in APPROVED_RUNTIME_TOOLS
-                or tool_name not in broker_projection.tool_names
+                or tool_name not in self._tool_names
             ):
                 return self._result(
                     RuntimeStatus.UNAVAILABLE,
-                    route=route,
                     proposal_kind=proposal_kind,
-                    detail="proposal is outside the minimal Broker surface",
+                    detail="proposal is outside the live Actor tool surface",
                 )
             if type(proposal) is DesktopActionProposal:
                 if proposal.action not in APPROVED_DESKTOP_ACTIONS:
                     return self._result(
                         RuntimeStatus.INVALID_PROPOSAL,
-                        route=route,
                         proposal_kind=proposal_kind,
                         detail="desktop action is not approved",
                     )
             envelope = bind_actor_decision(
                 mission_reducer=self._reducer,
-                state=initial.broker_state,
                 proposal=proposal,
+                turn_index=turn_index,
+                frame_id=initial.frame.frame_id,
+                frame_epoch=initial.frame.epoch,
+                frame_hwnd=initial.frame.hwnd,
+                frame_scope=initial.frame.scope,
+                pointer_disposition=initial.pointer.disposition.value,
+                pointer_lease_id=initial.pointer.lease_id,
                 frame_region=initial.frame.region,
                 submitted_image_size=initial.frame.submitted_size,
                 frame_image_sha256=initial.frame.image_sha256,
@@ -794,14 +745,12 @@ class MissionRuntime:
             self._task_state = pending_task_state
             return self._result(
                 RuntimeStatus.INVALID_PROPOSAL,
-                route=route,
                 proposal_kind=proposal_kind,
                 detail=str(exc),
             )
         except Exception as exc:
             return self._result(
                 RuntimeStatus.STATE_REJECTED,
-                route=route,
                 proposal_kind=proposal_kind,
                 detail=str(exc),
             )
@@ -814,7 +763,6 @@ class MissionRuntime:
             return self._run_action(
                 proposal,
                 envelope,
-                route=route,
                 stop_event=stop_event,
             )
         if type(proposal) is ObserveProposal:
@@ -823,7 +771,6 @@ class MissionRuntime:
             # whole-screen frame on its next ordinary turn.
             return self._result(
                 RuntimeStatus.OBSERVATION_REQUESTED,
-                route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 detail=proposal.question,
@@ -832,7 +779,6 @@ class MissionRuntime:
             return self._claim_and_complete(
                 proposal,
                 envelope,
-                route=route,
             )
         if type(proposal) is BlockedReport:
             reason = "; ".join(proposal.observed_facts)
@@ -849,21 +795,18 @@ class MissionRuntime:
             except MissionError as exc:
                 return self._result(
                     RuntimeStatus.STATE_REJECTED,
-                    route=route,
                     proposal_kind=proposal_kind,
                     decision_id=envelope.decision_id,
                     detail=str(exc),
                 )
             return self._result(
                 RuntimeStatus.BLOCKED,
-                route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 detail=(reason or proposal.blocker_kind)[:4000],
             )
         return self._result(
             RuntimeStatus.INVALID_PROPOSAL,
-            route=route,
             proposal_kind=proposal_kind,
             decision_id=envelope.decision_id,
             detail="proposal kind is not supported by minimal Runtime",
