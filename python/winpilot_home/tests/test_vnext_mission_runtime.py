@@ -31,6 +31,7 @@ from winpilot.vnext.mission import (
     MissionReducer,
     MissionStatus,
     ObligationSpec,
+    ObligationStatus,
     TargetBinding,
 )
 from winpilot.vnext.profiling import ExecutionPolicy
@@ -1690,8 +1691,7 @@ def test_claim_binds_current_frame_and_completes_deterministically() -> None:
     completion = harness.reducer.events[-1]
     assert completion.evidence_refs == ()
     obligation = harness.reducer.projection.obligation_state(OBLIGATION_ID)
-    assert obligation.verified_evidence_refs == ()
-    assert obligation.verification_id.startswith("actor-completion-")
+    assert obligation.status is ObligationStatus.VERIFIED
     assert harness.reducer.projection.status is MissionStatus.VERIFIED
 
 
@@ -1710,7 +1710,6 @@ def test_actor_completion_survives_auxiliary_history_failure(
     result = harness.runtime.run_one_turn(turn_index=0)
 
     assert result.status is RuntimeStatus.MISSION_VERIFIED
-    assert result.accepted_event_ids == ()
     assert "completion history unavailable" in result.detail
     assert harness.runtime.verified_completion_result == (
         "the requested state is visibly present"

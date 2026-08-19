@@ -268,21 +268,15 @@ def _validate_contract_wire(
 class ObligationStatus(str, Enum):
     PENDING = "pending"
     ACTIVE = "active"
-    CLAIMED = "claimed"
     VERIFIED = "verified"
     BLOCKED = "blocked"
-    SUPERSEDED = "superseded"
-    CANCELED = "canceled"
 
 
 class MissionStatus(str, Enum):
     RUNNING = "running"
-    WAITING_APPROVAL = "waiting_approval"
     WAITING_EXTERNAL = "waiting_external"
-    AWAITING_MISSION_VERIFICATION = "awaiting_mission_verification"
     BLOCKED = "blocked"
     VERIFIED = "verified"
-    FAILED = "failed"
     CANCELED = "canceled"
 
 
@@ -995,110 +989,6 @@ class TargetBinding:
 
 
 @dataclass(frozen=True, slots=True)
-class VerifiedFact:
-    id: str
-    statement: str
-    evidence_refs: tuple[str, ...]
-    scope: str
-    valid_for_obligation_ids: tuple[str, ...] = ()
-    expires_on_epoch_change: bool = True
-
-    _FIELDS = (
-        "id",
-        "statement",
-        "evidence_refs",
-        "scope",
-        "valid_for_obligation_ids",
-        "expires_on_epoch_change",
-    )
-
-    def __post_init__(self) -> None:
-        for name in ("id", "statement", "scope"):
-            object.__setattr__(
-                self,
-                name,
-                _contract_text(
-                    getattr(self, name),
-                    f"verified fact {name}",
-                    InvalidMissionEvent,
-                ),
-            )
-        evidence_refs = _contract_string_tuple(
-            self.evidence_refs,
-            "verified fact evidence_refs",
-            InvalidMissionEvent,
-        )
-        if not evidence_refs:
-            raise EvidenceScopeError("verified fact requires evidence_refs")
-        if len(evidence_refs) != len(set(evidence_refs)):
-            raise EvidenceScopeError("verified fact evidence_refs must be unique")
-        valid_for = _contract_string_tuple(
-            self.valid_for_obligation_ids,
-            "verified fact valid_for_obligation_ids",
-            InvalidMissionEvent,
-        )
-        if len(valid_for) != len(set(valid_for)):
-            raise InvalidMissionEvent("verified fact obligation ids must be unique")
-        object.__setattr__(self, "evidence_refs", evidence_refs)
-        object.__setattr__(self, "valid_for_obligation_ids", valid_for)
-        object.__setattr__(
-            self,
-            "expires_on_epoch_change",
-            _contract_bool(
-                self.expires_on_epoch_change,
-                "verified fact expires_on_epoch_change",
-                InvalidMissionEvent,
-            ),
-        )
-        _validate_contract_wire(
-            self.to_dict(),
-            "VerifiedFact",
-            InvalidMissionEvent,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "statement": self.statement,
-            "evidence_refs": list(self.evidence_refs),
-            "scope": self.scope,
-            "valid_for_obligation_ids": list(self.valid_for_obligation_ids),
-            "expires_on_epoch_change": self.expires_on_epoch_change,
-        }
-
-    @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "VerifiedFact":
-        value = _wire_object(
-            raw,
-            cls._FIELDS,
-            "VerifiedFact",
-            InvalidMissionEvent,
-        )
-        return cls(
-            id=_contract_text(value["id"], "id", InvalidMissionEvent),
-            statement=_contract_text(
-                value["statement"], "statement", InvalidMissionEvent
-            ),
-            evidence_refs=_wire_string_list(
-                value["evidence_refs"], "evidence_refs", InvalidMissionEvent
-            ),
-            scope=_contract_text(
-                value["scope"], "scope", InvalidMissionEvent
-            ),
-            valid_for_obligation_ids=_wire_string_list(
-                value["valid_for_obligation_ids"],
-                "valid_for_obligation_ids",
-                InvalidMissionEvent,
-            ),
-            expires_on_epoch_change=_contract_bool(
-                value["expires_on_epoch_change"],
-                "expires_on_epoch_change",
-                InvalidMissionEvent,
-            ),
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class TransitionSummary:
     action: str
     input_completed: bool
@@ -1496,43 +1386,10 @@ class MissionDefinition:
         )
 
 
-UNIMPLEMENTED_MISSION_EVENT_KINDS = frozenset(
-    {
-        "approval_requested",
-        "approval_decided",
-        "external_change_armed",
-        "external_change_recorded",
-        "planner_requested",
-        "planner_patch_proposed",
-        "planner_patch_accepted",
-        "planner_patch_rejected",
-        "inspection_requested",
-        "inspection_recorded",
-        "capability_requested",
-        "capability_granted",
-        "capability_denied",
-        "execution_profile_accepted",
-        "execution_profile_revised",
-        "user_goal_revised",
-    }
-)
 _EVENT_PAYLOAD_FIELDS = {
-    "mission_compiled": (frozenset(), frozenset()),
-    "obligation_activated": (
-        frozenset({"obligation_id"}),
-        frozenset(),
-    ),
-    "artifact_bound": (
-        frozenset({"artifact"}),
-        frozenset({"binding_name"}),
-    ),
     "target_bound": (
         frozenset({"target_binding"}),
         frozenset(),
-    ),
-    "target_invalidated": (
-        frozenset(),
-        frozenset({"reason"}),
     ),
     "transition_recorded": (
         frozenset({"obligation_id", "input_completed"}),
@@ -1551,94 +1408,24 @@ _EVENT_PAYLOAD_FIELDS = {
         frozenset({"obligation_id"}),
         frozenset(),
     ),
-    "obligation_claimed": (
-        frozenset({"obligation_id"}),
-        frozenset(),
-    ),
-    "verification_recorded": (
-        frozenset({"obligation_id", "verified", "claim_fingerprint"}),
-        frozenset(
-            {
-                "verification_id",
-                "satisfied_criteria",
-                "checked_forbidden_effects",
-                "missing_conditions",
-                "contradictions",
-                "facts",
-                "verifier_kind",
-                "reason",
-                "failure_kind",
-            }
-        ),
-    ),
-    "fact_recorded": (
-        frozenset({"fact"}),
-        frozenset({"obligation_id"}),
-    ),
     "obligation_blocked": (
         frozenset({"obligation_id"}),
         frozenset({"reason", "blocker_kind"}),
-    ),
-    "obligation_unblocked": (
-        frozenset({"obligation_id"}),
-        frozenset(),
-    ),
-    "mission_blocked": (
-        frozenset(),
-        frozenset({"reason"}),
-    ),
-    "mission_failed": (
-        frozenset(),
-        frozenset({"reason"}),
     ),
     "mission_canceled": (
         frozenset(),
         frozenset({"reason"}),
     ),
-    "mission_verified": (
-        frozenset(
-            {
-                "verified",
-                "verification_id",
-                "accepted_obligation_verification_ids",
-                "aggregate_evidence_id",
-                "aggregate_payload_hash",
-            }
-        ),
-        frozenset(),
-    ),
 }
-_EVENT_PAYLOAD_FIELDS.update(
-    {
-        event_type: (frozenset(), frozenset())
-        for event_type in UNIMPLEMENTED_MISSION_EVENT_KINDS
-    }
-)
 _EVENT_TEXT_FIELDS = frozenset(
     {
         "obligation_id",
-        "binding_name",
         "reason",
         "action",
         "action_summary",
         "action_id",
         "visible_effect",
-        "claim_fingerprint",
-        "verification_id",
-        "verifier_kind",
-        "failure_kind",
         "blocker_kind",
-        "aggregate_evidence_id",
-        "aggregate_payload_hash",
-    }
-)
-_EVENT_STRING_ARRAY_FIELDS = frozenset(
-    {
-        "satisfied_criteria",
-        "checked_forbidden_effects",
-        "missing_conditions",
-        "contradictions",
-        "accepted_obligation_verification_ids",
     }
 )
 
@@ -1690,18 +1477,6 @@ def _validate_event_payload(
             InvalidMissionEvent,
             allow_empty=field_name in {"reason", "visible_effect"},
         )
-    for field_name in actual & _EVENT_STRING_ARRAY_FIELDS:
-        if type(payload[field_name]) not in (list, tuple):
-            raise InvalidMissionEvent(
-                f"{event_type} payload {field_name!r} "
-                "must be a JSON array of strings"
-            )
-        _contract_string_tuple(
-            payload[field_name],
-            f"{event_type} payload {field_name!r}",
-            InvalidMissionEvent,
-        )
-
     if "action_summary" in payload:
         action = payload.get("action")
         summary = payload["action_summary"]
@@ -1714,54 +1489,6 @@ def _validate_event_payload(
                 "transition_recorded payload 'action_summary' must be the "
                 "privacy-safe semantic summary of its action"
             )
-    if "verified" in payload:
-        _contract_bool(
-            payload["verified"],
-            f"{event_type} payload 'verified'",
-            InvalidMissionEvent,
-        )
-    if event_type == "verification_recorded" and type(payload["verified"]) is bool:
-        common = frozenset({"obligation_id", "verified", "claim_fingerprint"})
-        if payload["verified"]:
-            variant_required = common | frozenset(
-                {"verification_id", "satisfied_criteria"}
-            )
-            variant_allowed = variant_required | frozenset(
-                {
-                    "checked_forbidden_effects",
-                    "missing_conditions",
-                    "contradictions",
-                    "facts",
-                    "verifier_kind",
-                }
-            )
-        else:
-            variant_required = common
-            variant_allowed = variant_required | frozenset(
-                {
-                    "missing_conditions",
-                    "contradictions",
-                    "verifier_kind",
-                    "reason",
-                    "failure_kind",
-                }
-            )
-        variant_missing = variant_required - actual
-        variant_unknown = actual - variant_allowed
-        if variant_missing or variant_unknown:
-            details = []
-            if variant_missing:
-                details.append(f"missing={sorted(variant_missing)!r}")
-            if variant_unknown:
-                details.append(f"unknown={sorted(variant_unknown)!r}")
-            raise InvalidMissionEvent(
-                "verification_recorded payload has non-canonical verdict "
-                f"fields ({', '.join(details)})"
-            )
-    if event_type == "mission_verified" and payload["verified"] is not True:
-        raise InvalidMissionEvent(
-            "mission_verified payload 'verified' must be the literal boolean true"
-        )
     if "input_completed" in payload:
         _contract_bool(
             payload["input_completed"],
@@ -1775,13 +1502,6 @@ def _validate_event_payload(
             InvalidMissionEvent,
             minimum=0,
         )
-    if "artifact" in payload:
-        raw_artifact = payload["artifact"]
-        if not isinstance(raw_artifact, Mapping):
-            raise InvalidMissionEvent(
-                f"{event_type} payload 'artifact' must be a JSON object"
-            )
-        ArtifactRef.from_dict(thaw(raw_artifact))
     if "target_binding" in payload:
         raw_target = payload["target_binding"]
         if not isinstance(raw_target, Mapping):
@@ -1789,25 +1509,6 @@ def _validate_event_payload(
                 f"{event_type} payload 'target_binding' must be a JSON object"
             )
         TargetBinding.from_dict(thaw(raw_target))
-    if "fact" in payload:
-        raw_fact = payload["fact"]
-        if not isinstance(raw_fact, Mapping):
-            raise InvalidMissionEvent(
-                f"{event_type} payload 'fact' must be a JSON object"
-            )
-        VerifiedFact.from_dict(thaw(raw_fact))
-    if "facts" in payload:
-        raw_facts = payload["facts"]
-        if type(raw_facts) not in (list, tuple):
-            raise InvalidMissionEvent(
-                f"{event_type} payload 'facts' must be a JSON array"
-            )
-        for raw_fact in raw_facts:
-            if not isinstance(raw_fact, Mapping):
-                raise InvalidMissionEvent(
-                    f"{event_type} payload 'facts' items must be JSON objects"
-                )
-            VerifiedFact.from_dict(thaw(raw_fact))
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -2039,15 +1740,7 @@ class MissionEvent:
 class ObligationProjection:
     id: str
     status: ObligationStatus
-    claim_evidence_refs: tuple[str, ...] = ()
-    verified_evidence_refs: tuple[str, ...] = ()
-    verification_id: str | None = None
-    failure_count: int = 0
     last_reason: str = ""
-    claim_fingerprint: str | None = None
-    verified_claim_fingerprint: str | None = None
-    activation_attempt_count: int = 0
-    verification_attempt_count: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -2063,24 +1756,6 @@ class ObligationProjection:
             )
         object.__setattr__(
             self,
-            "claim_evidence_refs",
-            _contract_string_tuple(
-                self.claim_evidence_refs,
-                "claim_evidence_refs",
-                InvalidMissionEvent,
-            ),
-        )
-        object.__setattr__(
-            self,
-            "verified_evidence_refs",
-            _contract_string_tuple(
-                self.verified_evidence_refs,
-                "verified_evidence_refs",
-                InvalidMissionEvent,
-            ),
-        )
-        object.__setattr__(
-            self,
             "last_reason",
             _contract_text(
                 self.last_reason,
@@ -2089,65 +1764,11 @@ class ObligationProjection:
                 allow_empty=True,
             ),
         )
-        if self.verification_id is not None:
-            object.__setattr__(
-                self,
-                "verification_id",
-                _contract_text(
-                    self.verification_id,
-                    "verification_id",
-                    InvalidMissionEvent,
-                ),
-            )
-        if self.claim_fingerprint is not None:
-            object.__setattr__(
-                self,
-                "claim_fingerprint",
-                _contract_text(
-                    self.claim_fingerprint,
-                    "claim_fingerprint",
-                    InvalidMissionEvent,
-                ),
-            )
-        if self.verified_claim_fingerprint is not None:
-            object.__setattr__(
-                self,
-                "verified_claim_fingerprint",
-                _contract_text(
-                    self.verified_claim_fingerprint,
-                    "verified_claim_fingerprint",
-                    InvalidMissionEvent,
-                ),
-            )
-        for name in (
-            "failure_count",
-            "activation_attempt_count",
-            "verification_attempt_count",
-        ):
-            object.__setattr__(
-                self,
-                name,
-                _contract_int(
-                    getattr(self, name),
-                    name,
-                    InvalidMissionEvent,
-                    minimum=0,
-                ),
-            )
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "status": self.status.value,
-            "claim_evidence_refs": list(self.claim_evidence_refs),
-            "verified_evidence_refs": list(self.verified_evidence_refs),
-            "verification_id": self.verification_id,
-            "failure_count": self.failure_count,
             "last_reason": self.last_reason,
-            "claim_fingerprint": self.claim_fingerprint,
-            "verified_claim_fingerprint": self.verified_claim_fingerprint,
-            "activation_attempt_count": self.activation_attempt_count,
-            "verification_attempt_count": self.verification_attempt_count,
         }
 
 
@@ -2159,17 +1780,13 @@ class MissionProjection:
     revision: int
     obligation_states: tuple[ObligationProjection, ...]
     active_obligation_id: str | None
-    verified_facts: tuple[VerifiedFact, ...] = ()
     artifact_bindings: Mapping[str, ArtifactRef] = field(default_factory=dict)
     target_binding: TargetBinding | None = None
     evidence_refs: Mapping[str, EvidenceRef] = field(default_factory=dict)
     accepted_event_ids: tuple[str, ...] = ()
-    pending_approval: Mapping[str, Any] | None = None
-    failure_budgets: Mapping[str, int] = field(default_factory=dict)
     last_transition: TransitionSummary | None = None
     failure_summary: FailureSummary | None = None
     status: MissionStatus = MissionStatus.RUNNING
-    mission_verification_id: str | None = None
     last_error: str = ""
     format: str = MISSION_PROJECTION_FORMAT
 
@@ -2193,38 +1810,13 @@ class MissionProjection:
         ids = tuple(item.id for item in self.obligation_states)
         if len(ids) != len(set(ids)):
             raise InvalidMissionEvent("projection obligation ids must be unique")
-        object.__setattr__(self, "verified_facts", tuple(self.verified_facts))
         object.__setattr__(self, "artifact_bindings", _mapping(self.artifact_bindings))
         object.__setattr__(self, "evidence_refs", _mapping(self.evidence_refs))
-        object.__setattr__(self, "failure_budgets", _mapping(self.failure_budgets))
         object.__setattr__(self, "accepted_event_ids", _as_string_tuple(self.accepted_event_ids))
         if type(self.status) is not MissionStatus:
             raise InvalidMissionEvent(
                 "mission projection status must be a MissionStatus"
             )
-        if self.mission_verification_id is not None:
-            object.__setattr__(
-                self,
-                "mission_verification_id",
-                _contract_text(
-                    self.mission_verification_id,
-                    "mission_verification_id",
-                    InvalidMissionEvent,
-                ),
-            )
-        if self.pending_approval is not None:
-            try:
-                object.__setattr__(
-                    self,
-                    "pending_approval",
-                    _json_mapping(self.pending_approval),
-                )
-            except BoundedJSONError as exc:
-                raise InvalidMissionEvent(
-                    "pending_approval violates the bounded JSON contract: "
-                    f"{exc}"
-                ) from exc
-
     @property
     def mission_id(self) -> str:
         return self.definition.mission_id
@@ -2263,7 +1855,6 @@ class MissionProjection:
             "revision": self.revision,
             "obligation_states": [item.to_dict() for item in self.obligation_states],
             "active_obligation_id": self.active_obligation_id,
-            "verified_facts": [item.to_dict() for item in self.verified_facts],
             "artifact_bindings": {
                 key: value.to_dict() for key, value in self.artifact_bindings.items()
             },
@@ -2272,12 +1863,9 @@ class MissionProjection:
                 key: value.to_dict() for key, value in self.evidence_refs.items()
             },
             "accepted_event_ids": list(self.accepted_event_ids),
-            "pending_approval": thaw(self.pending_approval),
-            "failure_budgets": thaw(self.failure_budgets),
             "last_transition": self.last_transition.to_dict() if self.last_transition else None,
             "failure_summary": self.failure_summary.to_dict() if self.failure_summary else None,
             "status": self.status.value,
-            "mission_verification_id": self.mission_verification_id,
             "last_error": self.last_error,
         }
 
@@ -2310,7 +1898,6 @@ class MissionCard:
     mission_revision: int
     original_goal: str
     active_obligation: ActiveObligationCard | None
-    verified_facts: tuple[VerifiedFact, ...] = ()
     artifact_bindings: tuple[ArtifactRef, ...] = ()
     target_binding: TargetBinding | None = None
     last_transition: TransitionSummary | None = None
@@ -2320,7 +1907,6 @@ class MissionCard:
     def __post_init__(self) -> None:
         if self.format != MISSION_CARD_FORMAT:
             raise InvalidMissionEvent(f"unsupported MissionCard format: {self.format!r}")
-        object.__setattr__(self, "verified_facts", tuple(self.verified_facts))
         object.__setattr__(self, "artifact_bindings", tuple(self.artifact_bindings))
 
     @property
@@ -2334,7 +1920,6 @@ class MissionCard:
             "mission_revision": self.mission_revision,
             "original_goal": self.original_goal,
             "active_obligation": self.active_obligation.to_dict() if self.active_obligation else None,
-            "verified_facts": [item.to_dict() for item in self.verified_facts],
             "artifact_bindings": [item.to_dict() for item in self.artifact_bindings],
             "target_binding": self.target_binding.to_dict() if self.target_binding else None,
             "last_transition": self.last_transition.to_dict() if self.last_transition else None,
@@ -2344,7 +1929,6 @@ class MissionCard:
     @classmethod
     def from_projection(cls, projection: MissionProjection) -> "MissionCard":
         active = None
-        relevant_facts: list[VerifiedFact] = []
         relevant_artifacts: list[ArtifactRef] = []
         if projection.active_obligation_id:
             definition = projection.obligation_definition(projection.active_obligation_id)
@@ -2357,18 +1941,6 @@ class MissionCard:
                 depends_on=definition.depends_on,
             )
             active_id = definition.id
-            for fact in projection.verified_facts:
-                evidence_related = any(
-                    projection.evidence_refs.get(ref_id)
-                    and projection.evidence_refs[ref_id].obligation_id == active_id
-                    for ref_id in fact.evidence_refs
-                )
-                if (
-                    active_id in fact.valid_for_obligation_ids
-                    or (not fact.valid_for_obligation_ids and fact.scope in {"mission", active_id})
-                    or evidence_related
-                ):
-                    relevant_facts.append(fact)
             needed = set(definition.input_artifact_refs) | set(definition.output_binding_names)
             seen_artifacts: set[str] = set()
             for name, artifact in projection.artifact_bindings.items():
@@ -2391,7 +1963,6 @@ class MissionCard:
             mission_revision=projection.revision,
             original_goal=projection.original_goal,
             active_obligation=active,
-            verified_facts=tuple(relevant_facts),
             artifact_bindings=tuple(relevant_artifacts),
             target_binding=projection.target_binding,
             last_transition=transition,
@@ -2523,7 +2094,7 @@ __all__ = [
     "InvalidMissionEvent", "StaleRevisionError", "DuplicateEventError",
     "EvidenceScopeError", "IllegalTransitionError", "ObligationStatus", "MissionStatus",
     "JSONValue", "EvidencePolicy", "ObligationSpec", "EvidenceRef", "ArtifactRef",
-    "TargetBinding", "VerifiedFact", "TransitionSummary", "FailureSummary",
+    "TargetBinding", "TransitionSummary", "FailureSummary",
     "MissionDefinition", "MissionEvent", "ObligationProjection", "MissionProjection",
     "ActiveObligationCard", "MissionCard", "EvidenceScope",
     "is_safe_action_summary", "thaw",

@@ -247,7 +247,6 @@ class MissionRuntime:
         route: ExecutionRoute | None = None,
         proposal_kind: str | None = None,
         decision_id: str | None = None,
-        event_ids: Iterable[str] = (),
         detail: str = "",
     ) -> MissionRuntimeResult:
         return MissionRuntimeResult(
@@ -255,7 +254,6 @@ class MissionRuntime:
             route=route,
             proposal_kind=proposal_kind,
             decision_id=decision_id,
-            accepted_event_ids=tuple(event_ids),
             detail=detail,
         )
 
@@ -266,7 +264,7 @@ class MissionRuntime:
         payload: Mapping[str, Any],
         base_revision: int,
         evidence_refs: Iterable[str] = (),
-    ) -> tuple[str, ...]:
+    ) -> None:
         event = self._reducer.event(
             kind,
             payload=dict(payload),
@@ -274,32 +272,25 @@ class MissionRuntime:
             evidence_refs=tuple(evidence_refs),
         )
         self._reducer.apply(event)
-        return (event.event_id,)
 
     def _cancel(
         self,
         *,
-        prior_event_ids: Iterable[str] = (),
         detail: str = "run cancellation was requested",
     ) -> MissionRuntimeResult:
         projection = self._reducer.projection
         if projection.status is MissionStatus.CANCELED:
             return self._result(
                 RuntimeStatus.CANCELED,
-                event_ids=prior_event_ids,
                 detail=detail,
             )
-        if projection.status in {
-            MissionStatus.VERIFIED,
-            MissionStatus.FAILED,
-        }:
+        if projection.status is MissionStatus.VERIFIED:
             return self._result(
                 RuntimeStatus.STATE_REJECTED,
-                event_ids=prior_event_ids,
                 detail=f"cannot cancel terminal mission: {projection.status.value}",
             )
         try:
-            event_ids = self._accept(
+            self._accept(
                 "mission_canceled",
                 payload={"reason": detail},
                 base_revision=projection.revision,
@@ -307,12 +298,10 @@ class MissionRuntime:
         except MissionError as exc:
             return self._result(
                 RuntimeStatus.STATE_REJECTED,
-                event_ids=prior_event_ids,
                 detail=f"cancellation was not accepted: {exc}",
             )
         return self._result(
             RuntimeStatus.CANCELED,
-            event_ids=(*tuple(prior_event_ids), *event_ids),
             detail=detail,
         )
 
@@ -332,14 +321,13 @@ class MissionRuntime:
         decision_id: str,
         detail: str,
     ) -> MissionRuntimeResult:
-        event_ids: tuple[str, ...] = ()
         block_error: MissionError | None = None
         for _ in range(3):
             projection = self._reducer.projection
             if projection.active_obligation_id != obligation_id:
                 break
             try:
-                event_ids = self._accept(
+                self._accept(
                     "obligation_blocked",
                     payload={
                         "obligation_id": obligation_id,
@@ -365,7 +353,6 @@ class MissionRuntime:
             route=route,
             proposal_kind=proposal_kind,
             decision_id=decision_id,
-            event_ids=event_ids,
             detail=detail,
         )
 
@@ -413,10 +400,9 @@ class MissionRuntime:
         proposal_kind = "claim_obligation_done"
         self._verified_completion_result = proposal.concise_claim
         self._latest_narration = proposal.concise_claim
-        event_ids: tuple[str, ...] = ()
         diagnostics: list[str] = []
         try:
-            event_ids = self._accept(
+            self._accept(
                 "actor_completed",
                 payload={"obligation_id": obligation_id},
                 base_revision=envelope.mission_revision,
@@ -428,7 +414,6 @@ class MissionRuntime:
             route=route,
             proposal_kind=proposal_kind,
             decision_id=envelope.decision_id,
-            event_ids=event_ids,
             detail="; ".join(diagnostics),
         )
 
@@ -556,10 +541,9 @@ class MissionRuntime:
                         "no replay occurred; inspect the next fresh screen"
                     ),
                 )
-            event_ids: tuple[str, ...] = ()
             diagnostics: list[str] = []
             try:
-                event_ids = self._accept(
+                self._accept(
                     "transition_recorded",
                     payload={
                         "obligation_id": obligation_id,
@@ -578,7 +562,6 @@ class MissionRuntime:
             self._previous_action_local_intent = proposal.local_intent
             if self._stopped(stop_event):
                 return self._cancel(
-                    prior_event_ids=event_ids,
                     detail="run was canceled after the admitted action",
                 )
             return self._result(
@@ -586,7 +569,6 @@ class MissionRuntime:
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
-                event_ids=event_ids,
                 detail=(
                     "OS input completed; its effect will be recovered from "
                     "the next fresh observation"
@@ -619,7 +601,6 @@ class MissionRuntime:
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
-                event_ids=(),
                 detail=(
                     "Controller proved input did not execute: error_kind="
                     f"{transition.error_kind or 'unspecified'}; "
@@ -632,7 +613,6 @@ class MissionRuntime:
                     )
                 ),
             )
-        event_ids: tuple[str, ...] = ()
         diagnostics: list[str] = []
         try:
             self._registry.append_many(transition.produced_evidence)
@@ -646,7 +626,7 @@ class MissionRuntime:
                 ref for ref in transition.event_evidence_refs
                 if ref in available_refs
             )
-            event_ids = self._accept(
+            self._accept(
                 "transition_recorded",
                 payload={
                     "obligation_id": obligation_id,
@@ -669,7 +649,6 @@ class MissionRuntime:
         self._previous_action_local_intent = proposal.local_intent
         if self._stopped(stop_event):
             return self._cancel(
-                prior_event_ids=event_ids,
                 detail="run was canceled after the admitted action",
             )
         return self._result(
@@ -677,7 +656,6 @@ class MissionRuntime:
             route=route,
             proposal_kind=proposal_kind,
             decision_id=envelope.decision_id,
-            event_ids=event_ids,
             detail="; ".join(diagnostics),
         )
 
@@ -724,10 +702,7 @@ class MissionRuntime:
                 RuntimeStatus.CANCELED,
                 detail="mission was already canceled",
             )
-        if projection.status in {
-            MissionStatus.FAILED,
-            MissionStatus.BLOCKED,
-        }:
+        if projection.status is MissionStatus.BLOCKED:
             return self._result(
                 RuntimeStatus.BLOCKED,
                 detail=f"mission is not actionable: {projection.status.value}",
@@ -904,7 +879,7 @@ class MissionRuntime:
         if type(proposal) is BlockedReport:
             reason = "; ".join(proposal.observed_facts)
             try:
-                event_ids = self._accept(
+                self._accept(
                     "obligation_blocked",
                     payload={
                         "obligation_id": envelope.obligation_id,
@@ -926,7 +901,6 @@ class MissionRuntime:
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
-                event_ids=event_ids,
                 detail=(reason or proposal.blocker_kind)[:4000],
             )
         return self._result(

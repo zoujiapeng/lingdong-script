@@ -648,7 +648,6 @@ class ActorBudgetView:
 class ActorMissionView:
     original_goal: str
     active_obligation: ActorObligationView
-    verified_facts: tuple[str, ...] = ()
     failure_kind: str | None = None
     failure_message: str | None = None
 
@@ -662,11 +661,6 @@ class ActorMissionView:
             raise RuntimeContractError(
                 "active_obligation must be ActorObligationView"
             )
-        object.__setattr__(
-            self,
-            "verified_facts",
-            _strings(self.verified_facts, "verified_facts"),
-        )
         if (self.failure_kind is None) != (self.failure_message is None):
             raise RuntimeContractError(
                 "failure kind and message must be present together"
@@ -690,7 +684,6 @@ class ActorMissionView:
         return {
             "original_goal": self.original_goal,
             "active_obligation": self.active_obligation.to_dict(),
-            "verified_facts": list(self.verified_facts),
             "failure": (
                 None
                 if self.failure_kind is None
@@ -896,9 +889,6 @@ def project_actor_turn_input(
             forbidden_effects=obligation.forbidden_effects,
             required_capabilities=obligation.required_capabilities,
         ),
-        verified_facts=tuple(
-            fact.statement for fact in card.verified_facts
-        ),
         failure_kind=(
             None if card.failure_summary is None else card.failure_summary.kind
         ),
@@ -1101,8 +1091,6 @@ class ControllerTransition:
 class RuntimeStatus(str, Enum):
     ACTION_RECORDED = "action_recorded"
     OBSERVATION_REQUESTED = "observation_requested"
-    VERIFICATION_REQUIRED = "verification_required"
-    VERIFICATION_RECORDED = "verification_recorded"
     MISSION_VERIFIED = "mission_verified"
     BLOCKED = "blocked"
     STALE_DISCARDED = "stale_discarded"
@@ -1120,7 +1108,6 @@ class MissionRuntimeResult:
     route: ExecutionRoute | str | None = None
     proposal_kind: str | None = None
     decision_id: str | None = None
-    accepted_event_ids: tuple[str, ...] = ()
     detail: str = ""
     format: str = MISSION_RUNTIME_RESULT_FORMAT
 
@@ -1152,14 +1139,6 @@ class MissionRuntimeResult:
                 "decision_id",
                 _identity(self.decision_id, "decision_id"),
             )
-        object.__setattr__(
-            self,
-            "accepted_event_ids",
-            _ordered_identities(
-                self.accepted_event_ids,
-                "accepted_event_ids",
-            ),
-        )
         object.__setattr__(
             self,
             "detail",

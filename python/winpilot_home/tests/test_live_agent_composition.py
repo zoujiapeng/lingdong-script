@@ -1666,7 +1666,6 @@ def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
                 detail="refresh the whole desktop",
             ),
             MissionRuntimeResult(RuntimeStatus.STALE_DISCARDED),
-            MissionRuntimeResult(RuntimeStatus.VERIFICATION_RECORDED),
             MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
         ]
     )
@@ -1695,8 +1694,8 @@ def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
     assert snapshot["status"] == ArpRunStatus.DONE.value
     assert snapshot["runtime_version"] == "vnext"
     assert snapshot["result"]["status"] == "mission_verified"
-    assert snapshot["result"]["turns_used"] == 5
-    assert snapshot["result"]["model_calls"] == 6
+    assert snapshot["result"]["turns_used"] == 4
+    assert snapshot["result"]["model_calls"] == 5
     assert snapshot["result"]["no_legacy_fallback"] is True
     assert not {
         "accepted_event_ids",
@@ -1706,8 +1705,8 @@ def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
         "verified_evidence_bindings",
         "verified_evidence_refs",
     }.intersection(snapshot["result"])
-    assert session.calls == 5
-    assert session.model_calls == 6
+    assert session.calls == 4
+    assert session.model_calls == 5
     assert session.closed is True
     assert snapshot["evidence"] == []
     starts = [item for item in events if item["type"] == "live_agent_start"]
@@ -1732,9 +1731,8 @@ def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
         "好的，我先查看当前桌面，再继续完成任务。"
     )
     assert activities[1]["tool"] == "observe_desktop"
-    assert len(turns) == 5
+    assert len(turns) == 4
     assert turns[1]["status"] == "observation_requested"
-    assert turns[-2]["status"] == "verification_recorded"
     assert starts[0]["runtime_budget"] == {
         "max_turns": 30,
         "max_runtime_s": 300,
@@ -2181,18 +2179,6 @@ def test_completion_projection_follows_current_workspace_target() -> None:
         "mission_id": "mission-current-target",
         "run_id": "run-current-target",
         "mission_status": MissionStatus.VERIFIED.value,
-        "mission_verification_id": "mission-verification-current",
-        "obligation_verification_id": "obligation-verification-current",
-        "verified_evidence_refs": ["e-current"],
-        "verified_evidence_bindings": [
-            {
-                "id": "e-current",
-                "mission_id": "mission-current-target",
-                "run_id": "run-current-target",
-                "obligation_id": "full-goal",
-                "frame_id": 9,
-            }
-        ],
         "target_binding_id": "vnext-workspace-successor",
         "target_hwnd": successor_hwnd,
         "target_epoch": successor_epoch,

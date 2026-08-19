@@ -136,7 +136,6 @@ _CONTINUE_STATUSES = frozenset(
         RuntimeStatus.ACTION_RECORDED,
         RuntimeStatus.OBSERVATION_REQUESTED,
         RuntimeStatus.STALE_DISCARDED,
-        RuntimeStatus.VERIFICATION_RECORDED,
     }
 )
 _PRIVATE_RUNTIME_EVIDENCE = "private_runtime_evidence"
@@ -2228,34 +2227,12 @@ class _LiveAgentSession:
 
     def completion_snapshot(self) -> Mapping[str, Any]:
         projection = self._reducer.projection
-        obligation = projection.obligation_state(_OBLIGATION_ID)
         frame = self._authority.current
-        refs_by_id = {
-            ref.id: ref for ref in self._registry.snapshot()
-        }
-        verified_bindings = [
-            {
-                "id": ref.id,
-                "mission_id": ref.mission_id,
-                "run_id": ref.run_id,
-                "obligation_id": ref.obligation_id,
-                "frame_id": ref.frame_id,
-            }
-            for evidence_id in obligation.verified_evidence_refs
-            if (ref := refs_by_id.get(evidence_id)) is not None
-        ]
         return {
             "mission_id": projection.mission_id,
             "run_id": projection.run_id,
             "mission_revision": projection.revision,
             "mission_status": projection.status.value,
-            "mission_verification_id": projection.mission_verification_id,
-            "obligation_verification_id": obligation.verification_id,
-            "verified_evidence_refs": list(
-                obligation.verified_evidence_refs
-            ),
-            "verified_evidence_bindings": verified_bindings,
-            "accepted_event_ids": list(projection.accepted_event_ids),
             "target_binding_id": (
                 projection.target_binding.binding_id
                 if projection.target_binding is not None

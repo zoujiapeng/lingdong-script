@@ -46,7 +46,9 @@ from winpilot.vnext.mission import (
     MissionDefinition,
     MissionReducer,
     MissionStatus,
+    ObligationProjection,
     ObligationSpec,
+    ObligationStatus,
     TargetBinding,
 )
 from winpilot.vnext.profiling import (
@@ -315,48 +317,7 @@ def _mission_with_artifact_binding():
             ),
         ),
     )
-    evidence = (
-        EvidenceRef(
-            id="capture-proof",
-            mission_id="m1",
-            run_id="r1",
-            obligation_id="capture",
-            kind="oracle",
-            trust="deterministic",
-            payload_hash="capture-proof-hash",
-        ),
-        EvidenceRef(
-            id="artifact-proof",
-            mission_id="m1",
-            run_id="r1",
-            obligation_id="capture",
-            kind="artifact",
-            trust="deterministic",
-            payload_hash="artifact-proof-hash",
-            artifact_id="artifact-1",
-            content_sha256="a" * 64,
-        ),
-    )
-    reducer = MissionReducer(definition, evidence=evidence)
-    reducer.apply(
-        reducer.event(
-            "obligation_claimed",
-            payload={"obligation_id": "capture"},
-        )
-    )
-    reducer.apply(
-        reducer.event(
-            "verification_recorded",
-            payload={
-                "obligation_id": "capture",
-                "verified": True,
-                "satisfied_criteria": ["artifact existence is confirmed"],
-                "verification_id": "capture-verification",
-                "verifier_kind": "deterministic",
-            },
-            evidence_refs=("capture-proof",),
-        )
-    )
+    reducer = MissionReducer(definition)
     artifact = ArtifactRef(
         artifact_id="artifact-1",
         media_type="image/png",
@@ -364,17 +325,19 @@ def _mission_with_artifact_binding():
         producer_obligation_id="capture",
         evidence_ref="artifact-proof",
     )
-    reducer.apply(
-        reducer.event(
-            "artifact_bound",
-            payload={
-                "binding_name": "current_artifact",
-                "artifact": artifact.to_dict(),
-            },
-            evidence_refs=("artifact-proof",),
-        )
+    return replace(
+        reducer.projection,
+        obligation_states=(
+            ObligationProjection("capture", ObligationStatus.VERIFIED),
+            ObligationProjection("send", ObligationStatus.ACTIVE),
+        ),
+        active_obligation_id="send",
+        artifact_bindings={
+            "artifact-1": artifact,
+            "current_artifact": artifact,
+        },
+        status=MissionStatus.RUNNING,
     )
-    return reducer.projection
 
 
 def _profile(mission, capabilities: tuple[str, ...] | None = None):
@@ -1246,12 +1209,9 @@ def test_unowned_or_unknown_pointer_is_blocked(pointer) -> None:
 @pytest.mark.parametrize(
     "status",
     (
-        MissionStatus.WAITING_APPROVAL,
         MissionStatus.WAITING_EXTERNAL,
-        MissionStatus.AWAITING_MISSION_VERIFICATION,
         MissionStatus.BLOCKED,
         MissionStatus.VERIFIED,
-        MissionStatus.FAILED,
         MissionStatus.CANCELED,
     ),
 )

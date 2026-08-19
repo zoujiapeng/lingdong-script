@@ -17,6 +17,7 @@ from winpilot.vnext.mission import (
     MissionDefinition,
     MissionReducer,
     ObligationSpec,
+    TargetBinding,
 )
 
 
@@ -114,27 +115,26 @@ def test_reducer_reads_registry_dynamically_on_each_apply() -> None:
     definition = MissionDefinition(
         mission_id="mission-1",
         run_id="run-1",
-        original_goal="record a proven visible fact",
+        original_goal="bind the visible target",
         obligations=(ObligationSpec(
             id="obligation-1",
-            desired_state="visible fact is recorded",
-            acceptance_criteria=("fact is visible",),
+            desired_state="the visible target is bound",
         ),),
     )
     registry = EvidenceRegistry("mission-1", "run-1")
     reducer = MissionReducer(definition, evidence=registry)
     event = reducer.event(
-        "fact_recorded",
+        "target_bound",
         payload={
-            "obligation_id": "obligation-1",
-            "fact": {
-                "id": "fact-1",
-                "statement": "the current frame contains the result",
-                "evidence_refs": ["evidence-late"],
-                "scope": "obligation",
-                "valid_for_obligation_ids": ["obligation-1"],
-                "expires_on_epoch_change": True,
-            },
+            "target_binding": TargetBinding(
+                binding_id="target-1",
+                hwnd=101,
+                process_id=202,
+                executable_identity="notepad.exe",
+                title_snapshot="Notepad",
+                established_by_evidence_ref="evidence-late",
+                epoch=0,
+            ).to_dict(),
         },
         evidence_refs=("evidence-late",),
     )
@@ -145,7 +145,8 @@ def test_reducer_reads_registry_dynamically_on_each_apply() -> None:
     projection = reducer.apply(event)
 
     assert projection.revision == 1
-    assert projection.verified_facts[0].id == "fact-1"
+    assert projection.target_binding is not None
+    assert projection.target_binding.binding_id == "target-1"
 
 
 def test_close_rejects_all_writes_but_keeps_reads_available() -> None:
