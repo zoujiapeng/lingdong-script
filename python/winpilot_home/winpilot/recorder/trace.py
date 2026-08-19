@@ -1,7 +1,8 @@
 """Trace recording, script export, and offline (0-token) replay.
 
 - TraceRecorder: a BUS sink that writes every event of the active run to
-  ``traces/<run_id>.jsonl`` and saves a screenshot after each action tool.
+  ``traces/<run_id>.jsonl`` and asynchronously saves a screenshot after each
+  completed action tool.
 - export_script: distill a trace into a ``.wps.json`` replay script whose
   steps carry multi-level selectors (element text → recorded coords).
 - replay: execute a script offline, re-locating elements on the live screen
@@ -11,7 +12,6 @@ from __future__ import annotations
 
 import json
 import inspect
-import os
 import queue
 import re
 import shutil
@@ -96,7 +96,6 @@ class TraceRecorder:
         self._thread_id: str | None = None
         self._file = None
         self._step = 0
-        self._evidence_step = 0
         self._accepting = False
         self._action_steps: dict[str, int] = {}
         self._action_regions: dict[str, Region] = {}
@@ -124,7 +123,6 @@ class TraceRecorder:
             self._run_id = run_id
             self._thread_id = None
             self._step = 0
-            self._evidence_step = 0
             self._action_steps = {}
             self._action_regions = {}
             self._dropped_events = 0
@@ -194,6 +192,9 @@ class TraceRecorder:
                 step = self._step
                 phase = "before"
                 self._action_steps[action_key] = step
+                frame_region = self._region_from_event(event)
+                if frame_region is not None:
+                    self._action_regions[action_key] = frame_region
             elif event_type == "agent_tool" and event.get("tool") in _SCREENSHOT_TOOLS:
                 step = self._action_steps.pop(action_key, None)
                 frame_region = self._action_regions.pop(action_key, None)
@@ -210,6 +211,9 @@ class TraceRecorder:
                 step = self._step
                 phase = "batch_before"
                 self._action_steps[action_key] = step
+                frame_region = self._region_from_event(event)
+                if frame_region is not None:
+                    self._action_regions[action_key] = frame_region
             elif (
                 event_type == "agent_batch_action"
                 and event.get("tool") in _BATCH_SCREENSHOT_TOOLS
@@ -222,63 +226,15 @@ class TraceRecorder:
                     step = self._step
                 phase = "batch_after"
 
-        frame = None
-        baseline_capture_source = ""
-        post_capture_source = ""
-        strict_trace = (
-            os.environ.get("WINPILOT_STRICT_TRACE_BASELINE", "1")
-            .strip()
-            .casefold()
-            not in {"0", "false", "no", "off"}
-        )
-        if step is not None and phase in {"before", "batch_before"}:
-            expected_region = self._region_from_event(event)
-            # A causal action record is useful only when its before-frame was
-            # captured before input dispatch. Make that invariant the normal
-            # runtime contract. The explicit latency opt-out skips the
-            # before-frame instead of substituting an asynchronously sampled
-            # frame whose ordering cannot be guaranteed.
-            if strict_trace and expected_region is not None:
-                try:
-                    # Evaluation-only strict mode pays this small synchronous
-                    # cost so the baseline is guaranteed to precede input.
-                    frame = capture(expected_region)
-                    frame_region = expected_region
-                    baseline_capture_source = "sync_pre_action"
-                except Exception:
-                    frame = None
-        elif step is not None and phase in {"after", "batch_after"} and strict_trace:
-            expected_region = frame_region or self._region_from_event(event)
-            if expected_region is not None:
-                try:
-                    # Seal the post-action pixels before this event callback
-                    # returns. Otherwise the next action can start while the
-                    # trace worker is settling, and its pixels can be falsely
-                    # attributed to the previous action.
-                    time.sleep(_POST_ACTION_CAPTURE_SETTLE_S)
-                    frame = capture(expected_region)
-                    frame_region = expected_region
-                    post_capture_source = "sync_post_action"
-                except Exception:
-                    frame = None
-        if step is not None and phase in {"before", "batch_before"}:
-            if frame_region is None:
-                frame_region = self._region_from_event(event)
-            if frame_region is not None:
-                with self._lock:
-                    if self._accepting and self._run_id == run_id:
-                        self._action_regions[action_key] = frame_region
+        if step is not None and phase in {"after", "batch_after"} and frame_region is None:
+            frame_region = self._region_from_event(event)
         queued = self._enqueue({
             "kind": "event",
             "run_id": run_id,
             "record": dict(event),
             "step": step,
             "phase": phase,
-            "frame": frame,
             "region": frame_region,
-            "require_supplied_frame": phase in {"before", "batch_before"},
-            "baseline_capture_source": baseline_capture_source,
-            "post_capture_source": post_capture_source,
         })
         if queued:
             with self._lock:
@@ -387,7 +343,7 @@ class TraceRecorder:
 
     def _enqueue(self, item: dict[str, Any]) -> bool:
         try:
-            self._queue.put(item, timeout=0.05)
+            self._queue.put_nowait(item)
             return True
         except queue.Full:
             with self._lock:
@@ -401,8 +357,6 @@ class TraceRecorder:
             try:
                 if item.get("kind") == "event":
                     self._write_event(item)
-                elif item.get("kind") == "evidence":
-                    self._write_image(item.get("frame"), item.get("path"), quality=82)
             except Exception as exc:
                 with self._lock:
                     if self._run_id == item.get("run_id"):
@@ -422,32 +376,19 @@ class TraceRecorder:
         if step is not None:
             phase = str(item.get("phase") or "after")
             screenshot_region = item.get("region")
-            if phase in {"after", "batch_after"} and item.get("frame") is None:
-                # The Level-0 daemon's latest frame at action completion can
-                # still be the pre-action sample.  Capture asynchronously after
-                # a short paint interval so trace evidence represents the
-                # resulting frame without slowing the controller hot path.
-                time.sleep(_POST_ACTION_CAPTURE_SETTLE_S)
-            supplied_frame = item.get("frame")
             shot = None
-            if supplied_frame is not None or not bool(item.get("require_supplied_frame")):
+            if phase in {"after", "batch_after"}:
+                # Settle and capture only on the trace worker. BUS publishers
+                # and the physical input queue never wait for trace pixels.
+                time.sleep(_POST_ACTION_CAPTURE_SETTLE_S)
                 shot = self._save_screenshot(
                     run_id,
                     int(step),
                     phase,
-                    image=supplied_frame,
                     region=screenshot_region if isinstance(screenshot_region, Region) else None,
                 )
             if shot:
                 record["screenshot"] = shot
-                if item.get("baseline_capture_source"):
-                    record["baseline_capture_source"] = str(
-                        item.get("baseline_capture_source")
-                    )
-                if item.get("post_capture_source"):
-                    record["post_capture_source"] = str(
-                        item.get("post_capture_source")
-                    )
                 if isinstance(screenshot_region, Region):
                     record["screenshot_region"] = {
                         "left": int(screenshot_region.left),
@@ -506,15 +447,12 @@ class TraceRecorder:
         step: int,
         phase: str = "after",
         *,
-        image: Any = None,
         region: Region | None = None,
     ) -> str | None:
         if not run_id:
             return None
         try:
-            image = (
-                capture(region) if region is not None else capture()
-            ) if image is None else image
+            image = capture(region) if region is not None else capture()
             h, w = image.shape[:2]
             if w > _SCREENSHOT_MAX_W:
                 scale = _SCREENSHOT_MAX_W / w
@@ -528,44 +466,6 @@ class TraceRecorder:
         except Exception as exc:
             logger.debug("trace 截图失败: %s", exc)
         return None
-
-    def save_evidence_image(self, image: Any, kind: str = "evidence") -> str | None:
-        """Persist an already-captured evidence frame in the active trace.
-
-        Action verification can observe states that disappear before the normal
-        post-action screenshot. Saving that exact frame keeps the trace and UI
-        grounded in what the controller actually evaluated.
-        """
-        with self._lock:
-            run_id = self._run_id
-            if not run_id or self._file is None or not self._accepting:
-                return None
-            self._evidence_step += 1
-            step = self._evidence_step
-        try:
-            frame = image.copy()
-            safe_kind = re.sub(r"[^a-z0-9_-]+", "_", str(kind).casefold()).strip("_") or "evidence"
-            rel = f"{run_id}/evidence_{step:03d}_{safe_kind}.jpg"
-            if self._enqueue({"kind": "evidence", "run_id": run_id, "frame": frame, "path": rel}):
-                return rel
-        except Exception as exc:
-            logger.debug("trace evidence image save failed: %s", exc)
-        return None
-
-    @staticmethod
-    def _write_image(frame: Any, path: str | None, quality: int) -> bool:
-        if frame is None or not path:
-            return False
-        image = frame
-        h, w = image.shape[:2]
-        if w > _SCREENSHOT_MAX_W:
-            scale = _SCREENSHOT_MAX_W / w
-            image = cv2.resize(image, (_SCREENSHOT_MAX_W, max(1, int(h * scale))))
-        target = TRACES_DIR / str(path)
-        ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
-        if ok:
-            target.write_bytes(buf.tobytes())
-        return bool(ok)
 
 
 RECORDER = TraceRecorder()
