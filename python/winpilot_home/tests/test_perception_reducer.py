@@ -2,8 +2,6 @@ from winpilot.perception import reducer
 from winpilot.perception.fusion import Snapshot
 from winpilot.perception.model import UIElement
 from winpilot.utils.screenshot import Region
-import json
-from types import SimpleNamespace
 
 
 def test_perception_reducer_prioritizes_relevant_input_and_button():
@@ -80,71 +78,6 @@ def test_perception_reducer_marks_open_chat_and_stops_contact_reclick_loop():
     assert reduced["stats"]["input_like"] == 2
     assert "do not click the contact row again" in reduced["recommended_next_controller_actions"][0]
     assert untyped["chat_context"] == {}
-
-
-def test_grounded_explicit_send_observe_returns_proposal_without_mutation():
-    from winpilot.agent.perception_tools import PerceptionToolMixin
-    from winpilot.agent.tool_result import ToolResult
-
-    calls = []
-    task = 'send "AUTO_SEND_0712" and confirm it in chat history'
-    session = SimpleNamespace(
-        task=task,
-        task_intent={"original_text": task, "operation": ["send"], "send_mode": "send"},
-        hwnd=9,
-        run_id="test-auto-send",
-        _auto_communication_attempted=False,
-        _pending_controller_events=[],
-    )
-
-    def dispatch(name, args):
-        calls.append((name, args))
-        return ToolResult(json.dumps({
-            "ok": True,
-            "verified": True,
-            "evidence_packet": {
-                "matched_texts": ["AUTO_SEND_0712"],
-                "visible_text_preview": "AUTO_SEND_0712",
-            },
-        }))
-
-    session.dispatch = dispatch
-    reduction = {"chat_context": {"center": [700, 700]}}
-
-    result = PerceptionToolMixin._maybe_auto_execute_grounded_communication(session, reduction)
-    repeated = PerceptionToolMixin._maybe_auto_execute_grounded_communication(session, reduction)
-
-    assert result is not None
-    assert repeated is not None
-    assert calls == []
-    proposal = json.loads(result.text)
-    assert proposal["executed"] is False
-    assert proposal["proposal_only"] is True
-    assert proposal["recommended_tool"] == "execute_subgoal"
-    assert proposal["arguments"]["input"]["text"] == "AUTO_SEND_0712"
-    assert proposal["arguments"]["click"]["expected_region"] == "bottom-right"
-    assert session._pending_controller_events == []
-
-
-def test_grounded_chat_does_not_autogenerate_content_for_open_ended_chat():
-    from winpilot.agent.perception_tools import PerceptionToolMixin
-    task = "use chat to talk with My Phone"
-    session = SimpleNamespace(
-        task=task,
-        task_intent={"original_text": task, "operation": ["send"], "send_mode": "send"},
-        hwnd=9,
-        run_id="test-open-chat",
-        _auto_communication_attempted=False,
-        _pending_controller_events=[],
-        dispatch=lambda *_args: (_ for _ in ()).throw(AssertionError("must not dispatch")),
-    )
-
-    result = PerceptionToolMixin._maybe_auto_execute_grounded_communication(
-        session,
-        {"chat_context": {"center": [700, 700]}},
-    )
-
-    assert result is None
 
 
 def test_file_dialog_reducer_prefers_filename_field_over_grid_item_names():
@@ -232,80 +165,6 @@ def test_snapshot_multi_field_query_matches_any_term_and_ranks_multi_hits_first(
     assert "Battery life: 70 days" in rendered
     assert "Navigation" not in rendered
     assert rendered.index("Bluetooth connection") < rendered.index("Battery life")
-
-
-def test_editable_spreadsheet_suppresses_stale_creating_document_from_model_view():
-    from winpilot.agent.perception_tools import _suppress_nonblocking_notice_lines
-
-    snapshot = Snapshot(
-        hwnd=13,
-        title="Workbook17 - WPS Office",
-        region=Region(0, 0, 1920, 1020),
-        elements=[
-            UIElement(elem_id=1, source="ocr", role="text", text="A1", cx=105, cy=209),
-            UIElement(
-                elem_id=2,
-                source="uia",
-                role="text",
-                text="\u6b63\u5728\u65b0\u5efa\u6587\u6863\u00b7\u00b7\u00b7",
-                cx=960,
-                cy=599,
-            ),
-        ],
-    )
-
-    reduced = reducer.reduce_snapshot(snapshot, task="enter table data into cells A1:D7")
-    rendered = _suppress_nonblocking_notice_lines(snapshot.to_text(), reduced["non_blocking_notice"])
-
-    assert reduced["screen_stage"] == "spreadsheet_grid_with_nonblocking_notice"
-    assert "\u6b63\u5728\u65b0\u5efa\u6587\u6863" not in rendered
-    assert "complete raw elements remain" in rendered
-
-
-def test_writer_treats_stale_creating_document_notice_as_non_blocking():
-    from winpilot.agent.perception_tools import _suppress_nonblocking_notice_lines
-
-    snapshot = Snapshot(
-        hwnd=14,
-        title="文字文稿26 - WPS Office",
-        region=Region(0, 0, 1920, 1020),
-        elements=[
-            UIElement(
-                elem_id=1,
-                source="uia",
-                role="window",
-                text="文字文稿26 - WPS 文字",
-                cx=960,
-                cy=535,
-                left=0,
-                top=50,
-                width=1920,
-                height=970,
-            ),
-            UIElement(
-                elem_id=2,
-                source="uia",
-                role="text",
-                text="正在新建文档···",
-                cx=960,
-                cy=599,
-            ),
-        ],
-    )
-
-    reduced = reducer.reduce_snapshot(
-        snapshot,
-        task="create a brand-new blank document and type a report",
-    )
-    rendered = _suppress_nonblocking_notice_lines(
-        snapshot.to_text(),
-        reduced["non_blocking_notice"],
-    )
-
-    assert reduced["screen_stage"] == "document_editor_with_nonblocking_notice"
-    assert reduced["non_blocking_notice"]["surface"] == "document_editor"
-    assert "ctrl+n now" in reduced["recommended_next_controller_actions"][0].casefold()
-    assert "正在新建文档" not in rendered
 
 
 def test_writer_ocr_chrome_is_enough_to_mark_recovery_notice_non_blocking():

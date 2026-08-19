@@ -398,8 +398,7 @@ describe('flow to ARP compiler', () => {
     const work = flowToArpGraph(script).nodes.find((node) => node.id === 'work');
     const spatialActions = new Set([
       'click', 'double_click', 'click_element', 'scroll', 'move_mouse', 'drag',
-      'draw_strokes', 'ensure_input_mode', 'select_color', 'mouse_down', 'mouse_up',
-      'coordinate_click_test', 'paste_image_file',
+      'draw_strokes', 'coordinate_click_test', 'paste_image_file',
     ]);
     let focused = false;
     const needsTargetSetup = work?.kind === 'action_batch'

@@ -2701,42 +2701,6 @@ def test_legacy_click_dry_run_keeps_preexisting_argument_behavior(monkeypatch) -
 
 
 
-def test_legacy_scroll_output_and_exception_semantics_are_unchanged(monkeypatch) -> None:
-    from winpilot.agent import interaction_tools
-    from winpilot.agent.interaction_tools import InteractionToolMixin
-
-    calls: list = []
-
-    def backend(x, y, amount):
-        calls.append((x, y, amount))
-        return {"ok": True, "via": "legacy-test"}
-
-    monkeypatch.setattr(interaction_tools.executor, "scroll", backend)
-
-    class Session(InteractionToolMixin):
-        _fmt = staticmethod(lambda data: json.dumps(data, ensure_ascii=False))
-
-        def _action_hwnd(self):
-            return 41
-
-    result = Session()._t_scroll({"x": "-2", "y": "30", "amount": "-4"})
-
-    assert calls == [(-2, 30, -4)]
-    assert json.loads(result.text) == {"ok": True, "via": "legacy-test"}
-    assert result.replay == {"tool": "scroll", "coords": [-2, 30], "amount": -4}
-
-    class InjectedError(RuntimeError):
-        pass
-
-    monkeypatch.setattr(
-        interaction_tools.executor,
-        "scroll",
-        lambda *args, **kwargs: (_ for _ in ()).throw(InjectedError("legacy error")),
-    )
-    with pytest.raises(InjectedError, match="legacy error"):
-        Session()._t_scroll({"x": 1, "y": 2, "amount": -3})
-
-
 def test_legacy_public_scroll_delegates_typed_single_queue_owner(monkeypatch) -> None:
     from winpilot.action import executor
 

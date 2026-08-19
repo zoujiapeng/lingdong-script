@@ -14,13 +14,9 @@ ALLOWED_BATCH_ACTIONS = {
     "hotkey",
     "scroll",
     "move_mouse",
-    "mouse_down",
-    "mouse_up",
     "hold_key",
     "drag",
     "draw_strokes",
-    "ensure_input_mode",
-    "select_color",
     "focus_window",
     "launch",
     "wait",
@@ -43,13 +39,9 @@ BATCH_MUTATING_ACTIONS = {
     "hotkey",
     "scroll",
     "move_mouse",
-    "mouse_down",
-    "mouse_up",
     "hold_key",
     "drag",
     "draw_strokes",
-    "ensure_input_mode",
-    "select_color",
     "focus_window",
     "launch",
     "clipboard_paste",
@@ -75,8 +67,6 @@ VISUAL_TRANSACTION_ACTIONS = BATCH_MUTATING_ACTIONS | {
     "run_action_batch",
     "execute_subgoal",
     "open_app",
-    "mouse_down",
-    "mouse_up",
     "hold_key",
 }
 
@@ -153,7 +143,7 @@ def _region_dict(value: Any) -> dict[str, int] | None:
 
 
 def action_reference_system(name: str, args: dict[str, Any]) -> str:
-    # AgentRunner maps model-authored frame coordinates to physical screen
+    # Callers map model-authored frame coordinates to physical screen
     # coordinates before dispatch.  ``coordinate_space`` deliberately records
     # their provenance, not the units of the executable x/y values.  Keep the
     # operator boundary honest about both rather than labelling physical input
@@ -175,7 +165,7 @@ def action_reference_system(name: str, args: dict[str, Any]) -> str:
     if args.get("normalized_strokes") is not None:
         return "canvas_normalized_0_1000"
     if name in {
-        "click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up",
+        "click", "double_click", "scroll", "move_mouse",
         "drag", "draw_strokes", "zoom",
     }:
         return "screen_physical_px"
@@ -396,16 +386,6 @@ def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
         or not 1 <= float(args.get("duration_ms")) <= 30_000
     ):
         return "requires duration_ms in 1..30000"
-    if name == "ensure_input_mode" and not str(args.get("mode") or "").strip():
-        return "requires mode"
-    if name in {"mouse_down", "mouse_up"} and str(
-        args.get("button") or "left"
-    ).casefold() not in {"left", "right", "middle"}:
-        return "requires button left, right, or middle"
-    if name in {"mouse_down", "mouse_up"} and (
-        (args.get("x") is None) != (args.get("y") is None)
-    ):
-        return "requires x and y together when prepositioning the pointer"
     if name in {"scroll", "move_mouse"} and not all(args.get(key) is not None for key in ("x", "y")):
         return "requires x and y"
     if name == "scroll" and args.get("amount") is None:
@@ -439,19 +419,8 @@ def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
     return ""
 
 
-def validate_batch_actions(
-    actions: Any,
-    *,
-    pointer_hold_before: str = "",
-    pointer_hold_after: str = "",
-) -> list[str]:
-    """Validate action shape and its explicit pointer-session transition.
-
-    Ordinary batches remain self-contained and must balance every mouse-down.
-    A controller-owned pointer session may cross an authoritative-frame
-    boundary only when the caller declares the exact button state before and
-    after this batch.
-    """
+def validate_batch_actions(actions: Any) -> list[str]:
+    """Validate action shape against the direct controller surface."""
     if (
         isinstance(actions, (list, tuple))
         and actions
@@ -472,69 +441,4 @@ def validate_batch_actions(
             missing = _missing_action_fields(name, action.inputs)
             if missing:
                 errors.append(f"action {index} ({name}) {missing}")
-    before = str(pointer_hold_before or "").strip().casefold()
-    after = str(pointer_hold_after or "").strip().casefold()
-    valid_buttons = {"", "left", "right", "middle"}
-    if before not in valid_buttons:
-        errors.append("pointer_hold_before must be left, right, middle, or empty")
-        before = ""
-    if after not in valid_buttons:
-        errors.append("pointer_hold_after must be left, right, middle, or empty")
-        after = ""
-
-    # Permit multiple sequential gestures, but allow only bounded
-    # movement/wait primitives while a button is held. Atomic ``drag`` remains
-    # the preferred common path when every endpoint is already visible.
-    held_button = before
-    held_at = 0
-    allowed_while_held = {
-        "move_mouse", "wait", "wait_change", "wait_for_visual_change",
-        "wait_stable",
-    }
-    for action in canonical:
-        index = action.ordinal + 1
-        name = action.name
-        args = action.inputs
-        button = str(args.get("button") or "left").casefold()
-        if name == "mouse_down":
-            if held_button:
-                origin = f"action {held_at}" if held_at else "the prior frame"
-                errors.append(
-                    f"action {index} (mouse_down) cannot press {button} while "
-                    f"{held_button} from {origin} is still held"
-                )
-            else:
-                held_button = button
-                held_at = index
-            continue
-        if name == "mouse_up":
-            if not held_button:
-                errors.append(
-                    f"action {index} (mouse_up) has no matching mouse_down in this batch"
-                )
-            elif button != held_button:
-                errors.append(
-                    f"action {index} (mouse_up) releases {button}, but action "
-                    f"{held_at} pressed {held_button}"
-                )
-            else:
-                held_button = ""
-                held_at = 0
-            continue
-        if held_button and name and name not in allowed_while_held:
-            origin = f"action {held_at}" if held_at else "the prior frame"
-            errors.append(
-                f"action {index} ({name}) is not allowed while mouse button "
-                f"{held_button} from {origin} is held"
-            )
-    if held_button and not after:
-        origin = f"action {held_at} (mouse_down)" if held_at else "the prior-frame mouse_down"
-        errors.append(
-            f"{origin} has no matching mouse_up in this batch"
-        )
-    elif after and held_button != after:
-        errors.append(
-            f"pointer session must end with {after} held, but batch ends with "
-            f"{held_button or 'no button'} held"
-        )
     return errors

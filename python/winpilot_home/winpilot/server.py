@@ -1313,7 +1313,6 @@ async def chatgpt_integration(request: Request) -> dict[str, Any]:
         "last_client": "",
         "security_mode": "loopback_only",
         "runtime": {},
-        "world_model_enabled": False,
         "current_run": None,
         "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
         "error": "legacy ChatGPT desktop MCP bridge removed",

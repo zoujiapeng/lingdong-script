@@ -47,7 +47,6 @@ from ..visual_runtime.keyboard_contracts import (
     normalize_hotkey_args,
 )
 from .action_contract import (
-    ALLOWED_BATCH_ACTIONS,
     AtomicAction,
     BATCH_CLIPBOARD_ACTIONS,
     BATCH_MUTATING_ACTIONS,
@@ -555,18 +554,6 @@ class FastGuiController:
             ],
         }
 
-    @staticmethod
-    def _unsupported_typed_action(name: str) -> dict[str, Any]:
-        return {
-            "ok": False,
-            "failure_type": "UNSUPPORTED_DIRECT_CONTROLLER_ACTION",
-            "unsupported_action": name,
-            "error": (
-                f"{name} has no honest direct RawDevice mapping; use drag or a "
-                "self-contained input_sequence instead"
-            ),
-        }
-
     def _focus_window(self, args: dict[str, Any]) -> dict[str, Any]:
         raw_hwnd = args.get("hwnd")
         query = str(args.get("title") or args.get("query") or args.get("name") or "").strip()
@@ -894,13 +881,9 @@ class FastGuiController:
             "hotkey": self._hotkey,
             "scroll": self._scroll,
             "move_mouse": self._move_mouse,
-            "mouse_down": lambda _args: self._unsupported_typed_action("mouse_down"),
-            "mouse_up": lambda _args: self._unsupported_typed_action("mouse_up"),
             "hold_key": self._hold_key,
             "drag": self._drag,
             "draw_strokes": self._draw_strokes,
-            "ensure_input_mode": lambda _args: self._unsupported_typed_action("ensure_input_mode"),
-            "select_color": lambda _args: self._unsupported_typed_action("select_color"),
             "focus_window": self._focus_window,
             "launch": self._launch,
             "wait": lambda value: self._wait_condition(value) if isinstance(value.get("condition"), dict) else self._pause(value),

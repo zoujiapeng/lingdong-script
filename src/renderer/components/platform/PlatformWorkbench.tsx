@@ -2679,7 +2679,6 @@ function SystemView({ plane }: { plane: Plane }) {
             {['uia', 'win32', 'ocr', 'cv', 'vlm'].map((dimension, index) => (
               <div className="arp-perception-row" key={dimension}><span className="arp-level">L{index}</span><Toggle label={dimension.toUpperCase()} checked={Boolean(config.perception?.[dimension]?.enabled)} onChange={(value) => setConfig((current) => current ? { ...current, perception: { ...current.perception, [dimension]: { ...current.perception?.[dimension], enabled: value } } } : current)} /><code>P{config.perception?.[dimension]?.priority || index + 1}</code></div>
             ))}
-            <Toggle checked={Boolean(config.fusion?.screen_watch_autostart)} onChange={(value) => patch('fusion', 'screen_watch_autostart', value)} label="自动启动屏幕监视" />
             <Toggle checked={Boolean(config.controller?.native_visual_thinking)} onChange={(value) => patch('controller', 'native_visual_thinking', value)} label="原生视觉推理（更慢）" />
             <Toggle checked={Boolean(config.fusion?.ocr_skip_when_uia_rich)} onChange={(value) => patch('fusion', 'ocr_skip_when_uia_rich', value)} label="UIA 信息丰富时跳过 OCR" />
             <Toggle checked={Boolean(config.fusion?.vlm_skip_when_uia_rich)} onChange={(value) => patch('fusion', 'vlm_skip_when_uia_rich', value)} label="UIA 信息丰富时跳过视觉模型" />
@@ -2700,7 +2699,6 @@ function SystemView({ plane }: { plane: Plane }) {
             <div><dt>运行时协议</dt><dd>{runtime?.contract_version ?? '-'}</dd></div>
             <div><dt>源码状态</dt><dd>{plane.runtimeNotice || '加载版本与当前版本一致'}</dd></div>
             <div><dt>主模型视觉能力</dt><dd>{platformStatus?.model_profile ? (platformStatus.model_profile.supports_vision ? '支持' : '不支持') : '-'}</dd></div>
-            <div><dt>世界模型</dt><dd>{config ? (config.agent?.world_model !== false ? '启用' : '停用') : '-'}</dd></div>
             <div><dt>视觉模型状态</dt><dd>{platformStatus ? (platformStatus.vlm_configured ? '已配置' : platformStatus.vlm_reason || '未配置') : '-'}</dd></div>
           </dl>
           <div className="arp-theme-control ld-theme-showcase">

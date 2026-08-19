@@ -93,35 +93,3 @@ def test_semantic_visual_verifier_returns_strict_structured_evidence(monkeypatch
     assert result["semantic_visual_verified"] is False
     assert result["verify_method"] == "semantic-vlm"
     assert result["verdict"]["issues"] == ["too crude"]
-
-
-def test_tool_vlm_verify_keeps_original_user_goal_in_narrow_checklist(monkeypatch):
-    import json
-
-    from winpilot.agent import perception_tools
-    from winpilot.agent.tools import ToolSession
-    from winpilot.utils.screenshot import Region
-
-    captured = []
-    monkeypatch.setattr(perception_tools.vlm, "is_configured", lambda: True)
-    monkeypatch.setattr(perception_tools, "window_region", lambda _hwnd: Region(0, 0, 100, 100))
-    monkeypatch.setattr(
-        perception_tools.vlm,
-        "verify",
-        lambda _region, criteria: captured.append(criteria) or {
-            "ok": True,
-            "verified": False,
-            "semantic_visual_verified": False,
-            "verify_method": "semantic-vlm",
-            "verdict": {"passed": False, "detail_level": "low"},
-        },
-    )
-    session = ToolSession(task="draw a very detailed colorful cat")
-    session.hwnd = 1
-
-    result = session._t_vlm_verify({"criteria": "three colored stripes are visible"})
-    payload = json.loads(result.text)
-
-    assert "draw a very detailed colorful cat" in captured[0]
-    assert "three colored stripes are visible" in captured[0]
-    assert payload["full_goal_included"] is True

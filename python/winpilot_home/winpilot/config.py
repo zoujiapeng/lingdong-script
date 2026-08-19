@@ -60,45 +60,15 @@ _DEFAULTS: dict[str, Any] = {
     "fusion": {"escalate_on_empty": False, "ocr_skip_when_uia_rich": True,
                "vlm_skip_when_uia_rich": True, "uia_rich_threshold": 20,
                "vlm_assist_threshold": 60, "observe_cache_ttl_s": 2.0,
-               # When the main model can consume images, the screenshot is the
-               # authoritative observation for pixel-rendered interfaces.  Do
-               # not spend seconds serialising the same frame through
-               # UIA/OCR/VLM unless a query explicitly asks for text grounding.
-               "native_vision_direct": True,
-               "screen_watch_autostart": True,
-               "predictive_ocr_enabled": False,
-               "predictive_ocr_prefer_cache": True,
-               "incremental_perception_enabled": True,
-               "incremental_perception_debounce_ms": 80,
-               "incremental_perception_max_crops": 4,
-               # Prefetch is opportunistic.  The foreground visual loop must
-               # never wait seconds for background OCR; late results are
-               # dropped and an explicit query can take the full path.
-               "incremental_perception_wait_ms": 250,
-               "incremental_perception_min_ratio": 0.00015,
-               "incremental_perception_max_ratio": 0.35,
                "press_probe_settle_ms": 18,
                "press_release_settle_ms": 24},
     "agent": {
-        "max_steps": 40,
         "max_retries": 2,
         "dry_run": False,
         "experience_memory": True,
         "shell_enabled": True,
-        "world_model": True,
-        "replan_on_fail": True,
-        "planning_enabled": True,
-        "prompt_style": "compact",
-        "tool_profile": "auto",
-        "session_memory": True,
-        "verify_done": True,
-        "done_max_rejects": 2,
-        "escalation_model": "",
-        "llm_trace": True,
-        "reflect_interval": 8,
     },
     "controller": {
-        "physical_anchor_clicks": True,
         # Use provider-native reasoning for native visual decisions on known
         # compatible providers.  ``adaptive`` spends that budget on the first
         # visual read and on recovery/uncertainty, then leaves routine turns

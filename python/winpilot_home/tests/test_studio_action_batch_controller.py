@@ -235,18 +235,21 @@ def test_semantic_click_uses_fresh_target_observation_and_one_raw_click(monkeypa
     assert raw.calls[0][2][:2] == (320, 240)
 
 
-def test_unsupported_pointer_surface_never_partially_executes():
+@pytest.mark.parametrize(
+    "action",
+    ["mouse_down", "mouse_up", "ensure_input_mode", "select_color"],
+)
+def test_unimplemented_actions_are_not_advertised_or_executed(action):
     raw = RecordingRawDevice()
     controller = FastGuiController(raw_device=raw)
 
-    result = controller.execute([
-        {"action": "mouse_down", "button": "left"},
-        {"action": "mouse_up", "button": "left"},
-    ])
+    result = controller.execute([{"action": action}])
 
+    assert action not in ALLOWED_BATCH_ACTIONS
     assert result["ok"] is False
     assert result["failed_at"] == 1
-    assert result["results"][0]["data"]["unsupported_action"] == "mouse_down"
+    assert result["failure_type"] == "INVALID_ACTION_TRANSACTION"
+    assert "unsupported controller action" in result["error"]
     assert raw.calls == []
 
 
