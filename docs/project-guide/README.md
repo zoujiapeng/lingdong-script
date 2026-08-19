@@ -1,14 +1,15 @@
 # 灵动脚本全项目精确讲解
 
-> 主链说明最后同步：2026-08-15（分支 `codex/model-directed-orchestration`）。文件数量、SHA
-> 与完整符号仍以 [`generated-file-inventory.md`](generated-file-inventory.md) 为机械索引，
-> 由 `python scripts/generate_project_guide.py` 按当前工作树现场生成。
+> 主链说明最后同步：2026-08-19（`master`，唯一长期产品分支）。2026-08-14 至
+> 2026-08-18 的主链瘦身与旧架构删除批次均已合入 `master`。仓库不再提交逐文件
+> SHA 清单；需要路径或顶层符号时，现场运行 `python scripts/generate_project_guide.py`。
 > 本套文档面向第一次接手仓库的开发者，也面向需要从“用户点发送”一路追到 Windows 物理输入和外部结果的人。
 > 它不把历史设计、测试名字或模型自述当成当前实现；每个结论都应能回到真实文件、符号、合同或测试。
 
 ## 1. 这套文档解决什么问题
 
-仓库约有三十四万行文本，既有当前 Electron + Python vNext 产品路径，也有 Studio、离线回放、旧 Flow/DSL、CLI、MCP、宏、调度器、测试靶场和大量迁移中的 Legacy 代码。只阅读某个大文件，很容易得到三个错误印象：
+仓库同时包含当前 Electron + Python 产品路径、Studio、离线回放、旧 Flow/DSL、CLI、
+MCP、宏和测试靶场。只阅读某个大文件，很容易得到三个错误印象：
 
 1. 把仍被保存或测试的旧模块误认成产品默认执行链；
 2. 把 Runtime 的 `done`、工具 `ok` 或模型话术误认成真实桌面任务完成；
@@ -17,7 +18,7 @@
 本套文档用两层互补方式消除这些问题：
 
 - 人工审计章节解释“为什么存在、谁调用、数据如何流动、失败在哪里分层”；
-- 自动生成的逐文件索引从 Git 的 NUL 分隔路径清单重建，记录每个文件的行数、哈希、顶层符号、直接依赖和 API/IPC 入口，负责证明没有漏文件。
+- 按需路径报告从 Git 的 NUL 分隔路径清单重建，只列路径和少量顶层符号；Git 本身负责内容身份与历史，不再维护一份容易漂移的重复 SHA 账本。
 
 ## 2. 推荐阅读顺序
 
@@ -30,9 +31,9 @@
 | 5 | [TypeScript/Electron 逐文件卷](05-file-reference-typescript-electron.md) | 前端、主进程、CLI、AI 接口和构建文件分别做什么？ |
 | 6 | [WinPilot Python 核心逐文件卷](06-file-reference-winpilot-python.md) | 当前 vNext、兼容 Agent、感知、动作、记忆、录制各文件如何协作？ |
 | 7 | [支撑代码/测试/脚本逐文件卷](07-file-reference-support-tests.md) | 两套测试、E2E runner、旧引擎、feature、模板和靶场分别验证什么？ |
-| 8 | [机械事实索引](generated-file-inventory.md) | 某个具体文件当前真实行数、SHA、声明、依赖和入口是什么？ |
+| 8 | 按需路径/符号报告 | 运行 `python scripts/generate_project_guide.py --prefix <路径>`，快速查看当前工作树的文件与顶层符号。 |
 
-逐文件三卷由本次源码审计生成。原仓库已有的专题文档仍然有价值，见[原文档索引](../README.md)，但事实冲突时应按“当前源码与测试 → 本快照文档 → `CLAUDE.md` 最新章节 → 历史记录”的顺序判断。
+逐文件三卷是历史审计入口，不是自动更新的权威清单。原仓库已有的专题文档仍然有价值，见[原文档索引](../README.md)，但事实冲突时应按“当前源码与测试 → `CLAUDE.md` 顶部当前章节 → 本套说明 → 历史记录”的顺序判断。
 
 ## 3. 一句话理解项目
 
@@ -46,10 +47,10 @@ flowchart LR
   Actor -->|直接回答| Reply["reply 终态"]
   Actor -->|只读连接器| Connector["MCP search/call 后回到同一 Actor"]
   Actor -->|需要桌面| Lease["run-bound desktop lease"]
-  Lease --> Frame["当前目标窗口权威 JPEG"]
+  Lease --> Frame["当前全桌面权威 JPEG"]
   Frame --> Decision["一笔通用动作 / claim / blocked"]
   Decision --> Physical["AtomicDesktopAdapter → RawDevice/SendInput"]
-  Physical --> NewFrame["新帧 + receipt + action effect"]
+  Physical --> NewFrame["新帧 + receipt"]
   NewFrame --> Actor
 ```
 
@@ -69,46 +70,37 @@ flowchart LR
 | --- | --- | --- |
 | `src/main/` | Electron 生命周期、可信 preload、IPC、托管 Python、旧本地 API/调度/feature 桥 | 负责进程和前台交接，不做 Agent 语义规划 |
 | `src/renderer/` | 智能代理、Studio、运行记录、资产、设置、Flow 编辑器 | `ControlPlaneClient` 只消费 Python API；浏览器状态不是服务端权威 |
-| `src/cli/` | 旧命令行入口 | 是开发/兼容面，不是 GUI E2E 入口 |
 | `src/cli/` | 旧命令行入口 | 是开发/兼容面，不是 GUI E2E 入口（`src/ai-interface/` 已删除） |
-| `python/winpilot_home/winpilot/vnext/` | Mission/Obligation 合同、Actor、Broker、Runtime、桌面 adapter | 当前最小 live 执行内核；不要与 Legacy `tasking/TaskContract` 混淆 |
+| `python/winpilot_home/winpilot/vnext/` | Actor、MissionRuntime、Broker、桌面 adapter 与仍在退役的 Mission/Evidence 合同 | 当前 live 执行内核；Mission/Evidence 包装不是应继续扩张的新架构 |
 | `python/winpilot_home/winpilot/orchestrator/` | ARP 图/执行、goal admission、Thread、live 组合根 | `live_agent.py` 是产品主链的 canonical composition owner |
-| `python/winpilot_home/winpilot/action/` | RawDevice、队列、安全、执行与验证基础 | 物理动作层不解释应用语义 |
+| `python/winpilot_home/winpilot/action/` | RawDevice、单写入队列、执行与 Studio/回放仍使用的旧验证基础 | 物理动作层不解释应用语义 |
 | `python/winpilot_home/winpilot/visual_runtime/` | 帧权威、观察、坐标与视觉状态 | 当前 JPEG 和窗口身份的机械真相 |
 | `python/winpilot_home/winpilot/modeling/` | 模型调用、协议 adapter、超时与 attempt | 不新增第二 planner 或 answer fixer |
 | `python/winpilot_home/winpilot/integrations/` | 显式 MCP connector gateway | 当前只允许重新核验过的只读、非 destructive 工具 |
-| `python/winpilot_home/winpilot/agent/` | AgentRunner 半边已删除；剩余 21 文件是 Studio ACTION_BATCH 的确定性执行器（`ToolSession` + mixins） | 迁移/兼容输入，不是当前 vNext 默认依赖 |
+| `python/winpilot_home/winpilot/agent/` | AgentRunner 已删除；剩余 13 个跟踪文件服务 Studio ACTION_BATCH（`ToolSession` + mixins） | 迁移/兼容输入，不是当前在线产品依赖；迁走真实消费者后再删 |
 | `python/winpilot_home/winpilot/fast/` | Legacy 快速 Controller 与 GUI 能力 | 仍有测试和复用候选，但不能整体接回主循环 |
 | `python/winpilot_home/winpilot/perception/` | Win32/UIA/OCR/CV/应用发现等 | 结构化感知是可审计辅助，不替代当前像素语义 |
 | `python/winpilot_home/winpilot/tasking/` | 仅剩 vNext/Studio 共享模块：`artifacts.py`（工件存储）、`execution_context.py`（桌面上下文）、`evidence.py`（技能证据） | Task Contract 编译链与 StageRuntime 已删除 |
 | `python/winpilot_home/winpilot/memory/` | Memory Graph、compiler、store、feedback | 记忆只加速，不能成为冷启动硬实力补丁 |
 | `python/winpilot_home/winpilot/recorder/` | Trace、human recorder、replay、export | 记录/重放忠实性与 Agent 原任务成功是两个结论 |
 | `python/engine/`, `python/features/`, `python/tools/` | 旧 DSL/Flow/feature 运行设施 | 服务 Studio/兼容消费者，不进入产品视觉主循环 |
-| `scripts/` | 客户端 E2E、受控矩阵、campaign、报告、清理 | runner 与 oracle 不得向生产 Agent 泄漏答案/坐标 |
+| `scripts/` | 客户端 E2E、受控矩阵、报告和清理 | runner 与 oracle 不得向生产 Agent 泄漏答案/坐标；独立 canary seal/campaign 已删除 |
 | `python/winpilot_home/tests/` | WinPilot 合同、集成和 harness 测试 | 大量通过仍不是用户任务通过 |
 | `tests/` | 旧引擎、feature、DSL、工具回归 | 与 vNext 主链测试口径分开 |
 | `templates/`, `examples/`, `vision/`, `java-homework/` | fixture、示例、视觉工具、教学样例 | 文件存在不代表生产 Agent 有专属配方 |
 
 ## 6. 当前可信快照
 
-以下是 `CLAUDE.md` 最新章节与当前分支 HEAD 对齐的状态，不应被同文件更早的历史段落覆盖：
+以下是当前 `master` 的结构事实；同文件后面的旧数字只代表对应历史提交：
 
-- 当前配置是 MiMo `mimo-v2.5`；默认 screen-first 全桌面帧；预算为
-  `200 turns / 7200s / 400 model calls`；
-- 全量视觉矩阵严格报告为 `17/18`（唯一 strict fail 是 calibration-feedback 三次
-  miss 后自行纠正、最终三点全绿且外部 `scenario_success=true`）；按用户实际需求
-  计为 `18/18`。井字棋按人类可见结果判定，不因像素级美观阈值反判失败；
-- corridor 的 raw model points、canonical points 和 `physical_attempt` 一致，首个
-  分歧在模型参数层（视觉几何），不是坐标映射或输入层；
-- 视觉上下文只保留紧邻一笔 provider 原生 `user image → assistant tool call →
-  tool result`；任务完成由同一 `LiveVisualActor` 在当前真实屏幕上自验并 claim，
-  trace/运行详情/memory 只定位首分歧，不参与 task pass，也不能把已完成任务反判失败；
-- `LEGACY_FLOW` 执行路径已删除；严格离线节点独立矩阵升至 `3/19`；
-- 本快照记录的回归为全量 Python `3593 passed, 13 skipped, 1 warning`、renderer
-  `320 passed`、四套 TypeScript typecheck 通过；
-- 这些数字是该快照的工程证据，不是跨机器、跨应用的成功率。
-
-较早文档中出现的 `2/19` 是加入 `input_text` 独立 oracle 之前的历史状态。保留它有助于追踪证据演进，但不能再称“当前”。
+- `master` 是唯一长期产品分支；2026-08-17 旧架构删除和 2026-08-18 四个瘦身提交均已合入；
+- 在线产品默认 screen-first 全桌面帧，同一个 `LiveVisualActor` 观察、行动、看新帧并决定 claim；
+- trace、运行详情和 memory 只用于定位首个分歧，不参与任务通过，也不能反判模型已完成的任务；
+- 在线静态依赖闭包不进入 `winpilot.agent`；Studio ACTION_BATCH 与离线 replay 仍是旧包和
+  `action.verify` 的真实消费者，因此必须消费者先迁移；
+- `LEGACY_FLOW` 执行 handler、旧 Agent 产品入口、第二 verifier 和双 evidence ledger 已删除；
+- 2026-08-16 曾在当时源码上取得受控矩阵 `18/18`、真实软件 `29/30`。当前 HEAD 后续仍有
+  execution/replay 改动，不能把这些历史结果冒充当前版本已完成可见 E2E。
 
 ## 7. 最小开发与验证入口
 
@@ -139,24 +131,20 @@ npm run e2e:client:original
 npm run e2e:client:mixed
 ```
 
-## 8. 零遗漏与防漂移验证
+## 8. 按需路径扫描
 
-机械索引不读取普通换行列表，而是读取 `git ls-files -z`，因此中文、空格和特殊字符路径不会被 Git quoting 或 shell 分词吞掉。生成脚本本身也在代码口径中；生成结果排除自身，避免自引用 hash。
+辅助脚本读取 `git ls-files -z`，因此中文、空格和特殊字符路径不会被 shell 分词吞掉。
+它不计算内容哈希，不生成必须提交的快照，也不承担“证明零遗漏”的额外合同。
 
 ```powershell
-python scripts/generate_project_guide.py
 python scripts/generate_project_guide.py --check
+python scripts/generate_project_guide.py --prefix python/winpilot_home/winpilot/vnext/
+python scripts/generate_project_guide.py --prefix src/ --output output/project-paths.md
 ```
 
-`--check` 同时验证：
-
-1. 当前生成文本与仓库文件重新计算的结果逐字一致；
-2. 每个代码、测试或配置路径恰有一个 `PROJECT-FILE` 标记；
-3. 每个代码、测试或配置路径也至少出现在三卷人工语义索引之一；
-4. 没有缺失、重复或额外路径；
-5. 每个文件的 SHA-256、行数、Python AST 或 TS/JS 静态声明来自当前内容。
-
-新增、删除、重命名或修改任何文件后，都应重跑生成器。人工章节负责语义，机械索引负责完整性；两者缺一不可。
+`--check` 只验证当前跟踪路径能够扫描、受支持的源码能够解析；普通调用把简洁的
+路径/类别/顶层符号报告输出到终端，只有显式传入 `--output` 才写文件。架构事实仍以
+当前源码、测试和 `CLAUDE.md` 顶部当前章节为准。
 
 ## 9. 高频术语
 

@@ -1,8 +1,8 @@
 # 06. WinPilot Python 核心逐文件精确讲解
 
-> 主链说明最后同步：2026-08-15。文件数量、SHA 与完整符号仍以
-> [`generated-file-inventory.md`](generated-file-inventory.md) 为机械索引；本章描述当前工作树的
-> owner 和调用关系，不把已删除文件继续写成产品组件。
+> 本卷是 2026-08-15 的源码审计入口。当前路径与顶层符号可按需运行
+> `python scripts/generate_project_guide.py --prefix python/winpilot_home/winpilot/` 查看；
+> 仓库不再提交逐文件 SHA 清单。当前 owner 事实以源码和 `CLAUDE.md` 顶部章节为准。
 
 ## 1. 范围、计数和阅读约定
 
@@ -18,9 +18,8 @@ git ls-files -- 'python/winpilot_home/serve.py' # 1
 
 正文解释 `winpilot/**` 的当前 owner，并额外解释评测历史快照、Bundled
 Everything CLI/许可证，以及唯一受支持的 Python 启动器 `serve.py`。`CON` 不在 Git 中，
-也没有被读取或触碰。逐文件的行数、字节数、SHA-256、完整 AST 顶层符号和机械静态 import 另见
-[`generated-file-inventory.md`](generated-file-inventory.md)；本文负责机械索引无法回答的
-职责、调用关系、主链/兼容边界和通俗流程。
+也没有被读取或触碰。本卷负责说明职责、调用关系、主链/兼容边界和通俗流程；具体路径
+和少量顶层符号由按需扫描脚本现场列出，Git 负责内容身份与历史。
 
 每个文件条目遵循相同格式：
 

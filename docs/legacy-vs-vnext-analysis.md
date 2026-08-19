@@ -206,8 +206,8 @@ Electron 智能代理页 (src/renderer/platform/)
    harness、`eval_summary.py`。
 6. **npm scripts**：`eval:*`、`build:cli`、`build:ai`、`ai*`、`cli`。
 7. **文档**：`docs/architecture.md` 债务节、`docs/vnext-migration.md` 退役链、
-   `docs/project-guide/` 三卷逐文件索引（删除后必须重跑
-   `python scripts/generate_project_guide.py`）。
+   `docs/project-guide/` 历史审计卷；删除后运行
+   `python scripts/generate_project_guide.py --check` 做轻量路径/语法扫描，不再生成 committed SHA 清单。
 8. **数据兼容**：历史 `legacy_flow` JSON、旧 trace、memory recipe、宏与 `.wps.json`
    在删除前必须确认只读迁移器或明确弃档（vnext-migration.md 最终退出门第 4 条）。
 
@@ -223,7 +223,7 @@ Electron 智能代理页 (src/renderer/platform/)
 5. 最后动 F9/DSL 引擎线（涉及 Electron main 与 renderer 参数控件，前端改动最大，
    放最后，且每步需重跑 typecheck + renderer 测试）。
 6. 每批删除后跑：`python -m pytest python/winpilot_home/tests -q`、
-   `npm run typecheck`、`npm test`、重跑 `generate_project_guide.py --check`。
+   `npm run typecheck`、`npm test`、`python scripts/generate_project_guide.py --check`。
 
 ## 8. 不建议现在做的
 

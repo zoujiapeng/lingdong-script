@@ -1,8 +1,9 @@
 # 07. 支撑代码、测试、脚本与配置逐文件精确讲解
 
-> 审计快照：`master` / `e54d0a97f6cf332daf012c98bf3b8947f8ed9714`，2026-08-02。
+> 历史审计快照：`master` / `e54d0a97f6cf332daf012c98bf3b8947f8ed9714`，2026-08-02。
 > 本卷只覆盖根目录支撑文件、`python/` 中 `winpilot` 产品包之外的代码、两套测试、脚本、靶场、样例、模板和构建配置；`src/**` 与 `python/winpilot_home/winpilot/**` 由另外两卷解释。
-> 路径基线来自 `git ls-files -z`：原范围为 363 个跟踪文件；本次文档新增的 `scripts/generate_project_guide.py` 也属于当前代码，因此本卷最终解释 364 个文件。`CON` 未读取、未改动。
+> 表中的文件数和文件名只说明该历史快照，不是当前清单。当前路径请运行
+> `python scripts/generate_project_guide.py --prefix <路径>`；`CON` 未读取、未改动。
 
 ## 1. 先分清三条线
 
@@ -237,20 +238,17 @@ flowchart LR
 | --- | --- |
 | `scripts/clean-artifacts.cjs` | `npm run clean` 入口。只删除仓库内白名单构建/缓存/E2E 目录与递归 `__pycache__`；`--runtime` 才删忽略的 `python-runtime/`，不删 `node_modules`。输出释放字节数。 |
 | `scripts/setup-claude-code.js` | 历史 Claude Code/desktop MCP 配置助手；打印或用 `--apply`/`--project` 写配置，目标为已构建的 `dist/ai-interface/index.js`。会产生用户目录或 `.claude/settings.json`，不是启动必需步骤。 |
-| `scripts/generate_project_guide.py` | 本套文档的零遗漏生成/校验器。用 `git ls-files -z` 安全读取特殊路径，并纳入脚本自身及尚未跟踪的顶层讲解文档；逐文件计算 SHA-256、行数、类型和静态结构，Python 用 AST，TS/JS、IPC、route 用保守正则，JSON/Markdown/HTML/PNG 用格式专用解析。生成 `generated-file-inventory.md`；`--check` 同时比较全文、验证每个代码/配置路径恰有一个 `PROJECT-FILE` 标记，并要求它也出现在三卷人工语义索引之一。生成物自身被排除以避免自引用 hash。 |
+| `scripts/generate_project_guide.py` | 按需路径/符号扫描器。用 `git ls-files -z` 安全读取特殊路径，不计算内容 hash、不要求 committed 生成物；默认输出终端，只有显式 `--output` 才写报告。 |
 | `scripts/client_e2e_run.py` | 通用真实 Electron 客户端 runner（2,234 行）。`ElectronClientDriver` 用 UIA 定位、真实键鼠提交，按 run/goal/trace/desktop queue 绑定证据；`--suite original|mixed|all`。产出 case/suite JSON 和截图到输出目录。 |
 | `scripts/client_visual_e2e_run.py` | 可见客户端通用手势矩阵。启动 `visual_interaction_server.py` 与真实浏览器，覆盖 drag、precise click、ordered clicks、slider、corridor、dynamic hold；从 `/state` 取外部判定并复制绑定 trace。 |
 | `scripts/client_netease_music_e2e_run.py` | 网易云原生任务 runner。只读 UIA/窗口状态与 CoreAudio endpoint，核对结果标题、播放态及目标音量；产出脱敏 report、截图、trace 副本。 |
 | `scripts/client_paint_game_e2e_run.py` | Microsoft Paint 井字棋 runner。`BoardOracle` 用当前窗口 DPI 把逻辑棋盘映射到物理像素，以红色/中性掩码判定棋盘；产出前后帧和 report。 |
 | `scripts/client_qq_groups_e2e_run.py` | QQ 跨群摘要 runner。UIA/窗口快照只在 runner 内解析群列表、切换/滚动覆盖，并做 trace 隐私审计；对外报告做清洗，避免泄漏聊天正文。 |
 | `scripts/client_thread_connector_e2e_run.py` | 单一真实 Thread 的聊天、只读 connector、Notepad、重启/草稿/history-depth 组合 runner。临时生成 MCP fixture 环境和目标文件，以磁盘 SHA、历史投影、usage 与 trace 判断。 |
-| `scripts/client_vnext_canary_e2e_run.py` | 4,514 行的 fail-closed 可见 canary 驱动器。固定源码/配置/模型/目标身份，管理 Electron、浏览器、被动输入 hook 和成对样本；所有中间工件密封后生成 campaign report。名称保留 paired legacy/vNext 历史，但当前使用必须看 manifest 的精确 arm。 |
 | `scripts/connector_e2e_fixture.py` | 测试专用单工具 stdio MCP server；从环境变量读取 fixture/token/oracle 路径，暴露一次只读 exact-read，并追加不可混淆调用记录。 |
 | `scripts/connector_e2e_sitecustomize.py` | 测试 sidecar；借 Python `sitecustomize` 在不改生产包的前提下给 connector 调用追加 hash/时间/线程证据。仅在 runner 注入的 `PYTHONPATH` 生效。 |
 | `scripts/gui_eval_run.py` | 单任务/套件 GUI eval 主 runner（2,226 行）。收集 Git/模型/屏幕 provenance，提交任务，检查 trace/UIA/policy/预算，必要时请求视觉 judge，写 compact evidence report。直接 API/视觉 judge 只能辅助，外部 oracle 仍优先。 |
 | `scripts/eval_summary.py` | `npm run eval:summary` 入口，读取近期 `winpilot.eval` 报告并打印 usage、费用与状态摘要；只读，不产生新的任务证据。 |
-| `scripts/vnext_canary_campaign.py` | canary 的纯数据/持久化核心（4,963 行）：canonical JSON、内容 hash、独占写、manifest/journal 状态机、样本矩阵、artifact 身份、动作 reconciliation、最终 seal/validate。产物是不可变 manifest、JSONL journal、artifact 与 report。 |
-| `scripts/vnext_canary_input_hook.py` | Windows 低级键鼠被动 hook。`PassiveInputHook` 记录 raw mouse/keyboard event、时间与窗口上下文，不注入输入；用于将 Runtime 动作与 OS 观测对账。 |
 
 ## 5. 根 `tests/`：逐文件
 
@@ -501,13 +499,11 @@ flowchart LR
 | `python/winpilot_home/tests/test_vnext_action_effect.py` | 18 | authoritative before/after pixels、请求文本不归一化、aligned delta、evidence trust 与 strict wire。 |
 | `python/winpilot_home/tests/test_vnext_actor_contracts.py` | 38 | Actor proposal 各分支 strict/identity-free、model wire 完整字段、canonical roundtrip、context budget。 |
 | `python/winpilot_home/tests/test_vnext_atomic_desktop_adapter.py` | 42 | 单次 atomic 执行、RawDevice receipt、submitted/canonical/physical durable arguments、effect、held cleanup。 |
-| `python/winpilot_home/tests/test_vnext_canary_campaign_state.py` | 51 | `scripts/vnext_canary_campaign.py` manifest self-hash/exclusive write/tamper、sample state、reconciliation/report seal。 |
 | `python/winpilot_home/tests/test_vnext_capability_broker.py` | 41 | capability wire exact/plain/complete、数组/标量不 coercion、state projection/schema/availability。 |
 | `python/winpilot_home/tests/test_vnext_desktop_workspace.py` | 13 | unrelated foreground 不采用、成功后 stable successor、discarded full-desktop successor、modal owner。 |
 | `python/winpilot_home/tests/test_vnext_evidence_registry.py` | 7 | 同 id 同内容幂等、冲突/错 scope/value type 无写入、append_many 原子。 |
 | `python/winpilot_home/tests/test_vnext_execution_profile.py` | 25 | profile strict versioned canonical wire、plain complete object、拒绝 legacy alias/错误 literal。 |
 | `python/winpilot_home/tests/test_vnext_kernel_boundaries.py` | 14 | kernel 仅 stdlib/自身 pure package、vnext root 无 eager/lazy import、主组合根与旧执行链保持隔离。 |
-| `python/winpilot_home/tests/test_vnext_live_canary_e2e_harness.py` | 44 | 可见 canary runner 的 handoff、精确客户端 selector、固定两 seed/family、artifact/trace/input 安全。 |
 | `python/winpilot_home/tests/test_vnext_live_model_roles.py` | 26 | Actor 零 retry client、首轮零 system prompt、observe 后同一 actor、原生 history/tool exchange。 |
 | `python/winpilot_home/tests/test_vnext_mission.py` | 52 | mission definition/obligation/event strict wire、canonical hash、state transition/claim/block。 |
 | `python/winpilot_home/tests/test_vnext_mission_completion_verifier.py` | 14 | verifier request strict replayable scope、只接受完整可信 evidence，拒绝 actor/telemetry 自证。 |
@@ -630,24 +626,10 @@ Electron renderer 是唯一前端。
 
 本章没有靠递归 glob 猜文件，而是用 Git 的 NUL 分隔输出处理中文、空格和特殊路径。审计口径如下：
 
-```text
-scope = git ls-files -z
-        ∩ {根构建/脚本/Flow/JSON,
-           .github, examples, java-homework, python, scripts,
-           templates, tests, tools, utils, vision}
-        - python/winpilot_home/winpilot/**
-        + scripts/generate_project_guide.py（本次新增，尚不在基线提交中）
-
-结果:
-  范围内跟踪文件                         363
-  本次新增生成器                           1
-  按生成器 CODE_EXTENSIONS/CODE_NAMES 的代码/测试/脚本/配置 349
-  辅助文档、文本快照、ignore 与 PNG       15
-  本文表格中出现的范围路径                364
-  缺失                                    0
-```
-
-15 个非代码项也被逐一解释，因为它们是代码的 fixture、构建规则或人工 oracle，而不是可安全忽略的杂物。机械 SHA、行数、AST 符号和直接依赖由同目录 `generated-file-inventory.md` 提供；本卷负责解释真实消费者、入口、数据流、产物和当前/历史边界。
+本卷曾以 2026-08-02 的 `git ls-files -z` 结果做逐文件覆盖核对。该统计属于历史快照，
+不再维护另一份 committed SHA/行数账本。当前路径和少量顶层符号由
+`python scripts/generate_project_guide.py --prefix <路径>` 现场列出；本卷只保留职责、
+入口、数据流和历史边界说明。
 
 ## 13. 接手时最容易误判的事实
 

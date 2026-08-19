@@ -1,6 +1,6 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-18。唯一长期产品分支是 `master`；2026-08-14/08-15 内容与
+> 最后核对：2026-08-19。唯一长期产品分支是 `master`；2026-08-14/08-15 内容与
 > 2026-08-17 旧架构删除批次均已提交并合入 `master`。本文件不再把某个提交写成“当前 HEAD”；
 > 接手时必须现场运行
 > `git rev-parse HEAD`、`git rev-parse origin/master` 并查询该精确 SHA 的 Actions。
@@ -43,7 +43,7 @@
 - `playbooks/*.json` 数据与 `playbooks_enabled` 配置键删除。
 - 关联 47 个旧包测试文件删除，5 个共享件测试修正。
 
-**仍然保留（有真实消费者，未动）**：`agent/` 剩余 14 文件 = Studio 确定性执行器
+**仍然保留（有真实消费者，未动）**：`agent/` 剩余 13 个跟踪文件 = Studio 确定性执行器
 （`ToolSession` + mixins + `scope_guard`/`runtime_profile`/`task_rules`；`planner`/
 `plan_tools`/`coding_tools`/`file_tools`/`memory_tools`/`working_set_tools`/`mcp_tools`
 已在 2026-08-18 批次删除），
@@ -77,9 +77,8 @@ renderer `325 passed`、TypeScript typecheck 通过。
    - `atomic.py`：原指针专用 `vnext_pointer_dispatch` 改为全动作 `vnext_physical_attempt`
      （type_text 含文本、target_identity、timestamp_ns）；`orchestrator/projection.py`
      事件名同步。
-   - canary 脚本 `client_vnext_canary_e2e_run.py` 的 `runtime_evidence_sealed` 锚点检查
-     删除（生产不再产生该事件）；`vnext_canary_campaign.py` 的 report/anchor 校验仍
-     为独立 campaign 工具，未动。
+   - 生产不再产生 `runtime_evidence_sealed`；残留的独立 canary campaign/seal 工具
+     及其自测已在 2026-08-19 删除，不再由本仓库维护第二套结果证明装置。
 4. **删除 agent/ 死文件**（`dcf8d99`）：`mcp_tools`（Legacy MCP 重复 owner）、
    `coding_tools`、`file_tools`、`memory_tools`、`working_set_tools`、`plan_tools`、
    `planner` 共 7 文件零生产消费者，随 3 个测试文件（`test_coding_tools`/
@@ -1225,7 +1224,7 @@ renderer `318 passed`、TypeScript typecheck 通过。`CON` 未触碰。
 
 `CON` 未触碰。
 
-## 2026-08-14：拖拽机械层删减、MiMo 原生思考与逐层坐标审计（本分支已提交，未合入 master）
+## 2026-08-14：拖拽机械层删减、MiMo 原生思考与逐层坐标审计（已合入 master）
 
 本轮按 `模型原始参数 -> canonical 参数 -> physical_attempt -> 浏览器 trusted
 事件` 逐层复核。结论不是全局坐标偏移：当前 full-desktop 帧为 `1120x630`，
@@ -1269,7 +1268,7 @@ renderer `318 passed`、TypeScript typecheck 通过。`CON` 未触碰。
 `--collect-only` 也停在收集阶段；没有把超时记作通过。`CON` 与三个既有未跟踪文件
 均未触碰。
 
-## 2026-08-16：删掉三条假失败路径（本分支已提交，未合入 master）
+## 2026-08-16：删掉三条假失败路径（已合入 master）
 
 按“假失败才是最大问题”审查生产执行链，删掉三个能把已完成任务翻成失败的机械层：
 
@@ -1360,7 +1359,7 @@ strict fail 是 ordered-clicks：外部状态 `succeeded=true`、最终 `click_s
 3. 目标移动/窗口漂移：拖拽期间窗口被移动时旧帧像素直接打在新位置，无任何提示。
 4. 混合 DPI 多显示器从未真实验证，坐标链依赖单次 DPI 初始化。
 
-## 2026-08-15：视觉上下文收口与人类结果验收（本分支已提交，未合入 master）
+## 2026-08-15：视觉上下文收口与人类结果验收（已合入 master）
 
 继续按 `模型参数 -> canonical 参数 -> physical_attempt -> 外部状态` 审计后，
 确认长按不是根因并保留：`dynamic-hold` 通过；对 drag schema 是否同时暴露 click

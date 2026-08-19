@@ -589,6 +589,6 @@ never infer wire from:
 | E2E报告 | `output/` | 否 |
 | Memory DB/experience | WinPilot root下本机文件 | 否 |
 | 受版本控制fixture | `eval_targets/`, `templates/`, 测试JSON | 是 |
-| 全项目讲解索引 | `docs/project-guide/generated-file-inventory.md` | 是（本次新增） |
+| 按需路径/符号报告 | `python scripts/generate_project_guide.py` 的终端输出或显式 `--output` 路径 | 否 |
 
 所有保存路径都应在对应 owner 内做范围、格式、大小和原子写入检查。测试清理不得泛化为删除整个 workspace。
