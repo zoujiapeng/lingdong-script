@@ -117,7 +117,9 @@ flowchart TD
 
 Actor 请求层还会二次执行 `_bounded_thread_messages`：把“成功历史 + 当前 goal”共同限制在 16384 字符内，并继续按完整 user/assistant pair 丢弃最旧历史。因此 ThreadStore 的 16384 是历史自身上限，不保证一个接近上限的新 goal 能与全部历史同时发送。
 
-只有 `arp_run_done` 状态为 `done` 或 `reply` 且存在非空 `user_result` 的 Turn 才进入下一轮历史和 continuation checkpoint。失败、取消、blocked、空结果不会污染对话。
+当前 `arp_run_done` 状态为 `done` 且存在非空 `user_result` 的 Turn 才进入下一轮历史和
+continuation checkpoint；加载旧 checkpoint 时仍兼容历史 `reply`。失败、取消、blocked、
+空结果不会污染对话。
 
 ## 4. 精确三节点壳与唯一语义节点
 
@@ -139,144 +141,47 @@ build_exact_live_vnext_graph(goal):
 
 `prepare_live_vnext_execution` 再次完整校验图，而不是相信调用者；初始 inputs 必须为空，禁止预绑定桌面。
 
-## 5. 初始 Actor 轮：三种分支
+## 5. 第一次 Actor 调用就是视觉调用
 
-`_PreparedHandler` 是 call-once ARP node handler。它先创建模型资源和 ConnectorGateway，然后调用 `LiveVisualActor.begin_turn`。
-
-```mermaid
-flowchart TD
-  Begin["begin_turn(goal, successful history)"] --> Model["一次 provider 调用"]
-  Model --> Choice{"模型输出"}
-  Choice -->|纯文本| Reply["reply 终态\nElectron 一直可见"]
-  Choice -->|observe_desktop| Desktop["申请 desktop lease"]
-  Choice -->|search/call connector| MCP["Gateway 执行只读调用"]
-  MCP --> Model
-  Choice -->|未批准工具/多工具/坏结构| Fail["initial turn fail closed"]
-```
-
-初始轮只提供：`observe_desktop`，以及 Gateway 可用时的两个 connector 元工具。最多进行有界 connector 往返，最后一次只保留终止工具，防止无限 connector 循环。
-
-### 5.1 直接 reply
-
-如果模型返回非空文本且没有工具调用：
-
-```text
-runtime_state.user_result = 原始 reply
-output.status = "reply"
-发布 live_agent_done(status="reply")
-ARP node 以 branch="reply" 成功结束
-Thread 将 reply 保存为成功 Turn
-Electron 不申请 lease、不隐藏、不产生 GUI physical_attempt
-```
-
-这条路径不是“伪装成已完成的 GUI task”，而是同一语义 Actor 对普通问题的合法终态。
-
-### 5.2 Connector
-
-模型选择 connector 后：
-
-```text
-解析恰好一个 connector tool call
-Gateway 搜索或重新核验并调用 read-only 工具
-把结构化结果作为 provider tool message 追加
-同一 Actor 再决定：
-  回复
-  请求桌面
-  或再做一次有界 connector 调用
-```
-
-Connector 不会创建第二个 Thread、Mission 或 Agent。
-
-### 5.3 请求桌面
-
-模型调用 `observe_desktop` 后，`DesktopLeaseSlot` 从 `idle` 转为 `waiting`，生成并广播精确 `lease_id`。
-
-## 6. Desktop lease：为什么要两阶段交接
-
-若在 Electron 仍位于前台时捕获“目标窗口”，首帧很可能是控制面自身。因此产品要求先让出、后捕获、再绑定。
-
-```mermaid
-sequenceDiagram
-  participant P as Python DesktopLeaseSlot
-  participant WS as /ws/events
-  participant R as Renderer useControlPlane
-  participant E as Electron main
-  participant D as Desktop context API
-
-  P->>WS: desktop_lease_requested(run_id, lease_id)
-  WS->>R: event
-  R->>E: prepareDesktopHandoff()
-  E->>E: setSkipTaskbar(true) + minimize + wait 160ms
-  E-->>R: yielded, control_surface_pid, prepared_at
-  R->>D: GET desktop-context?exclude_process_id=Electron PID
-  D-->>R: HWND/PID/title/class/region/captured_at
-  R->>E: bindDesktopHandoff(run_id)
-  R->>P: POST desktop-lease(lease_id, execution_context)
-  P->>P: freeze target + validate exact identity
-  P-->>R: status=delivered, target identity
-```
-
-服务端 lease 状态机：
-
-```mermaid
-stateDiagram-v2
-  [*] --> idle
-  idle --> waiting: Actor requests desktop
-  waiting --> validating: matching run_id + lease_id bind
-  validating --> delivered: target frozen successfully
-  validating --> waiting: target validation rejected
-  waiting --> closed: client fail / cancel / timeout
-  validating --> closed: client fail / cancel
-  delivered --> [*]
-  closed --> [*]
-```
-
-Renderer 还有一个不同于服务端状态机的一次性去重集合：它在真正调用交接前就把 `run_id:lease_id` 加入 `desktopLeaseHandled`，仅“此刻还没有 client”这一种情况会删除。因此同一 Renderer 对同一 lease 的一次 fulfill 若已经开始后失败，不会因后续 WebSocket 或 HTTP snapshot 再自动重试；通常等待服务端 fail-close 或超时。上图的 `validating → waiting` 只表示服务端可接受的状态迁移，不承诺客户端会再次提交。
-
-### 6.1 响应丢失竞态
-
-如果 `POST desktop-lease` 在网络层报错，Renderer 不能立刻恢复窗口，因为服务端可能已经收到了 bind，只是响应丢失。它会查询精确 run：
-
-```text
-若同 run_id + lease_id 的服务端状态是 delivered:
-  认为绑定成功，继续保持让出
-否则若 run 已终态或 lease closed:
-  恢复 Electron
-否则若 lease 仍 waiting:
-  尝试 fail 同一 lease
-  只有服务端确认 closed 才恢复
-否则:
-  保持让出并抛出原始错误（避免抢回正在执行的桌面）
-```
-
-### 6.2 正常终态恢复与现存缺口
-
-Electron 本地保存 `_desktopHandoffRunId`；`releaseDesktopHandoff(run_id)` 自身要求 ID 精确匹配。正常的同一 Renderer 生命周期里，匹配 run 的终态事件，或此前已观察为 active 后又通过 HTTP 看到的终态 transition，会调用它恢复任务栏、显示、restore 和 focus；旧 run、重复 terminal 或空 ID 不能通过这个函数释放当前 handoff。
-
-但这还不是无条件架构保证，源码中有两个真实缺口：点击系统通知、启动第二个应用实例都会直接 restore/show/focus，并不检查或清除 pending handoff，可能在任务中途抢回前台；如果 Renderer 在 run 已终态后才重载，首次 HTTP hydration 没有 previous active transition，也可能不触发 release，使主进程保留 pending ID。测试和故障分析必须把这两种情况单列，不能笼统声称“任何终态都可由 HTTP 自愈”。
-
-## 7. 冻结目标
-
-服务端把客户端 execution context 与 server-owned graph `task_id` 绑定，再从 target facts 构造 `_FrozenTarget`。主要事实包括：
-
-- `hwnd` 与 root HWND；
-- process ID；
-- 可执行文件 identity；
-- title 与 class name；
-- 目标物理 region；
-- capture timestamp；
-- 基于这些事实生成的 binding ID；
-- 后续观察窗口生命周期所需的通用 probe。
-
-冻结并不表示窗口永远不变。默认 full-desktop 帧允许模型点击屏幕上的任意可见窗口；binding 只帮助下一帧观察和通用窗口生命周期，不是前台或 hit-test veto。
-
-## 8. 构造 live session
-
-收到 `_FrozenTarget` 后，`_build_live_session` 建立共享对象：
+`_PreparedHandler` 是 call-once ARP node handler。它先捕获服务端桌面 workspace、构造
+live session，再让 `MissionRuntime` 驱动同一个 `LiveVisualActor.propose`。
 
 ```mermaid
 flowchart TD
-  Target["FrozenTarget"] --> Mission["MissionDefinition + Reducer"]
+  Handler["_PreparedHandler"] --> Target["capture_desktop_workspace_context\n中性 Windows Shell 锚点"]
+  Target --> Session["_build_live_session"]
+  Session --> Frame["FrameObserver 捕获当前 full_desktop JPEG"]
+  Frame --> Model["LiveVisualActor.propose\n原始 goal + 有界 history + JPEG"]
+  Model --> Choice{"模型选择"}
+  Choice -->|reply_to_user / blocked| Terminal["终态"]
+  Choice -->|connector / shell| Local["执行结果回到同一 Actor"]
+  Local --> Model
+  Choice -->|GUI| Physical["AtomicDesktopAdapter → RawDevice"]
+  Physical --> Next["receipt + 新 full_desktop JPEG"]
+  Next --> Model
+```
+
+不存在无图文本路由。第一次调用就同时提供回复、显式 connector、shell 与 GUI 工具；
+独立的本地工具可以批量执行，空间动作或终态工具结束当前 Runtime turn。
+
+## 6. 服务端桌面锚点与完整桌面帧
+
+`capture_desktop_workspace_context()` 返回一个 `desktop-target/1` Windows Shell 锚点。
+`_freeze_prebound_target` 把它转为 `_FrozenTarget`，再建立 `TargetBinding`、
+`DesktopWorkspace` 和通用窗口 probe。该锚点只保持帧与窗口生命周期连续，不提名某个
+应用为任务 owner。
+
+默认观察始终以 `scope=full_desktop` 捕获完整虚拟桌面；模型点击屏幕上哪个可见位置，
+物理输入就去哪里，不因锚点、前台窗口或 hit-test 推断而拒绝。Electron 不再隐藏、最小化
+或通过独立 API 交付 target。
+
+## 7. 构造 live session
+
+`_build_live_session` 建立一条共享执行线：
+
+```mermaid
+flowchart TD
+  Target["FrozenTarget"] --> Mission["MissionState\n原始 goal + 最后机械结果 + 终态"]
   Target --> Workspace["DesktopWorkspace"]
   Target --> Observer["FrameObserver"]
   Observer --> Authority["FrameAuthority"]
@@ -287,8 +192,15 @@ flowchart TD
   Adapter["AtomicDesktopAdapter"] --> Runtime
 ```
 
-组合时只建立 Runtime、Reducer、Actor、FrameAuthority 与 Atomic adapter 的共享 owner；binder
-不在每轮 proposal 上重放整套 Mission 或工具 schema 组合校验。
+组合时只建立 Actor、MissionState、FrameAuthority、workspace 与 Atomic adapter 的共享 owner；
+binder 不在每轮 proposal 上重放工具 schema 或语义验证。
+
+## 8. 回复、本地工具与 GUI 的统一分支
+
+- `reply_to_user`：写入用户结果并终止；纯聊天不会产生 `physical_attempt`。
+- connector/shell/window text：结果作为 provider tool message 回到同一个 Actor，不创建第二个 Agent。
+- GUI：一笔 proposal 进入 `MissionRuntime` 和 `AtomicDesktopAdapter`，动作后用新帧继续。
+- malformed/provider error：在剩余模型与 turn 预算内把真实错误回给同一 Actor；不执行隐藏恢复链。
 
 ## 9. 每个视觉 Turn 的完整算法
 
@@ -300,41 +212,38 @@ run_one_turn(turn_index):
   若 Mission 已 VERIFIED/CANCELED/BLOCKED/FAILED -> 返回对应终态
   若收到 cancel -> 写 mission_canceled
 
-  initial = state.observe(current projection, turn_index)
-  broker_projection = broker.project(projection, initial.broker_state)
-  若 route != VISUAL_ACTOR -> UNAVAILABLE
+  snapshot = state.observe()
+  确认当前 mission 仍 running，frame 权威且 pointer 状态可执行
 
   turn = project_actor_turn_input(
-    original mission card,
+    MissionState.card（原始 goal + 最后机械结果）,
     current frame facts,
     fixed Actor tool schemas,
     bounded task_state,
-    previous action local intent
+    previous action + budget facts
   )
 
-  raw_decision = actor.propose(turn, current JPEG, exact submitted_size):
+  raw_decision = actor.propose(turn, current full-desktop JPEG, exact submitted_size):
     同时暴露固定 action/terminal tools 与两个 connector 元工具
-    若选择 connector -> Gateway 执行只读调用并把 tool result 交回同一 Actor
-    本地只读工具链（status/shell/connector/window_text）只受剩余 model-call budget 约束
+    若选择 connector -> Gateway 执行调用并把 tool result 交回同一 Actor
+    本地工具链（shell/connector/window_text）只受剩余 model-call budget 约束
     模型可调用 refresh_desktop 主动结束局部工具链换取新整屏，最终提交一笔 action / claim / blocked
   尝试应用有界 task_state_update（它不是权威 Mission 状态；格式错误只忽略该更新）
   在 MissionRuntime 入口把 raw proposal 做唯一一次 typed parse
 
-  再取 current snapshot：
-    若 frame/target/pointer 在模型思考期间变化 -> STALE_DISCARDED
-
   bind ActorDecisionEnvelope 到：
-    mission/run/revision/obligation
+    mission/run/revision
     frame/target/submitted image
     pointer disposition / lease
 
   如果是 desktop action -> 执行一笔机械调用
-  如果是 claim -> 记录并完成 Mission
-  如果是 blocked -> 写 obligation_blocked
+  如果是 refresh_desktop -> 下一普通 turn 捕获新整屏
+  如果是 reply_to_user -> MissionState.complete
+  如果是 blocked -> MissionState.block
 ```
 
-Actor 每次都收到原始 goal，而不是仅收到局部计划。Connector 不只存在于初始分流：每个视觉
-Turn 的 `propose` 也可在当前 JPEG 和固定通用工具旁调用 connector，只受剩余 model-call 预算
+Actor 每次都收到原始 goal，而不是仅收到局部计划。每个视觉 Turn 的 `propose` 都可在当前
+JPEG 和固定通用工具旁调用 connector，只受剩余 model-call 预算
 约束；同一个 Actor 在同一 Turn 最终提交恰好一笔 Runtime action、claim 或 blocked。
 `task_state` 与紧邻一笔 provider 原生 exchange 只帮助短期连续性；它们不是 Runtime 计划或完成判据。
 
@@ -447,27 +356,29 @@ JPEG 直接放进剪贴板，不重抓画面、不产生或查找图片路径。
 以定位首分歧，但不再有独立 reconcile/verification 层据此判 task pass。外层
 `_PreparedHandler` 在 `ACTION_RECORDED` 或 `STALE_DISCARDED` 后继续下一 Turn。
 
-## 15. claim、blocked 与终止
+## 15. reply、blocked 与终止
 
-### 15.1 claim
+### 15.1 reply_to_user
 
 ```text
-Actor: claim_obligation_done(concise_claim)
+Actor: reply_to_user(concise_claim)
 Runtime:
   接受同一个 Actor 基于当前真实屏幕作出的完成判断
-  在任何辅助 history/snapshot 之前缓存 claim 与最终 narration
-  将 claim 投影为 Mission 完成状态
+  缓存最终 narration
+  MissionState.complete()
   保存 concise_claim 为 user_result
 ```
 
 这里没有第二个视觉模型、deterministic pass verifier、trace gate 或 memory gate。辅助
-Mission history、completion snapshot 或诊断投影失败不能推翻已缓存的 claim，也不能丢失
+trace 或诊断投影失败不能推翻已缓存的结果，也不能丢失
 `user_result`。E2E harness仍可观察真实应用终态来衡量产品完成率，但不会把测试判定反馈
 进生产执行线。
 
 ### 15.2 blocked
 
-Actor提交规范 `blocker_kind` 与去重的 `observed_facts`，Runtime写 `obligation_blocked` 并终止。它适用于当前可见事实确实无法用供应动作推进，不应被用作模型不愿尝试的普通退出。
+Actor提交规范 `blocker_kind` 与去重的 `observed_facts`，Runtime调用
+`MissionState.block()` 并终止。它适用于当前可见事实确实无法用供应动作推进，不应被用作
+模型不愿尝试的普通退出。
 
 ### 15.3 预算耗尽
 
@@ -477,7 +388,7 @@ Actor提交规范 `blocker_kind` 与去重的 `observed_facts`，Runtime写 `obl
 
 - pause 只在安全边界等待；暂停耗时会补回 deadline；
 - 如果 pause 在 Actor admission 前到达，当前 `UNAVAILABLE` 可投影为安全的 stale boundary；
-- cancel 设置 run stop event；Actor、connector、lease wait、queue 和外层 deadline 都观察它；
+- cancel 设置 run stop event；Actor、connector、shell、queue 和外层 deadline 都观察它；
 - 全局 `F8`/`F9` 的 Agent 停止由 Electron 主进程直连当前 Runtime run，不依赖 Renderer 的 `currentRun` 快照；
 - 若输入尚未开始，明确 canceled/rejected；
 - 若输入已开始或结果未知，先记录真实 receipt，再进入保守终态；
@@ -487,20 +398,15 @@ Actor提交规范 `blocker_kind` 与去重的 `observed_facts`，Runtime写 `obl
 
 ```mermaid
 stateDiagram-v2
-  [*] --> InitialActor
-  InitialActor --> Reply: text reply
-  InitialActor --> LeaseWaiting: observe_desktop
-  InitialActor --> InitialActor: connector result
-  LeaseWaiting --> VisualTurn: target delivered
-  LeaseWaiting --> Failed: timeout/fail/cancel
+  [*] --> VisualTurn: server target + first full-desktop frame
+  VisualTurn --> VisualTurn: connector/shell result
   VisualTurn --> VisualTurn: action recorded
   VisualTurn --> VisualTurn: stale discarded
   VisualTurn --> VisualTurn: malformed/error redecision within remaining budget
-  VisualTurn --> Verified: claim accepted
+  VisualTurn --> Verified: reply_to_user accepted
   VisualTurn --> Blocked: blocked report
   VisualTurn --> Failed: state rejected/budget/error
   VisualTurn --> Canceled: cancel
-  Reply --> [*]
   Verified --> [*]
   Blocked --> [*]
   Failed --> [*]
@@ -511,15 +417,15 @@ stateDiagram-v2
 
 `/ws/events` 发布 BUS 事件。Renderer：
 
-- `desktop_lease_requested` 立即触发 lease fulfillment；
 - `agent_start` / `arp_run_start` 标记真实 live start；
 - 非 ping 事件保留最近 200 条 UI 列表；
 - 活动事件在约 80ms 后只刷新 current run；
 - 终态事件刷新 platform/current/recent runs；
 - 每 5 秒做一次 fallback 全刷新；
-- 正常同一 Renderer 生命周期内，终态触发任务栏通知并尝试匹配 handoff 恢复。
+- 终态刷新任务列表并触发普通任务栏通知，不控制桌面目标或窗口恢复。
 
-UI 事件流只是投影；HTTP 快照能恢复大多数 run 状态，但不能重放所有一次性客户端副作用。特别是终态后才重载 Renderer 的 handoff release 缺口，仍按第 6.2 节处理。
+UI 事件流只是投影；HTTP 快照可恢复 run 状态。视觉帧、target 与物理输入仍由 Python
+live session 持有，不从 Renderer 事件反推。
 
 ## 19. Studio / Automation IR 流程
 
@@ -612,7 +518,7 @@ Electron `window-all-closed` / `before-quit` 会停止旧 engine、feature 子�
 
 - held pointer；
 - 模型/connector 资源；
-- controller / desktop lease 资源；
+- controller、模型与 connector 资源；
 - BUS terminal event。
 
 释放清理不完整是物理边界错误，必须 fail closed；非语义 trace/telemetry 失败不得改写模型已经在真实屏幕上判断的任务结果。

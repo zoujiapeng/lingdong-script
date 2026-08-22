@@ -54,7 +54,7 @@ Electron ready:
   注册 F9（只控制旧 Flow engine）
 ```
 
-## 3. 当前产品主链：聊天、按需桌面租约、物理前台交接
+## 3. 当前产品主链：聊天、直接全桌面观察与物理执行
 
 ```mermaid
 sequenceDiagram
@@ -71,19 +71,10 @@ sequenceDiagram
   H->>C: startGoalRun
   C->>P: POST /api/v2/goals/runs<br/>{goal, thread_id}
   P-->>C: run_id / thread_id
-  P-->>H: WebSocket desktop_lease_requested
-  H->>E: prepareDesktopHandoff()
-  E->>E: 主窗隐藏任务栏并最小化
-  E-->>H: yielded + control_surface_pid
-  H->>C: captureDesktopContext(exclude pid)
-  C->>P: GET /api/v2/desktop-context
-  P-->>H: 外部 HWND/进程/区域
-  H->>E: bindDesktopHandoff(run_id)
-  H->>P: POST desktop-lease<br/>execution_context
+  P->>P: 同一 Actor 直接捕获权威 full_desktop 帧
   P->>T: Python Runtime 观察并执行
   P-->>H: WebSocket events / terminal result
-  H->>E: notifyTaskbar(..., releaseHandoff=true)
-  E->>E: 仅匹配 run_id 时恢复主窗口
+  H->>E: notifyTaskbar(...)
   H-->>A: 刷新 run / evidence / result
 ```
 
@@ -96,19 +87,9 @@ sequenceDiagram
   POST 仅包含 goal 与可选 thread_id
   保存返回的 run_id 到最多 40 个的前端会话投影
 
-收到 desktop_lease_requested(run_id, lease_id):
-  去重同一 lease
-  Electron 先让出前台
-  后端捕获排除 Electron PID 后的真实目标窗口
-  Electron 本地绑定 run_id
-  后端绑定 lease 与 execution_context
-  如果响应丢失 -> 精确查询该 run，只有服务端已 delivered 才保持让出状态
-  如果明确未交付 -> 关闭 lease，并安全恢复 Electron
-
 收到终态:
   分类 success / error / stopped
   用任务栏通知一次
-  只有终态 run_id 与已绑定 handoff run_id 相同才恢复控制面
   失败结果保留原文；“再次编辑”只恢复 goal，不自动重试
 ```
 
@@ -208,18 +189,17 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | 文件 | `openFileDialog/readFile/writeFile` | `dialog:*`、`file:*` | Studio 打开/保存 canonical Automation IR |
 | 托管 WinPilot | `getWinpilotConnection/ensureWinpilot/restartWinpilot` | `winpilotServer.ts` | 产品控制平面发现、token、协议身份恢复 |
-| 桌面 handoff | `prepare/bind/releaseDesktopHandoff` | `main.ts` | 产品主链按需让出与恢复前台 |
 | 截图/选区/OCR | `captureScreenshot/selectRegion/ocrRecognizeRegion` | `main.ts` + Python helpers | 属性编辑器选区及兼容功能；正式 screenshot 节点仍由 ARP 执行 |
 | Engine | `engineStart/Stop/Pause/Resume/Status` | `engine.ts` | 旧 Flow 执行兼容面；不是 Studio 当前 Run 按钮路径 |
 | Feature/macro/schedule | 对应 preload 方法 | `featureCallBridge`、宏进程、`SchedulerBridge` | 旧节点、工具面和计划兼容 |
-| 通知/窗口 | `notifyTaskbar`、窗口按钮 | `main.ts` | 当前产品 UI 与终态恢复 |
+| 通知/窗口 | `notifyTaskbar`、窗口按钮 | `main.ts` | 当前产品 UI 与终态通知 |
 | `api-command`/state | store 模块级 listeners | `api.ts` | 本机 :7880 对 Renderer 图编辑的兼容桥 |
 
 ### 6.2 Renderer ↔ Python vNext
 
 ```text
-HTTP：查询 platform/capabilities/current run/runs/config/assets；提交 goal、Automation IR、gate、pause/resume/cancel、lease。
-WebSocket：ws/events?token=...，承载 run 生命周期、node 事件、desktop lease request 和通知事件。
+HTTP：查询 platform/capabilities/current run/runs/config/assets；提交 goal、Automation IR、gate、pause/resume/cancel。
+WebSocket：ws/events?token=...，承载 run 生命周期、node 事件和通知事件。
 认证：Electron 托管时使用随机 CONTROL_TOKEN；fetch Authorization Bearer，WS 用 token query。
 一致性：Renderer 与 Electron 启动探针都要求 runtime contract_version=3，源码 stamp 未漂移，loaded/current commit 不冲突。
 ```
@@ -306,8 +286,8 @@ CLAUDE.md 明令不得接回。
 
 | 文件 | 职责与关键符号 | 直接依赖 / 调用者 | 运行阶段 |
 | --- | --- | --- | --- |
-| `src/main/main.ts` | Electron 真入口：单实例、窗口/菜单、桌面 handoff、截图选区/OCR、宏、schedule、通知、全部 IPC、托管 WinPilot、`:7880` API、F9 旧 engine、退出清理；关键 owner 为 `createWindow()`、`releaseDesktopHandoff()`、`notifyTaskbarAttention()` 与 app lifecycle。 | Electron 直接执行；依赖其余 main 模块和 `state.ts`。 | 整个桌面应用生命周期。 |
-| `src/main/preload.ts` | 唯一 `contextBridge.exposeInMainWorld('electronAPI', …)`；把文件、旧 engine、WinPilot connection/handoff、截图、AI/DSL、feature、宏、schedule、通知和事件订阅收敛成 Renderer 安全桥。 | BrowserWindow preload；类型由 `renderer/types/electron.d.ts` 镜像，Renderer 全局调用。 | 每个 Renderer context 创建时。 |
+| `src/main/main.ts` | Electron 真入口：单实例、窗口/菜单、截图选区/OCR、宏、schedule、通知、全部 IPC、托管 WinPilot、`:7880` API、F9 旧 engine、退出清理；关键 owner 为 `createWindow()`、`notifyTaskbarAttention()` 与 app lifecycle。 | Electron 直接执行；依赖其余 main 模块和 `state.ts`。 | 整个桌面应用生命周期。 |
+| `src/main/preload.ts` | 唯一 `contextBridge.exposeInMainWorld('electronAPI', …)`；把文件、旧 engine、WinPilot connection、截图、AI/DSL、feature、宏、schedule、通知和事件订阅收敛成 Renderer 桥。 | BrowserWindow preload；类型由 `renderer/types/electron.d.ts` 镜像，Renderer 全局调用。 | 每个 Renderer context 创建时。 |
 | `src/main/winpilotServer.ts` | 管理 `serve.py` 子进程和随机 `WINPILOT_CONTROL_TOKEN`；安全高端口分配、`/api/status` readiness、contract v3/source/git 身份检查、幂等 ensure/restart/stop；保留 stderr tail。 | `main.ts` 启停并经 IPC 暴露；`renderer/platform/client.ts` 间接消费。 | 应用启动、连接恢复、退出；产品主链基础设施。 |
 | `src/main/api.ts` | `startApiServer(ApiDeps)` 实现 `127.0.0.1:7880` 兼容 REST/MCP：constant-time token、Origin 限制、Renderer `api-command`、宏/feature/模板/marks/截图；旧 DSL/engine 写图端点返回 410。 | `main.ts` 构造依赖并启动；依赖 engine、feature bridge、mcp handler、macro path。 | 应用常驻的本机兼容控制面。 |
 | `src/main/engine.ts` | Python 启动公共层：bundled/system Python 选择、UTF-8/VLM env、one-shot Python 子进程并发上限 3，超出者进入无固定长度上限的 FIFO 队列，并收集 stdout；`start/stopPythonEngine` 管旧长驻 Flow engine，`callLLM` 是旧 Chat Completions 桥。 | `main.ts`、`api.ts`、`featureCallBridge.ts`、`winpilotServer.ts`、`mcp-handler.ts`。 | Python 子进程生命周期与旧执行/AI兼容调用。 |
@@ -319,17 +299,16 @@ CLAUDE.md 明令不得接回。
 | `src/main/macroPaths.ts` | `resolveMacroPath()` 规范化 `.json` 宏名，拒绝 NUL、目录、绝对/穿越路径，确保结果直属 macros 根。 | `main.ts`、`api.ts`；`macroPaths.test.ts`。 | 宏读取/删除前的安全边界。 |
 | `src/main/cronMatcher.ts` | 私有 `matchField/matchCron` 支持 5 段 cron 的列表、步长、范围和 Sunday 0/7；当前没有 export，也没有生产调用者，真实调度由 Python daemon 负责。 | 无直接调用者。 | 当前休眠/遗留源码，只参与 TypeScript 编译。 |
 
-### 9.5 Renderer 入口、控制平面与共享状态（19/19）
+### 9.5 Renderer 入口、控制平面与共享状态（18/18）
 
 | 文件 | 职责与关键符号 | 直接依赖 / 调用者 | 运行阶段 |
 | --- | --- | --- | --- |
 | `src/renderer/index.html` | `zh-CN` HTML 壳，提供 `#root`、icon 与 `main.tsx` module script；注释说明为打包 `file://` 兼容未设置 CSP。 | Vite 入口；Electron `loadFile` 或 dev server 返回。 | Renderer 文档加载。 |
 | `src/renderer/main.tsx` | `ReactDOM.createRoot` 在 StrictMode 中挂载 `App`，加载全局 CSS。 | `index.html`。 | Renderer bootstrap。 |
 | `src/renderer/App.tsx` | Renderer 根：主题/标题栏同步、canonical 文件打开/保存/新建、全局快捷键、native menu action、dirty/draft beforeunload；最终包裹 `AppErrorBoundary → PlatformWorkbench`。 | `main.tsx`；依赖 store、Automation IR reader、draft registry。 | Renderer 全生命周期。 |
-| `src/renderer/platform/contracts.ts` | 830 行纯类型合同：ARP graph/node/capability、run projection/snapshot/timeline/metrics、TaskContract 与 interaction runtime、artifact/evidence/completion、runtime identity/status、WS event/schedule 等。 | client、hook、PlatformWorkbench、Automation IR 和测试广泛导入；字段镜像 Python JSON。 | 编译期跨进程协议；运行时用于对象形状约定。 |
+| `src/renderer/platform/contracts.ts` | 纯类型合同：ARP graph/node/capability、run projection/snapshot/timeline/metrics、TaskContract 与 interaction runtime、artifact/evidence/completion、runtime identity/status、WS event/schedule 等。 | client、hook、PlatformWorkbench、Automation IR 和测试广泛导入；字段镜像 Python JSON。 | 编译期跨进程协议；运行时用于对象形状约定。 |
 | `src/renderer/platform/client.ts` | `ControlPlaneClient` 统一带 token fetch、错误/timeout、所有 Python HTTP endpoint、artifact/shot URL 和 WS 重连；`resolveControlPlaneConnection()` 优先轮询 Electron 托管服务，`runtimeCompatibilityError()` fail closed。 | `useControlPlane.ts` 主调用；PlatformWorkbench 通过 hook 获得 client。 | Renderer 连接建立及每个控制平面请求。 |
-| `src/renderer/platform/useControlPlane.ts` | 核心 React hook：维护 overview/capabilities/current/runs/events/connection；WS+fallback polling；terminal taskbar；runtime 漂移空闲时重启；封装 goal/Automation/gate/control；`fulfillDesktopLease()` 实现精确 handoff 竞态处理。 | `PlatformWorkbench` 唯一生产调用；依赖 client、executionContext、taskbar helper。 | 产品主链与 Studio 运行的 Renderer owner。 |
-| `src/renderer/platform/executionContext.ts` | `buildClientExecutionContext()` 调 preload 让出 Electron 前台，再用注入 capture 函数获取排除控制面 PID 后的真实目标；Web 模式明确记录未让出原因。 | `useControlPlane.fulfillDesktopLease`；executionContext tests。 | 收到 desktop lease 后、服务端 bind 前。 |
+| `src/renderer/platform/useControlPlane.ts` | 核心 React hook：维护 overview/capabilities/current/runs/events/connection；WS+fallback polling；terminal taskbar；runtime 漂移空闲时重启；封装 goal/Automation/control。 | `PlatformWorkbench` 唯一生产调用；依赖 client 与 taskbar helper。 | 产品主链与 Studio 运行的 Renderer owner。 |
 | `src/renderer/platform/flowToArpGraph.ts` | 当前 Flow→ARP 编译器：20 个 `RUNNABLE_FLOW_NODE_TYPES`、`controllerActions()` 参数精确映射、retry/edge branch、policy/compilation metadata；不支持节点只投影 `legacy_flow` 供验证拒绝。 | Automation IR、NodeLibrary/Canvas、fragment 边界、测试。 | Studio 文档变化时编译；验证/保存/运行前。 |
 | `src/renderer/platform/taskOutcome.ts` | `taskOutcomeForRun()` 调共享分类器；仅明确 vNext/no-legacy 且无 error 的 direct reply 字符串按普通内容处理，避免把 JSON 文本猜成失败协议。 | AgentConversationTurn、taskbar helper。 | Renderer 终态展示。 |
 | `src/renderer/platform/taskbarNotification.ts` | `taskbarNotificationForTransition()` 只对观察到的活跃→终态、新 terminal run 或 live-start run 发一次通知，并输出 success/error/info 与正文。 | `useControlPlane`；taskbar tests。 | run 投影变化时。 |
@@ -338,7 +317,7 @@ CLAUDE.md 明令不得接回。
 | `src/renderer/store/executor.ts` | `createFlowExecutor()` 是旧浏览器预览/FlowScript 解释器，支持分支/循环/子流程/断点/变量；需要真实副作用时经 feature bridge，`require_real_features` 下拒绝模拟成功，返回 `ExecutionController`。 | 仅 store 的兼容 `startExecution()`；executor tests。 | 非 Electron 兼容预览或旧执行路径；不是 Studio 正式 run。 |
 | `src/renderer/store/persistence.ts` | localStorage CRUD：template shortcuts、custom templates、agent history；JSON 解析失败回空值。 | store 初始化与动作。 | Renderer 本地兼容资料持久化。 |
 | `src/shared/taskOutcome.ts` | 有界递归（深 8、最多 500 节点）检查显式失败信号、终态集合，导出 `classifyTaskOutcome/isTerminalTaskStatus/taskResultText`。 | Renderer task outcome/notification 与 Electron `main.ts` 导入。 | 跨主进程/Renderer 的机械终态分类。 |
-| `src/renderer/types/electron.d.ts` | `ElectronAPI` 当前镜像 50/51 个 preload 方法及 listener cleanup 签名，并扩展 `Window.electronAPI` 与少量注入全局；它遗漏了 `preload.ts` 已暴露的 `setVisionBackend`，是明确的类型镜像漂移，不能称完整。 | App、store、platform hook/components 编译时使用；应与 `preload.ts` 同步。 | 类型检查。 |
+| `src/renderer/types/electron.d.ts` | `ElectronAPI` 镜像 preload 方法及 listener cleanup 签名，并扩展 `Window.electronAPI` 与少量注入全局；它遗漏了 `preload.ts` 已暴露的 `setVisionBackend`，是明确的类型镜像漂移，不能称完整。 | App、store、platform hook/components 编译时使用；应与 `preload.ts` 同步。 | 类型检查。 |
 | `src/renderer/types/index.ts` | 953 行 Flow 编辑域模型：60 个 `NodeType`、每类 params union、FlowNode/Edge/Script、execution/UI/feature/macro/trigger/schedule/learned target 等。 | Renderer 组件、store、utils、CLI/AI parser 广泛导入。 | 编译期编辑器/兼容 Flow 合同。 |
 | `src/renderer/vite-env.d.ts` | 单行 `/// <reference types="vite/client" />` 三斜线类型引用，没有额外自定义声明。 | tsconfig 包含。 | 为 Renderer 类型检查引入 Vite client 声明。 |
 | `src/renderer/components/platform/PlatformWorkbench.tsx` | 3190 行主 UI 编排：`AgentCockpit`、`Studio`、`RunsView`、Assets/System/抽屉/命令面板、interaction/runtime audit；直接消费 `useControlPlane`，聚合聊天 Thread、导出对话 IR、流程验证/运行和历史证据。 | `App.tsx` 唯一顶层调用；内部使用 Canvas/Library/Property/Fragment 与大量 contract helpers。 | 当前产品 Renderer UI 全生命周期。 |
@@ -418,18 +397,17 @@ CLAUDE.md 明令不得接回。
 | `src/renderer/test/automationIR.test.ts` | WPS 与 Flow 的 IR 包装/往返、metadata 保真、transient state 处理、旧安全字段清理、runtime graph 必需性、fingerprint、悬空边、无窗口坐标动作和非法参数。 | `utils/automationIR.ts`、`platform/flowToArpGraph.ts`、`utils/wpsToFlowScript.ts`。 |
 | `src/renderer/test/canvasControlsNodeBoundary.test.tsx` | 右键菜单只暴露本地 compiler 支持节点，并通过 store 的受保护 add 路径创建。 | `CanvasControls.tsx`、`flowToArpGraph.ts`、`store/index.ts`。 |
 | `src/renderer/test/constants.test.ts` | 核对节点尺寸和默认名称等基础常量。 | `utils/constants.ts`。 |
-| `src/renderer/test/executionContext.test.ts` | Electron native 路径必须先 yield 前台再 capture；web 路径记录上下文；未成功 yield 时 fail closed。 | `platform/executionContext.ts`、preload 的 foreground/capture 合同。 |
 | `src/renderer/test/executor.test.ts` | 跨大量旧节点验证真实 feature bridge、变量/分支/浏览器预览及 camera/system/web/window 等副作用；缺桥或未知节点必须失败，不能模拟成功。 | `store/executor.ts` 的兼容解释器边界。 |
 | `src/renderer/test/flowFragmentComposer.test.tsx` | Esc 只关闭 composer；应用片段后按当前 canvas viewport 居中。 | `FlowFragmentComposer.tsx`、store 的一次性 fragment apply。 |
 | `src/renderer/test/flowFragmentProposal.test.ts` | bounded deterministic catalog、稳定 fingerprint、陈旧/双目标拒绝、本地验证与单次 undo；opaque params、环、model 节点、断连图均拒绝。 | `utils/flowFragmentProposal.ts`、`store/index.ts`、`flowToArpGraph.ts`。 |
 | `src/renderer/test/flowNodeDrag.test.tsx` | 多选节点保持相对位置移动，并只形成一个 undo checkpoint。 | `Canvas/FlowNode.tsx`、`store/index.ts`。 |
-| `src/renderer/test/goalRunEntry.test.tsx` | 当前目标入口的大型行为规格：活动态、`replay=false`、failure/job owner；目标/线程必须先于 lease；lease 排序/竞争；无策略控件；IME；失败草稿恢复；部分导出确认；共享 composer；成功/回复/失败/中断/长内容。 | `PlatformWorkbench.tsx`、`useControlPlane.ts`、`client.ts`、`taskOutcome.ts`；当前产品最关键 Renderer 回归集。 |
+| `src/renderer/test/goalRunEntry.test.tsx` | 当前目标入口的大型行为规格：活动态、`replay=false`、failure/job owner；目标/线程请求；无策略控件；IME；失败草稿恢复；部分导出确认；共享 composer；成功/回复/失败/中断/长内容。 | `PlatformWorkbench.tsx`、`useControlPlane.ts`、`client.ts`、`taskOutcome.ts`；当前产品最关键 Renderer 回归集。 |
 | `src/renderer/test/interactionRuntimeView.test.tsx` | 渲染 target/region/turn/actions/verification/wait/failure；等待参与者；从 stages/events 推导；只认最后已验证 mutation；不得编造 session；合并 audit 数据并规范化失败。 | `PlatformWorkbench.tsx` 的 interaction runtime 与审计投影。 |
 | `src/renderer/test/macroConverter.test.ts` | 空宏、click、事件间 wait、特殊键/字符键、混合事件以及边顺序。 | `utils/macroConverter.ts`。 |
 | `src/renderer/test/macroPaths.test.ts` | 允许合法宏文件路径，拒绝目录穿越和绝对路径。 | `main/macroPaths.ts` 与 preload/IPC 的文件边界。 |
 | `src/renderer/test/nodeDefinitions.test.ts` | 所有 definition/category/default type/port 完整且互相一致。 | `utils/nodeDefinitions.ts`、`renderer/types/index.ts`。 |
 | `src/renderer/test/nodeLibraryCapabilities.test.tsx` | 区分“本地可编辑且离线可编译”与“runtime 暴露能力/需要模型”，避免 capability 列表反向扩张编辑器目录。 | `NodeLibrary.tsx`、`flowToArpGraph.ts`。 |
-| `src/renderer/test/platformContracts.test.ts` | 大型跨边界契约集：client URL/route/token/capture/managed wait/WS reconnect、Automation IR、job lifecycle/status；20 个正式 runnable 节点不输出 legacy，而不支持的参数/节点明确投影为 `legacy_flow` 并由验证 fail closed；另覆盖 native 参数、证据、retry/delay/clipboard/region/replay/shell/controller batch/mouse/key/window wait 与别名。 | `platform/client.ts`、`contracts.ts`、`flowToArpGraph.ts`、`automationIR.ts`、主进程 API 合同。 |
+| `src/renderer/test/platformContracts.test.ts` | 大型跨边界契约集：client URL/route/token/managed wait/WS reconnect、Automation IR、job lifecycle/status；20 个正式 runnable 节点不输出 legacy，而不支持的参数/节点明确投影为 `legacy_flow` 并由验证 fail closed；另覆盖 native 参数、证据、retry/delay/clipboard/region/replay/shell/controller batch/mouse/key/window wait 与别名。 | `platform/client.ts`、`contracts.ts`、`flowToArpGraph.ts`、`automationIR.ts`、主进程 API 合同。 |
 | `src/renderer/test/propertyPanelHistory.test.tsx` | screenshot 框选一次 undo/取消不变、image preview capture、blur checkpoint、坏 JSON 阻止保存/替换、replay target draft 提交、结构化 evidence 保真。 | `PropertyPanel.tsx`、`ArpNodeParams.tsx`、`ScreenshotParams.tsx`、`editorDrafts.ts`、store history。 |
 | `src/renderer/test/pseudoParser.test.ts` | 中英文 click/type/key/wait/screenshot/loop/if/swipe/image/click_text/popup/launch/focus、混合指令、边和注释。 | `utils/pseudoParser.ts` 的兼容 DSL 解析。 |
 | `src/renderer/test/runsView.test.tsx` | 不完整 legacy intent 也能稳健渲染；选中详情；恢复 stage/capability/completion audit。 | `PlatformWorkbench.tsx` 的 RunsView 与 `contracts.ts`。 |
@@ -448,9 +426,9 @@ CLAUDE.md 明令不得接回。
 
 | 生产区域 | 直接或最接近的自动测试 | 当前未被这些测试证明的部分 |
 | --- | --- | --- |
-| 当前目标入口、lease、会话与终态 | `goalRunEntry`、`executionContext`、`interactionRuntimeView`、`taskbarNotification`、`platformContracts` | Electron 主进程 + Python + 真桌面的完整外部结果仍必须由可见 E2E 证明。 |
+| 当前目标入口、会话与终态 | `goalRunEntry`、`interactionRuntimeView`、`taskbarNotification`、`platformContracts` | Electron 主进程 + Python + 真桌面的完整外部结果仍必须由可见 E2E 证明。 |
 | Studio IR/compiler/store | `automationIR`、`platformContracts`、`store`、`canvasControlsNodeBoundary`、`flowFragment*`、`propertyPanelHistory` | 每个参数表单的视觉布局与所有 20 节点在真实桌面上的物理效果未逐个由 Vitest 证明。 |
-| 主进程托管与安全边界 | `winpilotServer`、`macroPaths`、`executionContext`、`platformContracts` | `main.ts` 的完整 IPC 生命周期、窗口/托盘/快捷键、真实 PowerShell 截图没有独立细粒度单测。 |
+| 主进程托管与窗口边界 | `winpilotServer`、`macroPaths`、`platformContracts` | `main.ts` 的完整 IPC 生命周期、窗口/托盘/快捷键、真实 PowerShell 截图没有独立细粒度单测。 |
 | 旧 Flow 兼容层 | `executor`、`pseudoParser`、`textGenerator`、`macroConverter`、template 两组测试 | 这些通过不表示它们属于当前产品 fallback；它们仍是显式兼容/开发能力。 |
 | CLI | 主要由 TypeScript 构建以及 parser/compiler 的间接测试约束 | `src/cli/**` 没有同目录直接测试；真实 socket/API 交互需单独集成验证。 |
 | 视觉与响应式 | `appErrorBoundary`、`studioResponsive`、`visualInteractionTarget` 及 React 测试 | CSS 像素级结果、透明窗口、焦点让渡、OS 层通知只能靠可见 Electron E2E/人工外部 oracle。 |

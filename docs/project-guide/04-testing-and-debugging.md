@@ -22,7 +22,7 @@
 | 组件测试 | React Testing Library、FastAPI TestClient | UI状态、HTTP协议、序列化 | Electron前台与Windows输入 |
 | Runtime集成 | 直接 `/api/v2/arp/runs` 或构造Runtime | owner协作、事件、evidence、回执 | 用户通过可见客户端提交 |
 | Controller靶场 | 真实受控窗口 + RawDevice | 坐标、点击、拖拽、按住、物理事件 | 未知应用语义泛化 |
-| 可见客户端受控E2E | 真实 Electron + 随机网页/Tk oracle | 用户入口、lease、视觉闭环、外部状态 | 消费软件长任务成功率 |
+| 可见客户端受控E2E | 真实 Electron + 随机网页/Tk oracle | 用户入口、首次完整桌面帧、视觉闭环、外部状态 | 消费软件长任务成功率 |
 | 可见客户端真实应用E2E | Electron + Calculator/Notepad/QQ等 | 当前机器/版本的端到端结果 | 跨机器统计泛化 |
 
 只有最后两层能回答用户最关心的“真实端到端任务是否完成”。即使最后一层通过一次，也只能证明该样本，不是通用成功率。
@@ -31,7 +31,7 @@
 
 ```mermaid
 flowchart TD
-  Done["Runtime status=done/reply/verified"] --> Trace{"trace identity完整?"}
+  Done["Runtime status=done"] --> Trace{"trace identity完整?"}
   Trace -->|否| Ungrounded["ungrounded / failed"]
   Trace -->|是| Physical{"任务要求GUI时有matching physical_attempt/receipt?"}
   Physical -->|否| WrongMedium["失败：执行介质不满足"]
@@ -97,10 +97,10 @@ git diff --check
 2. 保持客户端可见；用操作系统键盘向可见输入框输入完整原始 goal；
 3. UIA只能定位控件和只读核对，不可用 ValuePattern/Invoke替代被测输入或发送；
 4. 用真实鼠标点击可见“发送消息”；
-5. 绑定这次点击产生的准确 thread/turn/run/lease/trace；
-6. 需要桌面时证明先 yield、后 capture、再 bind，首帧和物理动作晚于bind；
+5. 绑定这次点击产生的准确 thread/turn/run/trace；
+6. 证明第一次模型调用已带当前 `full_desktop` JPEG，任何物理动作引用该权威帧；
 7. 被测动作由当前产品 Runtime执行，不用shell、DOM、DevTools、UIA写入或测试专属宏代替；
-8. 保存提交前、handoff后、动作证据和终态；
+8. 保存提交前、首次视觉调用、动作证据和终态；
 9. 用目标外部 oracle读取最终结果；
 10. 在 harness恢复前先记录产品自己的 terminal窗口状态；
 11. 只清理本次启动且身份已核验的进程/文件。
@@ -118,7 +118,7 @@ run_client_case(case):
   click_send_with_real_mouse()
 
   run = wait_for_new_exact_run()
-  collect(run admission, lease, frame, decisions, attempts, receipts)
+  collect(run admission, first frame, decisions, attempts, receipts)
   terminal = wait_for_terminal_or_timeout()
 
   product_window_state = read_before_harness_restore()
@@ -240,7 +240,7 @@ flowchart LR
 | physical正确但receipt未完成 | RawDevice/OS | foreground、hit-test、SendInput backend、权限、取消 | 让模型重复点击 |
 | receipt完成但外部状态错误 | 应用交互或模型语义 | 点位是否本就错、控件状态、焦点、post frame | 用像素变化宣布完成 |
 | 外部目标已成立但run不停 | 模型停止/claim | 当前帧、上下文、模型终止选择 | 生产答案探测器/第二verifier |
-| run终态正确但Electron未恢复 | 产品生命周期 | matching run/lease、WS/HTTP竞态、taskbar通知 | harness先恢复再算通过 |
+| run终态正确但Electron隐藏、最小化或抢前台 | 产品生命周期 | matching run、WS/HTTP竞态、taskbar通知 | harness先恢复再算通过 |
 
 ### 10.2 每个动作的核对表
 
@@ -341,7 +341,7 @@ for provider in [current MiMo, candidate]:
 | overrun rate | 外部已成立但继续动作/超时的比例 |
 | invalid proposal rate | schema/未批准工具失败比例 |
 | infrastructure invalid rate | target、frame、transport或测试干扰导致不可计样本 |
-| p50/p95 latency | 初始reply/每视觉turn/整任务 |
+| p50/p95 latency | 第一次模型调用/每视觉turn/整任务 |
 | token/cache usage | provider真实返回的usage，不推测 |
 
 按seed与case保留明细，不能用平均分隐藏某一任务族完全退化。
@@ -389,11 +389,11 @@ for provider in [current MiMo, candidate]:
 | 改动范围 | 最小必要检查 |
 | --- | --- |
 | 文档/生成器 | py_compile、生成器 `--check`、链接/覆盖、`git diff --check` |
-| Renderer纯UI | 相关Vitest + typecheck + build；若改变真实入口/lease/终态则可见Electron E2E |
+| Renderer纯UI | 相关Vitest + typecheck + build；若改变真实入口/首次桌面帧/终态则可见Electron E2E |
 | FastAPI合同 | 相关Python测试 + Renderer contract测试 |
 | 模型adapter | provider protocol/model runtime测试 + 固定真实credential smoke |
 | Frame/坐标/Adapter/RawDevice | 单元/集成 + 可见Electron受控矩阵至少两个动作族 |
-| Goal/Thread/lease | API测试 + chat→GUI→chat可见客户端生命周期 |
+| Goal/Thread/首次桌面帧 | API测试 + chat→GUI→chat可见客户端生命周期 |
 | Studio节点/replay | validator/Runtime测试 + 可见Studio零模型run + 独立DUT oracle |
 | 生产prompt/tool surface | 全套相关回归 + 随机跨任务E2E；一般应先证明结构必要性 |
 
@@ -406,7 +406,7 @@ Case/seed:
 源码SHA与本地dirty状态:
 Electron/Python PID、HWND、source stamp:
 原始goal读回:
-run/thread/turn/lease/target IDs:
+run/thread/turn/target/frame IDs:
 模型/provider/protocol/temperature/budget:
 
 每一Turn:
@@ -420,7 +420,7 @@ run/thread/turn/lease/target IDs:
 Terminal:
   Runtime/ARP状态
   model claim/result
-  Electron handoff恢复状态
+  Electron 可见性、最小化与前台状态
   external oracle expected/actual
 
 First divergence:

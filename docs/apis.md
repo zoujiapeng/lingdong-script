@@ -50,14 +50,11 @@ Electron 和 Renderer 会阻止源码漂移后的新任务。代码更新后必�
 | GET | `/api/v2/platform` | 原生工作台聚合视图 |
 | POST | `/api/v2/goals/runs` | 唯一产品自然语言 goal 入口 |
 | GET | `/api/v2/threads`、`/api/v2/threads/{thread_id}` | 有界 Thread/Turn 投影 |
-| POST | `/api/v2/goals/runs/{run_id}/desktop-lease` | Electron 交付精确桌面 lease |
-| POST | `/api/v2/goals/runs/{run_id}/desktop-lease/fail` | 明确关闭未交付 lease |
 | GET | `/api/v2/runs`、`/api/v2/runs/current`、`/api/v2/runs/{run_id}` | run 列表、当前 run 与详情 |
 | POST | `/api/v2/runs/{run_id}/cancel`、`pause`、`resume` | 精确 run 控制 |
 | GET | `/api/v2/runs/{run_id}/artifacts/{artifact_id}` | 读取该 run 的受管理工件 |
 | GET | `/api/v2/jobs`、`/api/v2/jobs/{job_id}` | RuntimeJob 列表与详情 |
 | POST | `/api/v2/jobs/{job_id}/cancel` | 精确取消 RuntimeJob |
-| GET | `/api/v2/desktop-context` | 当前桌面交接上下文 |
 | POST | `/api/v2/arp/validate`、`/api/v2/arp/runs` | Studio/兼容显式 ARP 图校验与执行 |
 | GET/POST | `/api/v2/arp/runs/{run_id}`、`.../cancel` | ARP 快照与取消 |
 | POST | `/api/v2/automation-ir/validate`、`/api/v2/automation-ir/runs` | Automation IR 校验与执行 |
@@ -82,8 +79,9 @@ Electron 和 Renderer 会阻止源码漂移后的新任务。代码更新后必�
 
 ### 运行语义
 
-- `/api/v2/goals/runs` 只接收原始 goal 和可选 Thread/交接上下文。服务端构造唯一 vNext
-  产品图；失败时不回退 AgentRunner、FlowScript 或客户端图。
+- `/api/v2/goals/runs` 只接收原始 goal 和可选 `thread_id`。服务端构造唯一 vNext
+  产品图、捕获完整真实桌面并建立 live session；失败时不回退 AgentRunner、FlowScript
+  或客户端图。
 - `/api/v2/arp/runs` 与 Automation IR 是 Studio/兼容入口。`ACTION_BATCH` 当前在 run 内复用
   `FastGuiController` 并直连 canonical action；不再创建 `ToolSession`。
 - Desktop Action Queue 对真实鼠标键盘保持全局 `physical` 单写；取消、异常和终态必须清理
@@ -107,7 +105,7 @@ Electron 和 Renderer 会阻止源码漂移后的新任务。代码更新后必�
 当前 IPC 直接实现在 `src/main/main.ts` / `src/main/preload.ts`，不再经过已删除的
 `python -m agent` 子进程。主要分组：
 
-- 窗口最小化/最大化/关闭、桌面 handoff prepare/bind/release；
+- 窗口最小化/最大化/关闭；
 - 文件打开/保存/读写；
 - 托管 WinPilot URL、连接状态、启动与重启；
 - 旧 engine、截图、区域选择、OCR、wheel select、DSL、feature、宏；
@@ -120,4 +118,4 @@ Electron 和 Renderer 会阻止源码漂移后的新任务。代码更新后必�
 当前仓库只保留 Electron `:7880/mcp` 流程编辑控制面。WinPilot Streamable HTTP MCP、
 `winpilot/integrations/chatgpt_mcp.py`、`python/lobster_mcp/` 和 `src/ai-interface/` 已删除。
 产品 Actor 的 connector 工具由 `ConnectorGateway` 按显式配置访问外部 MCP；这不是一个本地
-WinPilot MCP server，也不能绕过同一 Actor 的选择与只读边界。
+WinPilot MCP server，也不能绕过同一 Actor 的选择与 descriptor/参数边界。

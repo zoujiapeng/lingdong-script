@@ -91,7 +91,6 @@ export interface ElectronAPI {
     body: string,
     kind?: 'success' | 'error' | 'info',
     runId?: string,
-    releaseHandoff?: boolean,
   ) => Promise<boolean>;
 
   // WinPilot authenticated control-plane connection
@@ -104,14 +103,6 @@ export interface ElectronAPI {
   minimizeWindow: () => Promise<boolean>;
   toggleMaximizeWindow: () => Promise<boolean>;
   closeWindow: () => Promise<boolean>;
-  prepareDesktopHandoff: () => Promise<{
-    yielded: boolean;
-    control_surface_pid: number;
-    prepared_at: number;
-    reason?: string;
-  }>;
-  bindDesktopHandoff: (runId: string) => Promise<boolean>;
-  releaseDesktopHandoff: () => Promise<boolean>;
 
 }
 

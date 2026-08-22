@@ -3,13 +3,11 @@ import type {
   ArpExecutionSnapshot,
   ArpGraph,
   CurrentRunResponse,
-  ClientExecutionContext,
   GraphValidation,
   GoalRunStart,
   PlatformOverview,
   RunProjection,
   RuntimeEvent,
-  DesktopTargetContext,
 } from './contracts';
 import type { FlowFragmentProposal, FlowFragmentRequestContext } from '../utils/flowFragmentProposal';
 import type { AutomationIR } from '../utils/automationIR';
@@ -177,15 +175,6 @@ export class ControlPlaneClient {
 
   currentRun(): Promise<CurrentRunResponse> {
     return this.request('api/v2/runs/current');
-  }
-
-  async captureDesktopContext(excludeProcessId = 0): Promise<DesktopTargetContext> {
-    const response = await this.request<{ ok: boolean; target: DesktopTargetContext }>(
-      `api/v2/desktop-context?exclude_process_id=${Math.max(0, Math.trunc(excludeProcessId))}`,
-      undefined,
-      15_000,
-    );
-    return response.target;
   }
 
   run(runId: string): Promise<CurrentRunResponse> {
@@ -421,34 +410,6 @@ export class ControlPlaneClient {
       if (job.status === 'canceled') throw new Error('已取消流程片段生成。');
       await new Promise((resolve) => setTimeout(resolve, 120));
     }
-  }
-
-  bindDesktopLease(
-    runId: string,
-    leaseId: string,
-    executionContext: ClientExecutionContext,
-  ): Promise<Record<string, unknown>> {
-    return this.request(`api/v2/goals/runs/${encodeURIComponent(runId)}/desktop-lease`, {
-      method: 'POST',
-      body: JSON.stringify({
-        lease_id: leaseId,
-        execution_context: executionContext,
-      }),
-    });
-  }
-
-  failDesktopLease(
-    runId: string,
-    leaseId: string,
-    reason: string,
-  ): Promise<Record<string, unknown>> {
-    return this.request(`api/v2/goals/runs/${encodeURIComponent(runId)}/desktop-lease/fail`, {
-      method: 'POST',
-      body: JSON.stringify({
-        lease_id: leaseId,
-        reason,
-      }),
-    });
   }
 
   async startAutomation(

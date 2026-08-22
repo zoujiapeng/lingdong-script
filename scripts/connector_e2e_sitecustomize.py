@@ -59,8 +59,8 @@ def _install() -> None:
     from winpilot.vnext.model_roles import visual_actor as actor_module
 
     original_build = live_module._build_actor_resources
-    original_begin_turn = actor_module.LiveVisualActor.begin_turn
-    original_bounded_messages = actor_module._bounded_thread_messages
+    original_propose = actor_module.LiveVisualActor.propose
+    original_thread_messages = actor_module._thread_messages
     original_record = actor_module.LiveVisualActor._record_response
     original_call = gateway_module.ConnectorGateway.call
     original_arguments = gateway_module._arguments
@@ -76,18 +76,13 @@ def _install() -> None:
             connector._connector_e2e_run_id = run_id
         return prepared
 
-    def begin_turn(
-        self: Any,
-        goal: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
+    def propose(self: Any, *args: Any, **kwargs: Any) -> Any:
         previous = getattr(probe_context, "history_run_id", None)
         probe_context.history_run_id = str(
             getattr(self, "_connector_e2e_run_id", "") or ""
         )
         try:
-            return original_begin_turn(self, goal, *args, **kwargs)
+            return original_propose(self, *args, **kwargs)
         finally:
             if previous is None:
                 try:
@@ -97,8 +92,8 @@ def _install() -> None:
             else:
                 probe_context.history_run_id = previous
 
-    def bounded_thread_messages(history: Any, goal: str) -> Any:
-        messages = original_bounded_messages(history, goal)
+    def thread_messages(history: Any, goal: str) -> Any:
+        messages = original_thread_messages(history, goal)
         run_id = str(getattr(probe_context, "history_run_id", "") or "")
         if run_id:
             projection = [
@@ -247,8 +242,8 @@ def _install() -> None:
             probe_context.capture_gateway_arguments = previous_capture
 
     live_module._build_actor_resources = build_actor_resources
-    actor_module.LiveVisualActor.begin_turn = begin_turn
-    actor_module._bounded_thread_messages = bounded_thread_messages
+    actor_module.LiveVisualActor.propose = propose
+    actor_module._thread_messages = thread_messages
     actor_module.LiveVisualActor._record_response = record_response
     gateway_module._arguments = capture_arguments
     gateway_module.ConnectorGateway.call = call_connector

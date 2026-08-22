@@ -188,41 +188,6 @@ def test_target_focus_preserves_bound_geometry_unless_minimized(monkeypatch):
     assert restore_calls == [(hwnd, harness.win32con.SW_RESTORE)]
 
 
-def test_target_focus_waits_for_electron_desktop_lease_minimize(monkeypatch):
-    harness = _load_harness()
-    electron_hwnd = 711
-    target_hwnd = 4242
-    minimize_checks = 0
-    focus_calls: list[int] = []
-
-    def is_iconic(hwnd: int) -> bool:
-        nonlocal minimize_checks
-        assert hwnd == electron_hwnd
-        minimize_checks += 1
-        return minimize_checks >= 3
-
-    def focus(hwnd: int) -> dict[str, object]:
-        assert minimize_checks >= 3
-        focus_calls.append(hwnd)
-        return {"target_hwnd": hwnd, "focused": True}
-
-    monkeypatch.setattr(harness.win32gui, "IsIconic", is_iconic)
-    monkeypatch.setattr(harness, "_focus_window", focus)
-    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
-
-    evidence = harness._focus_target_after_desktop_yield(
-        electron_hwnd,
-        target_hwnd,
-        timeout=1.0,
-        poll_interval=0.0,
-    )
-
-    assert minimize_checks == 3
-    assert focus_calls == [target_hwnd]
-    assert evidence["electron_hwnd"] == electron_hwnd
-    assert evidence["electron_minimized_observed"] is True
-
-
 def test_external_verdict_requires_precise_click_geometry_and_no_wrong_click():
     harness = _load_harness()
     state = _state(

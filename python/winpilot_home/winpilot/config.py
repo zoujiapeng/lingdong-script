@@ -63,7 +63,6 @@ _DEFAULTS: dict[str, Any] = {
     "agent": {
         "dry_run": False,
         "experience_memory": True,
-        "shell_enabled": True,
     },
     "controller": {
         # Use provider-native reasoning for native visual decisions on known

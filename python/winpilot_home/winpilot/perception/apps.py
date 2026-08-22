@@ -694,26 +694,53 @@ def _existing_window_outcome(
     if not candidates:
         return None
 
-    def rank(hwnd: int) -> tuple[bool, bool, bool]:
+    def rank(hwnd: int) -> tuple[bool, bool, bool, bool]:
         try:
             exstyle = int(
                 win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
             )
         except Exception:
             exstyle = 0
-        auxiliary = bool(
+        try:
+            owner = int(
+                win32gui.GetWindow(
+                    hwnd,
+                    getattr(win32con, "GW_OWNER", 4),
+                )
+                or 0
+            )
+        except Exception:
+            owner = 0
+        try:
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            has_surface = right > left and bottom > top
+        except Exception:
+            has_surface = False
+        try:
+            has_title = bool(str(win32gui.GetWindowText(hwnd) or "").strip())
+        except Exception:
+            has_title = False
+        tool_window = bool(
             exstyle & getattr(win32con, "WS_EX_TOOLWINDOW", 0x80)
+        )
+        app_window = bool(
+            exstyle & getattr(win32con, "WS_EX_APPWINDOW", 0x40000)
+        )
+        auxiliary = (
+            tool_window
+            or (bool(owner) and not app_window)
+            or not has_surface
         )
         is_hidden = hwnd not in visible_set
         is_topmost = bool(
             is_hidden
             and exstyle & getattr(win32con, "WS_EX_TOPMOST", 0x8)
         )
-        return auxiliary, is_hidden, is_topmost
+        return auxiliary, not has_title, is_hidden, is_topmost
 
-    # A detached palette can remain visible while its main window is minimized.
-    # Prefer the ordinary top-level window, then visibility; hidden topmost
-    # compositor surfaces remain a last fallback.  Stable sorting preserves
+    # A compositor surface or detached palette can remain visible while its
+    # titled application window is minimized. Prefer ordinary, usable top-level
+    # windows, then titled ones, before visibility. Stable sorting preserves
     # EnumWindows z-order inside each mechanical class.
     candidates.sort(key=rank)
     candidate_count = len(candidates)
@@ -928,7 +955,13 @@ def _wait_for_resolved_window(entry: dict) -> dict | None:
         # for a genuinely visible top-level window.
         latest = _activate_resolved_entry(entry, visible_only=True)
         if latest is not None and latest.get("activated_hwnd"):
-            return latest
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining:
+                # A launcher splash can yield a real window before the final
+                # app finishes taking focus. Spend only the launch budget we
+                # already promised, then activate its best application window.
+                time.sleep(remaining)
+            return _activate_resolved_entry(entry, visible_only=False) or latest
         time.sleep(0.1)
     return latest
 

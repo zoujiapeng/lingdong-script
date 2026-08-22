@@ -45,14 +45,11 @@ flowchart TD
     GA --> GRAPH["build_exact_live_vnext_graph<br/>start → full-goal → end"]
     GRAPH --> OUTER["ArpRunManager / ArpExecution<br/>外层生命周期"]
     OUTER --> PREP["_PreparedHandler"]
-    PREP --> FIRST["同一个 LiveVisualActor.begin_turn"]
-    FIRST -->|reply| REPLY["纯文本终态<br/>不造桌面证据"]
-    FIRST -->|search/call connector| FIRST
-    FIRST -->|observe_desktop| LEASE["DesktopLeaseSlot<br/>run_id + lease_id 精确交接"]
-    LEASE --> SESSION["_build_live_session"]
+    PREP --> TARGET["capture_desktop_workspace_context<br/>中性桌面锚点"]
+    TARGET --> SESSION["_build_live_session"]
     SESSION --> MR["MissionRuntime<br/>一回合一个决定"]
-    MR --> BROKER["CapabilityBroker<br/>只投影机械可用工具"]
-    BROKER --> ACTOR["LiveVisualActor.propose<br/>当前 JPEG + 有界状态"]
+    MR --> ACTOR["LiveVisualActor.propose<br/>原始 goal + history + 当前全桌面 JPEG"]
+    ACTOR -->|reply / connector / shell / GUI| MR
     ACTOR --> ENV["MissionRuntime单次 typed parse<br/>bind identity envelope"]
     ENV --> ADA["AtomicDesktopAdapter<br/>唯一坐标映射"]
     ADA --> Q["DesktopActionQueue<br/>全局单 writer"]
@@ -75,14 +72,12 @@ flowchart TD
 sequenceDiagram
     participant M as LiveVisualActor
     participant R as MissionRuntime
-    participant B as CapabilityBroker
     participant A as AtomicDesktopAdapter
     participant F as FrameAuthority
     participant Q as DesktopActionQueue
     participant D as RawDeviceExecutor
     participant O as Windows / App
     M->>R: raw proposal(image_x/image_y/...)
-    R->>B: project(current screen/pointer state)
     R->>R: bind_actor_decision(identity only)
     R->>A: execute(envelope)
     A->>F: run_if_current(envelope)
@@ -94,7 +89,7 @@ sequenceDiagram
     D-->>A: completed / not-started / unknown
     A->>F: 捕获并提交下一张全桌面帧
     A-->>R: ControllerTransition
-    R->>R: MissionEvent；trace旁路诊断
+    R->>R: 更新 MissionState.last_transition；trace旁路诊断
 ```
 
 这里故意没有 OCR snapping、控件中心吸附、全局 offset 或答案修正。模型参数、canonical
@@ -166,48 +161,45 @@ function start_goal_run(goal, optional_thread_id):
     return run_id + thread_id + turn_id + admission audit
 ```
 
-### 3.2 同一个 Actor 决定是否需要桌面
+### 3.2 同一个 Actor 的第一次调用
 
 ```text
-actor = 创建一次受预算约束的 LiveVisualActor
-first = actor.begin_turn(original_goal, successful_history)
+target = capture_desktop_workspace_context()
+actor = 创建一次受预算约束且带 successful_history 的 LiveVisualActor
+session = _build_live_session(target, actor, original_goal)
+frame = 捕获当前完整真实桌面 JPEG
+decision = actor.propose(original_goal, successful_history, frame, all_tools)
 
-if first 是纯文本 reply:
-    返回原始文本；不创建 target/frame/physical evidence
-else if actor 调用只读 connector:
-    把不可信 connector result 返回给同一个 actor，继续决定
-else if actor 调用 observe_desktop:
-    创建 run-bound desktop lease
-    等 Electron 用相同 run_id + lease_id 交付精确窗口
-    构造 MissionRuntime 并进入视觉循环
-else:
-    fail closed
+if decision 是 connector/shell:
+    把工具 result 返回给同一个 actor，继续决定
+else if decision 是 GUI:
+    进入 AtomicDesktopAdapter，动作后提供新 frame
+else if decision 是 reply_to_user/blocked:
+    进入对应终态
 ```
 
 ### 3.3 MissionRuntime 的一回合
 
 ```text
-snapshot = state.observe(current_mission, turn_index)
-确认 snapshot 的 mission、run、frame、target 都仍匹配
-projection = CapabilityBroker.project(snapshot)
+snapshot = state.observe()
+确认 snapshot 的 mission、frame 与 pointer 状态可执行
 turn = project_actor_turn_input(goal, current JPEG, bounded state, recent exchange)
 raw = LiveVisualActor.propose(turn)
 proposal = MissionRuntime入口做唯一一次 typed parse(raw)
-再次确认权威状态没有在模型思考期间变化
-envelope = bind_actor_decision(proposal + 当前 frame/mission/Broker identities)
+envelope = bind_actor_decision(proposal + 当前 frame/mission/pointer identities)
 
 if proposal 是 desktop_action:
     调 AtomicDesktopAdapter 一次；绝不在这里重放输入
-    读取 Raw receipt，捕获下一张权威屏幕，归并 MissionEvent
-else if proposal 是 claim_obligation_done:
-    接受同一个 Actor 基于当前屏幕作出的自验，投影为 Mission 完成
+    读取 Raw receipt，捕获下一张权威屏幕，记录最近机械结果
+else if proposal 是 reply_to_user:
+    接受同一个 Actor 基于当前屏幕作出的结果，MissionState.complete()
 else if proposal 是 blocked:
     写入明确 blocker 并终止
 else:
     拒绝
 ```
 
-proposal 的必要结构在 MissionRuntime 入口解析一次；binder 不重放完整 Mission/Broker/schema，
+proposal 的必要结构在 MissionRuntime 入口解析一次；binder 不重放完整 Mission/schema，
 Atomic也不重复解析。语义 owner 始终是 Actor claim；E2E harness 可观察真实应用终态衡量
 完成率，但不进入生产 pass 路径。
 
@@ -285,10 +277,9 @@ finally:
   JSON 持久化计划任务的 CRUD、到期扫描和 started/skipped/finished 状态；依赖 `config`
   和 stdlib，由 `server` 以 `from . import scheduler` 动态消费，不属于 live vNext 选择链。
 - [`winpilot/server.py`](../../python/winpilot_home/winpilot/server.py) — **主链控制平面 + 兼容面**。
-  FastAPI/WS/static UI composition root。主入口 `start_goal_run`、
-  `bind_goal_desktop_lease`、`_start_arp_execution`；Studio 入口包含 ARP validate/run、
-  Automation IR、Task Contract compile；还保留 `/api/chat`、scheduler、recorder、MCP 等
-  Legacy API。直接依赖 `orchestrator.*`、`runtime_jobs`、`tasking`、`recorder`、`action`
+  FastAPI/WS composition root。主入口 `start_goal_run` 与 `_start_arp_execution`；Studio
+  入口包含 ARP、Automation IR、flow fragment、recorder/replay 与 memory 等兼容 API。
+  自然语言产品请求只经 `/api/v2/goals/runs`。直接依赖 `orchestrator.*`、`runtime_jobs`、`tasking`、`recorder`、`action`
   等；由 `serve.py`/Electron 启动并由 Renderer HTTP 调用。
 - [`winpilot/bin/ES-LICENSE.txt`](../../python/winpilot_home/winpilot/bin/ES-LICENSE.txt) —
   **第三方许可证资产**。随 bundled Everything `es.exe` 分发的 voidtools ES MIT 许可文本；运行时不解析它，
@@ -389,17 +380,16 @@ finally:
   `has_verified_evidence` 处理通用图 evidence gate；依赖 `contracts`，由 `ArpExecution` 调用。
 - [`orchestrator/goal_admission.py`](../../python/winpilot_home/winpilot/orchestrator/goal_admission.py) —
   **主链**。`GoalRunRequest` 只含 goal/optional thread；`admit_goal()` 固定选择
-  `LIVE_AGENT + VNEXT` 并写 no-legacy audit，`bind_client_execution_context` 在生成图后才
-  绑定桌面上下文。依赖 `contracts`，由 `server` 的 goal/lease API 调用。
+  `LIVE_AGENT + VNEXT` 并写 no-legacy audit。依赖 `contracts`，由 `server` 的 goal API 调用。
 - [`orchestrator/graph_compiler.py`](../../python/winpilot_home/winpilot/orchestrator/graph_compiler.py) —
   **Studio/ARP + Legacy**。`task_contract_to_arp()` 将 typed stages 投影为 `TASK_STAGE` 图，
   `legacy_goal_graph_task()` 识别旧单 AGENT_GOAL 图以重编译；依赖
   `contracts/tasking.contracts`，由 server 的 compile 与 Legacy ARP admission 调用。
 - [`orchestrator/live_agent.py`](../../python/winpilot_home/winpilot/orchestrator/live_agent.py) —
   **当前产品 composition root**。主要入口 `build_exact_live_vnext_graph`、
-  `prepare_live_vnext_execution`、`DesktopLeaseSlot`、`propose_live_flow_fragment`；内部
-  `_PreparedHandler` 先让同一 Actor reply/connector/observe，再按需构造
-  MissionRuntime、FrameAuthority、Broker、Atomic adapter、RawDevice 和 durable evidence。
+  `prepare_live_vnext_execution`、`propose_live_flow_fragment`；内部 `_PreparedHandler`
+  服务端建立桌面 workspace 后构造 MissionState、MissionRuntime、FrameAuthority、同一个
+  Visual Actor、Atomic adapter 与 RawDevice，第一次模型调用即收到当前完整桌面 JPEG。
   直接依赖 `action.executor/raw_device`、`modeling`、`connector_gateway`、`visual_runtime`、
   `vnext.*`、`orchestrator.runtime`；由 server 通过函数内 lazy import 调用。其内部依赖闭包
   禁止任何 `winpilot.agent` 边。
@@ -540,9 +530,9 @@ finally:
   **主链共享**。`require_text/positive_timeout/jpeg`、`strict_json_object`、`response_message` 等
   fail-closed parsing helper 和模型上限；无项目内依赖，被 visual actor 与门面调用。
 - [`vnext/model_roles/visual_actor.py`](../../python/winpilot_home/winpilot/vnext/model_roles/visual_actor.py) —
-  **主链语义 owner**。`LiveVisualActor.begin_turn` 在零系统提示文本首轮处理 reply、显式
-  connector search/call 或 `observe_desktop`；`propose` 在视觉轮把当前 JPEG、有界 mission
-  state、紧邻一笔原生 exchange 送给同一模型并解码一笔 raw proposal；无效辅助 task state
+  **主链语义 owner**。`LiveVisualActor.propose` 从第一次调用起把当前完整桌面 JPEG、原始
+  goal、有界 Thread history、mission state 与紧邻一笔原生 exchange 送给同一模型；
+  reply、显式 connector、shell 和 GUI 同轮可选，并解码一笔 raw proposal；无效辅助 task state
   只被丢弃。`FlowFragmentProposer` 是隔离、
   无桌面/Thread/connector/执行权的单次 Studio 辅助。依赖 `modeling`、`actor`、`common`、
   `runtime.contracts`；由 model_roles 门面进 live_agent。
@@ -617,7 +607,7 @@ finally:
   `removed` 状态供设置面板显示。
 - [`integrations/connector_gateway.py`](../../python/winpilot_home/winpilot/integrations/connector_gateway.py) —
   **主链 connector owner**。`ConnectorGateway.available/search/call` 做显式配置、目录有界化、
-  opaque ref、readOnly/destructive annotation、descriptor fingerprint 二次核对、result hash/
+  opaque ref、descriptor fingerprint 二次核对、参数/结果边界、result hash/
   receipt；依赖 `mcp_client`，由 `live_agent` 注入同一 `LiveVisualActor`。
 - [`integrations/mcp_client.py`](../../python/winpilot_home/winpilot/integrations/mcp_client.py) —
   **主链共享**。解析显式 MCP 配置，建立 stdio/streamable HTTP 连接，
@@ -869,7 +859,8 @@ Task Contract 编译器、StageRuntime、InteractionStageEngine、Subgoal 辅助
   共享**。run-scoped ArtifactStore（managed user artifact 与 transient observation），
   vNext 截图工件与 /api/v2/runs/{id}/artifacts/{aid} 使用。
 - [	asking/execution_context.py](../../python/winpilot_home/winpilot/tasking/execution_context.py) —
-  **vNext 共享**。capture_desktop_workspace_context 服务 /api/v2/desktop-context 租约交接。
+  **vNext 共享**。`capture_desktop_workspace_context` 在服务端建立中性的 Windows Shell
+  desktop workspace 锚点；不暴露产品 HTTP 路由，也不限制 full-desktop 点击目标。
 - [	asking/evidence.py](../../python/winpilot_home/winpilot/tasking/evidence.py) — **Studio 共享**。
   EvidenceRegistry 由 adapters _skill_handler 使用。
 
@@ -882,7 +873,7 @@ Task Contract 编译器、StageRuntime、InteractionStageEngine、Subgoal 辅助
 | Controller | `vnext.desktop_adapter.AtomicDesktopAdapter` | `fast.controller.FastGuiController` | live composition 直接构造 Atomic adapter；Fast 只在旧 tools/stage |
 | Evidence registry | `vnext.evidence.EvidenceRegistry` | `tasking.evidence.EvidenceRegistry` | 前者存 typed `mission.EvidenceRef`；后者存 Task Contract dict records |
 | Completion | vNext obligation + deterministic mission completion | `agent.done_verifier`、`tasking.completion` | 主链 claim 走 MissionRuntime；旧 done/stage END 走另两者 |
-| Connector | `integrations.ConnectorGateway` | `agent.mcp_tools` 直调 `mcp_client` | 同一 Live Actor 只看到 Gateway 的两个 generic read-only 工具 |
+| Connector | `integrations.ConnectorGateway` | `agent.mcp_tools` 直调 `mcp_client` | 同一 Live Actor 只看到 Gateway 的两个 generic 工具 |
 | Session | `orchestrator.AgentThreadStore` | `agent.session.SessionMemory`、Memory Graph | 主链只恢复 bounded successful native messages，不做长期摘要 |
 | Coordinates | `SubmittedImageCoordinateMapper` + `NormalizedFrameCoordinateMapper` | Legacy loop 也复用 mapper；Tasking visual geometry 是另一条旧线 | current action 只在 Atomic adapter 内映射一次 |
 
@@ -930,7 +921,7 @@ Compare-Object $documented $scope
 ## 7. 交接结论
 
 从 Python 真实依赖关系看，仓库并不是“所有高级模块都串在一次桌面任务上”。当前产品链已经
-收敛为：server-owned admission/Thread → 一个 LiveVisualActor → MissionRuntime → Broker →
+收敛为：server-owned admission/Thread → 一个 LiveVisualActor → MissionRuntime →
 AtomicDesktopAdapter → DesktopActionQueue → RawDevice → SendInput。proposal只在 MissionRuntime
 入口 typed parse 一次，binder只附加当前身份，Adapter只做一次映射；frame/receipt/trace帮助诊断而不作
 task-pass 门。其余大体积代码主要属于仍有消费者的 Studio/ARP、旧

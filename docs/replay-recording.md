@@ -51,7 +51,7 @@ python scripts/client_random_tasks_e2e_run.py --list
 
 - 新导出的 agent 脚本使用 `format: "wps/2"`；`wps/1` 只作为旧脚本兼容输入保留。
 - `export_script()` 对显式 vNext run 只读这一条 trace：按 `decision_id` 配对 `vnext_physical_attempt` 与 `vnext_raw_receipt`，核对 run scope、动作类型、`outcome=applied`、`input_completed=true` 和 `trace_integrity`。缺配对、scope/动作不一致、队列丢失、写入失败或不可表达的动作都会进入 partial reasons；不会回退到同一 trace 中的 legacy replay 字段。旧 journal、seal 与哈希链已经删除。
-- 只有真实发生且 Replayer 已知的普通 ARP 动作会进入脚本；观察、模型思考、只读 connector 查询、复合编排和校验事件不会变成重放动作。目标进程来自 physical attempt 的 `target_identity.executable_identity`；同一进程存在多个窗口时仍需用户在 Studio 检查，不能宣称窗口级精确重放。
+- 只有真实发生且 Replayer 已知的普通 ARP 动作会进入脚本；观察、模型思考、connector 调用、复合编排和校验事件不会变成重放动作。目标进程来自 physical attempt 的 `target_identity.executable_identity`；同一进程存在多个窗口时仍需用户在 Studio 检查，不能宣称窗口级精确重放。
 - 独立发生的重复动作按原顺序保留，不按内容去重；每一步可以保留自己的稳定目标窗口/进程。无法可靠恢复的动作、目标或 trace 完整性必须写进 `export_manifest.reasons`，导出标成 `partial`，不能静默丢失后仍称 complete。
 - `agent_plan` 只是当前 run 的工作状态投影，不会变成重放动作。旧 trace 中已经删除的公开计划/子目标事件也只按兼容元数据读取；导出的脚本只保存实际发生且可验证的动作语义。
 - 保存前会做结构校验：未知工具、缺少 click 目标、缺少 type_text 文本、无效 `draw_strokes` 笔画、无效 loop 类型等会被拒绝，避免“能保存但不能重放”。`ctrl.if` 必须带 `cond` 对象，确实无条件时显式写 `{"always": true}`；`ctrl.loop` 的 `count` / `max_iters` 必须是数字，`while` / `until` 必须带 `cond` 对象，避免空条件循环跑到上限才停。

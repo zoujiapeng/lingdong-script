@@ -9,14 +9,11 @@ from .common import (
 )
 from .visual_actor import (
     FlowFragmentProposer,
-    INITIAL_ACTOR_SYSTEM_CONTRACT,
     VISUAL_ACTOR_MODEL_ROLE,
     VISUAL_ACTOR_SYSTEM_CONTRACT,
     LiveVisualActor,
-    VisualActorTurnAdmission,
 )
 __all__ = [
-    "INITIAL_ACTOR_SYSTEM_CONTRACT",
     "VISUAL_ACTOR_MODEL_ROLE",
     "VISUAL_ACTOR_SYSTEM_CONTRACT",
     "MAX_LIVE_MODEL_JSON_RESPONSE_CHARS",
@@ -26,5 +23,4 @@ __all__ = [
     "FlowFragmentProposer",
     "LiveModelRoleError",
     "LiveVisualActor",
-    "VisualActorTurnAdmission",
 ]

@@ -55,15 +55,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   closeWindow: () =>
     ipcRenderer.invoke('window:close'),
 
-  // Desktop agents need the target application, not this control surface, to
-  // own the foreground when the first authoritative frame is captured.
-  prepareDesktopHandoff: () =>
-    ipcRenderer.invoke('window:prepare-desktop-handoff'),
-  bindDesktopHandoff: (runId: string) =>
-    ipcRenderer.invoke('window:bind-desktop-handoff', runId),
-  releaseDesktopHandoff: () =>
-    ipcRenderer.invoke('window:release-desktop-handoff'),
-
   // Screenshot capture
   captureScreenshot: () => ipcRenderer.invoke('screenshot:capture'),
   selectRegion: (options?: { includePreview?: boolean }) => ipcRenderer.invoke('screenshot:selectRegion', options),
@@ -153,13 +144,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     body: string,
     kind: 'success' | 'error' | 'info' = 'info',
     runId = '',
-    releaseHandoff = false,
   ) => ipcRenderer.invoke(
     'taskbar:notify',
     title,
     body,
     kind,
     runId,
-    releaseHandoff,
   ),
 });

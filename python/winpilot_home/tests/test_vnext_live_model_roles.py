@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,13 +19,13 @@ from winpilot.modeling import (
     create_openai_client,
 )
 from winpilot.vnext.actor import (
+    ACTOR_PROPOSAL_FORMAT,
     InvalidActorProposal,
     actor_proposal_to_json,
     parse_actor_proposal,
 )
 from winpilot.vnext.model_roles import (
     FlowFragmentProposer,
-    INITIAL_ACTOR_SYSTEM_CONTRACT,
     MAX_LIVE_MODEL_JSON_RESPONSE_CHARS,
     MAX_LIVE_MODEL_OUTPUT_TOKENS,
     MAX_LIVE_MODEL_TOTAL_TIMEOUT_S,
@@ -393,6 +394,10 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         model="vision-model",
         runtime=ModelCallRuntime(),
         on_attempt=actor_attempts.append,
+        history=(
+            {"role": "user", "content": "Earlier request"},
+            {"role": "assistant", "content": "Earlier answer"},
+        ),
     )
 
     decision = actor.propose(
@@ -420,11 +425,16 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     ]
 
     actor_request = clients[0].requests[0]
-    assert len(actor_request["messages"]) == 2
+    assert len(actor_request["messages"]) == 5
     assert (
         actor_request["messages"][0]["content"]
         == VISUAL_ACTOR_SYSTEM_CONTRACT
     )
+    assert actor_request["messages"][1:4] == [
+        {"role": "user", "content": "Earlier request"},
+        {"role": "assistant", "content": "Earlier answer"},
+        {"role": "user", "content": "Type the requested greeting"},
+    ]
     actor_contract = " ".join(VISUAL_ACTOR_SYSTEM_CONTRACT.split())
     assert len(actor_contract.split()) < 100
     assert "current JPEG" in actor_contract
@@ -432,7 +442,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "Chat and act naturally" in actor_contract
     assert "runtime does not classify or route" in actor_contract
     assert "goal complete with none remaining" in actor_contract
-    assert "call claim_obligation_done" in actor_contract
+    assert "call reply_to_user" in actor_contract
     assert "external condition no tool can change" in actor_contract
     assert "pointer_held persists" in actor_contract
     assert "only authoritative visual state" in actor_contract
@@ -451,7 +461,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         "scroll",
         "type_text",
         "press_key",
-        "claim_obligation_done",
+        "reply_to_user",
         "blocked",
     }
     descriptions = {
@@ -469,7 +479,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "volumedown" in descriptions["press_key"]
     assert "relative to the current system level" in descriptions["press_key"]
     assert "PrintScreen" not in descriptions["press_key"]
-    assert "without further mutation" in descriptions["claim_obligation_done"]
+    assert "Answer the user" in descriptions["reply_to_user"]
     assert "external blocker" in descriptions["blocked"]
     assert "response_format" not in actor_request
     strict_schemas = [
@@ -494,8 +504,8 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
             "uniqueItems",
         }.isdisjoint(_schema_keywords(schema))
 
-    assert actor_request["messages"][1]["content"][0]["type"] == "image_url"
-    actor_context = actor_request["messages"][1]["content"][1]["text"]
+    assert actor_request["messages"][4]["content"][0]["type"] == "image_url"
+    actor_context = actor_request["messages"][4]["content"][1]["text"]
     actor_context_value = json.loads(actor_context)
     assert actor_context_value["submitted_image_size"] == [640, 480]
     assert "submitted_size" not in actor_context_value
@@ -508,16 +518,41 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         "remaining_items": [],
     }
     assert "data:image/jpeg;base64," in (
-        actor_request["messages"][1]["content"][0]["image_url"]["url"]
+        actor_request["messages"][4]["content"][0]["image_url"]["url"]
     )
 
 
 def test_visual_actor_can_request_a_fresh_desktop_without_input() -> None:
+    class DetachedRunner:
+        def run(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"ok": True, "exit_code": 0, "stdout": "", "stderr": ""}
+
+        def run_detached(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "pid": 4242,
+                "status_path": "run/beacon.status.json",
+            }
+
     _, clients = _build_clients(
         [
             _tool_response(
+                name="run_detached",
+                arguments={
+                    "script": "blender beacon_scene.blend",
+                    "name": "beacon",
+                },
+                call_id="launch-beacon",
+            ),
+            _tool_response(
                 name="refresh_desktop",
                 arguments={"question": "Reconsider after repeated local results"},
+                call_id="refresh-after-launch",
+            ),
+            _tool_response(
+                name="refresh_desktop",
+                arguments={"question": "Is the launched window ready now?"},
+                call_id="refresh-loading-window",
             ),
             _tool_response(call_id="after-refresh"),
         ]
@@ -526,6 +561,7 @@ def test_visual_actor_can_request_a_fresh_desktop_without_input() -> None:
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
+        shell_runner=DetachedRunner(),
     )
     turn = _actor_turn()
     observe = ActorToolView(
@@ -555,9 +591,11 @@ def test_visual_actor_can_request_a_fresh_desktop_without_input() -> None:
         "image_region": None,
         "question": "Reconsider after repeated local results",
     }
-    assert clients[0].requests[0]["tools"][-1]["function"]["name"] == (
-        "refresh_desktop"
-    )
+    tool_names = {
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    }
+    assert {"refresh_desktop", "run_detached"} <= tool_names
 
     next_decision = actor.propose(
         replace(turn, tools=(*turn.tools, observe)),
@@ -566,13 +604,39 @@ def test_visual_actor_can_request_a_fresh_desktop_without_input() -> None:
         submitted_size=(640, 480),
     )
 
-    assert next_decision.proposal["action"] == "type_text"
-    next_messages = json.dumps(
-        clients[0].requests[1]["messages"],
-        ensure_ascii=False,
+    assert next_decision.proposal["kind"] == "observe"
+    final_decision = actor.propose(
+        replace(turn, tools=(*turn.tools, observe)),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
     )
-    assert "Reconsider after repeated local results" not in next_messages
-    assert "call-1-0" not in next_messages
+
+    assert final_decision.proposal["action"] == "type_text"
+    messages = clients[0].requests[3]["messages"]
+    next_messages = json.dumps(messages, ensure_ascii=False)
+    assert "launch-beacon-0" in next_messages
+    assert "blender beacon_scene.blend" in next_messages
+    assert "run/beacon.status.json" in next_messages
+    assert "refresh-after-launch-0" in next_messages
+    assert "Reconsider after repeated local results" in next_messages
+    assert "refresh-loading-window-0" in next_messages
+    assert "Is the launched window ready now?" in next_messages
+    observe_result = next(
+        json.loads(message["content"])
+        for message in messages
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == "refresh-after-launch-0"
+    )
+    assert observe_result == {"desktop_observation": "available"}
+    second_observe_result = next(
+        json.loads(message["content"])
+        for message in messages
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == "refresh-loading-window-0"
+    )
+    assert second_observe_result == {"desktop_observation": "available"}
+    assert next_messages.count(_JPEG_B64) == 1
 
 
 def test_visual_actor_defers_refresh_shape_to_the_single_runtime_parse() -> None:
@@ -607,455 +671,6 @@ def test_visual_actor_defers_refresh_shape_to_the_single_runtime_parse() -> None
 
     with pytest.raises(InvalidActorProposal, match="question"):
         parse_actor_proposal(decision.proposal)
-
-
-def test_initial_actor_turn_replies_with_native_history_and_short_system_contract() -> None:
-    reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "remembered-value",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients(reply)
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-    history = (
-        {"role": "user", "content": "Remember this value."},
-        {"role": "assistant", "content": "remembered-value"},
-    )
-
-    admission = actor.begin_turn(
-        "What was the value?",
-        history=history,
-    )
-
-    assert admission.kind == "reply"
-    assert admission.reply == "remembered-value"
-    request = clients[0].requests[0]
-    assert request["messages"] == [
-        {"role": "system", "content": INITIAL_ACTOR_SYSTEM_CONTRACT},
-        *history,
-        {"role": "user", "content": "What was the value?"},
-    ]
-    assert request["messages"][0]["role"] == "system"
-    initial_contract = " ".join(INITIAL_ACTOR_SYSTEM_CONTRACT.split())
-    assert len(initial_contract.split()) < 120
-    assert "live screen" in initial_contract
-    assert "interleave both freely" in initial_contract
-    assert "respond naturally while you work" in initial_contract
-    assert "Tool calls in one response run concurrently" in initial_contract
-    # The initial contract must not teach keyword routing: no verb list is
-    # mapped to observe_desktop.
-    assert "Call observe_desktop for any request" not in initial_contract
-    assert [tool["function"]["name"] for tool in request["tools"]] == [
-        "observe_desktop"
-    ]
-    assert request["tools"][0]["function"]["description"] == (
-        "Observe the desktop."
-    )
-    with pytest.raises(
-        LiveModelRoleError,
-        match="terminal direct reply",
-    ):
-        actor.propose(
-            _actor_turn(),
-            image_b64=_JPEG_B64,
-            image_media_type="image/jpeg",
-            submitted_size=(640, 480),
-        )
-
-
-def test_initial_observe_can_seed_remaining_work_for_first_visual_action() -> None:
-    observe = _tool_response(
-        name="observe_desktop",
-        arguments={
-            "task_state_update": {
-                "scratchpad": "Start with music",
-                "remaining_items": ["send music image", "build game"],
-            },
-        },
-        call_id="observe-with-plan",
-    )
-    first_action = _tool_response(
-        arguments={
-            "text": "hello",
-            "local_intent": "enter text",
-            "task_state_update": {"scratchpad": "Music phase active"},
-        },
-        call_id="first-action",
-    )
-    _, clients = _build_clients([observe, first_action])
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    admission = actor.begin_turn("Complete several dependent steps")
-    decision = actor.propose(
-        _actor_turn(),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    assert admission.kind == "desktop"
-    assert decision.task_state_update.scratchpad == "Music phase active"
-    assert decision.task_state_update.remaining_items == (
-        "send music image",
-        "build game",
-    )
-    observe_schema = clients[0].requests[0]["tools"][0]["function"][
-        "parameters"
-    ]
-    assert "task_state_update" in observe_schema["properties"]
-
-
-def test_malformed_initial_observe_state_does_not_delay_visual_action() -> None:
-    observe = _tool_response(
-        name="observe_desktop",
-        arguments={"task_state_update": {"scratchpad": 12345}},
-        call_id="observe-with-bad-state",
-    )
-    first_action = _tool_response(call_id="first-action")
-    _, clients = _build_clients([observe, first_action])
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    admission = actor.begin_turn("Open the requested app")
-    decision = actor.propose(
-        _actor_turn(),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    assert admission.kind == "desktop"
-    assert decision.proposal["kind"] == "desktop_action"
-    assert decision.proposal["action"] == "type_text"
-    assert len(clients[0].requests) == 2
-
-
-def test_pending_plan_is_consumed_after_one_visual_decision() -> None:
-    observe = _tool_response(
-        name="observe_desktop",
-        arguments={
-            "task_state_update": {
-                "scratchpad": "Initial phase",
-                "remaining_items": ["later work"],
-            },
-        },
-        call_id="observe-plan-once",
-    )
-    _, clients = _build_clients(
-        [
-            observe,
-            _tool_response(call_id="first-action"),
-            _tool_response(call_id="second-action"),
-        ]
-    )
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    actor.begin_turn("Complete dependent work")
-    first = actor.propose(
-        _actor_turn(),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-    second = actor.propose(
-        replace(
-            _actor_turn(),
-            task_state=ActorTaskState(
-                "Initial phase",
-                ("later work",),
-            ),
-            previous_action=ActorPreviousActionView(
-                action="type_text",
-                input_completed=True,
-                visible_effect="changed",
-            ),
-        ),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    assert first.task_state_update.remaining_items == ("later work",)
-    assert second.task_state_update == ActorTaskStateUpdate.from_dict(
-        {"scratchpad": None}
-    )
-
-
-def test_initial_observe_plan_survives_first_visual_update() -> None:
-    observe = _tool_response(
-        name="observe_desktop",
-        arguments={
-            "task_state_update": {
-                "scratchpad": "Inspect before acting",
-                "remaining_items": ["operate app", "send result"],
-            },
-        },
-        call_id="observe-with-plan",
-    )
-    first_action = _tool_response(
-        arguments={
-            "text": "hello",
-            "local_intent": "begin app work",
-            "task_state_update": {"scratchpad": "Operating the app"},
-        },
-        call_id="action-after-plan",
-    )
-    _, clients = _build_clients([observe, first_action])
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        shell_runner=_RecordingShellRunner(),
-    )
-
-    assert actor.begin_turn("Complete dependent work").kind == "desktop"
-    decision = actor.propose(
-        _actor_turn(),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    assert decision.task_state_update.scratchpad == "Operating the app"
-    assert decision.task_state_update.remaining_items == (
-        "operate app",
-        "send result",
-    )
-
-
-def test_terminal_update_can_clear_an_initial_pending_plan() -> None:
-    observe = _tool_response(
-        name="observe_desktop",
-        arguments={
-            "task_state_update": {
-                "remaining_items": ["inspect the visible result"],
-            },
-        },
-        call_id="observe-before-clear",
-    )
-    claim = _tool_response(
-        name="claim_obligation_done",
-        arguments={
-            "concise_claim": "the whole goal is visibly complete",
-            "task_state_update": {"remaining_items": []},
-        },
-        call_id="claim-after-clear",
-    )
-    _, clients = _build_clients([observe, claim])
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    actor.begin_turn("Inspect then finish")
-    decision = actor.propose(
-        _actor_turn(),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    assert decision.proposal["kind"] == "claim_obligation_done"
-    assert decision.task_state_update.remaining_items == ()
-
-
-def test_initial_actor_preserves_the_thread_owners_full_native_prefix() -> None:
-    reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "continued",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients(reply)
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-    history = tuple(
-        {
-            "role": "user" if index % 2 == 0 else "assistant",
-            "content": f"native-{index}-" + "x" * 1400,
-        }
-        for index in range(14)
-    )
-
-    admission = actor.begin_turn("continue", history=history)
-
-    assert admission.reply == "continued"
-    assert clients[0].requests[0]["messages"] == [
-        {"role": "system", "content": INITIAL_ACTOR_SYSTEM_CONTRACT},
-        *history,
-        {"role": "user", "content": "continue"},
-    ]
-
-
-def test_initial_observe_with_content_continues_on_the_same_actor() -> None:
-    observe = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "I will inspect the desktop.",
-                    "reasoning_content": "provider-native-reasoning",
-                    "tool_calls": [
-                        {
-                            "id": "observe-call",
-                            "type": "function",
-                            "function": {
-                                "name": "observe_desktop",
-                                "arguments": "{}",
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients(
-        [observe, _tool_response(call_id="visual-call")]
-    )
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    admission = actor.begin_turn(
-        "Complete the visible task",
-        history=(
-            {"role": "user", "content": "Earlier question"},
-            {"role": "assistant", "content": "Earlier answer"},
-        ),
-    )
-    decision = actor.propose(
-        _actor_turn(),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    assert admission.kind == "desktop"
-    assert admission.reply == ""
-    assert admission.narration == "I will inspect the desktop."
-    assert isinstance(decision, ActorTurnDecision)
-    assert len(clients[0].requests) == 2
-    visual_messages = clients[0].requests[1]["messages"]
-    assert visual_messages[0]["role"] == "system"
-    assert visual_messages[1:4] == [
-        {"role": "user", "content": "Earlier question"},
-        {"role": "assistant", "content": "Earlier answer"},
-        {"role": "user", "content": "Complete the visible task"},
-    ]
-    assert visual_messages[4]["content"] == "I will inspect the desktop."
-    assert visual_messages[4]["reasoning_content"] == (
-        "provider-native-reasoning"
-    )
-    assert visual_messages[5] == {
-        "role": "tool",
-        "tool_call_id": "observe-call",
-        "content": '{"desktop_observation":"available"}',
-    }
-    assert visual_messages[6]["content"][0]["type"] == "image_url"
-    assert visual_messages[6]["content"][1]["type"] == "text"
-
-
-def test_initial_actor_lazily_calls_a_read_only_connector_then_replies() -> None:
-    reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "The issue contains issue-value.",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients(
-        [
-            _connector_response(
-                "search_connector_tools",
-                {"query": "issue", "connector": "github"},
-                call_id="search-1",
-            ),
-            _connector_response(
-                "call_connector_tool",
-                {
-                    "ref": "connector-ref",
-                    "arguments_json": '{"number":7}',
-                },
-                call_id="call-1",
-            ),
-            reply,
-        ]
-    )
-    gateway = _RecordingConnectorGateway()
-    responses = []
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        connector_gateway=gateway,
-        on_response=responses.append,
-    )
-
-    admission = actor.begin_turn("Read issue 7 from GitHub")
-
-    assert admission.kind == "reply"
-    assert admission.reply == "The issue contains issue-value."
-    assert gateway.searches == [{"query": "issue", "connector": "github"}]
-    assert gateway.calls == [
-        {
-            "ref": "connector-ref",
-            "arguments_json": '{"number":7}',
-        }
-    ]
-    assert len(responses) == 3
-    assert len(clients[0].requests) == 3
-    assert [
-        tool["function"]["name"]
-        for tool in clients[0].requests[0]["tools"]
-    ] == [
-        "observe_desktop",
-        "search_connector_tools",
-        "call_connector_tool",
-    ]
-    assert [message["role"] for message in clients[0].requests[2]["messages"]] == [
-        "system",
-        "user",
-        "assistant",
-        "tool",
-        "assistant",
-        "tool",
-    ]
 
 
 def test_visual_actor_can_use_a_connector_before_one_gui_action() -> None:
@@ -1104,118 +719,13 @@ def test_visual_actor_can_use_a_connector_before_one_gui_action() -> None:
     assert [message["role"] for message in clients[0].requests[2]["messages"]] == [
         "system",
         "user",
+        "user",
         "assistant",
         "tool",
         "assistant",
         "tool",
     ]
     assert gateway.calls[0]["ref"] == "connector-ref"
-
-
-def test_last_allowed_model_call_keeps_available_connector_tools() -> None:
-    _, clients = _build_clients(
-        {
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": "budget-safe reply",
-                        "tool_calls": [],
-                    }
-                }
-            ]
-        }
-    )
-    gateway = _RecordingConnectorGateway()
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        connector_gateway=gateway,
-    )
-
-    admission = actor.begin_turn(
-        "Answer without another tool round",
-        _model_call_limit=1,
-    )
-
-    assert admission.reply == "budget-safe reply"
-    assert len(clients[0].requests) == 1
-    assert [
-        tool["function"]["name"]
-        for tool in clients[0].requests[0]["tools"]
-    ] == [
-        "observe_desktop",
-        "search_connector_tools",
-        "call_connector_tool",
-    ]
-    assert gateway.searches == []
-
-
-def test_initial_actor_turn_is_call_once_and_accepts_a_long_goal() -> None:
-    reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "ok",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients(reply)
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    assert actor.begin_turn("x" * 1024).reply == "ok"
-    with pytest.raises(LiveModelRoleError, match="call-once"):
-        actor.begin_turn("another turn")
-
-
-def test_initial_actor_turn_preserves_long_native_history() -> None:
-    reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "recent-context",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients(reply)
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-    history = tuple(
-        {
-            "role": "user" if index % 2 == 0 else "assistant",
-            "content": f"{index:02d}-" + ("x" * 1_997),
-        }
-        for index in range(12)
-    )
-
-    assert actor.begin_turn("recall the latest context", history=history).reply == (
-        "recent-context"
-    )
-
-    messages = clients[0].requests[0]["messages"]
-    assert messages[0] == {
-        "role": "system",
-        "content": INITIAL_ACTOR_SYSTEM_CONTRACT,
-    }
-    assert messages[1:-1] == list(history)
-    assert messages[-1] == {
-        "role": "user",
-        "content": "recall the latest context",
-    }
 
 
 def test_press_key_model_tool_maps_to_existing_hotkey_runtime_action() -> None:
@@ -1285,7 +795,7 @@ def test_previous_action_is_passed_without_runtime_strategy_hint(
     )
 
     context = json.loads(
-        clients[0].requests[0]["messages"][1]["content"][1]["text"]
+        clients[0].requests[0]["messages"][2]["content"][1]["text"]
     )
     assert context["previous_action"] == previous_action.to_dict()
     assert "scroll_guard" not in context
@@ -1315,7 +825,7 @@ def test_failed_physical_action_gets_one_actionable_model_hint() -> None:
     )
 
     context = json.loads(
-        clients[0].requests[0]["messages"][1]["content"][1]["text"]
+        clients[0].requests[0]["messages"][2]["content"][1]["text"]
     )
     assert context["previous_action"]["error_kind"] == (
         "physical_attempt_failed"
@@ -1325,7 +835,7 @@ def test_failed_physical_action_gets_one_actionable_model_hint() -> None:
     ]["next_step"]
 
 
-def test_consecutive_visual_calls_keep_only_the_latest_tool_exchange_text_only() -> None:
+def test_consecutive_visual_calls_keep_the_run_tool_history_text_only() -> None:
     _, clients = _build_clients([
         _tool_response(call_id="first"),
         _tool_response(call_id="second"),
@@ -1367,16 +877,16 @@ def test_consecutive_visual_calls_keep_only_the_latest_tool_exchange_text_only()
     )
     second_messages = clients[0].requests[1]["messages"]
     assert [message["role"] for message in second_messages] == [
-        "system", "user", "assistant", "tool", "user",
+        "system", "user", "user", "assistant", "tool", "user",
     ]
-    assert isinstance(second_messages[1]["content"], str)
-    assert second_messages[2]["tool_calls"][0]["id"] == "first-0"
+    assert isinstance(second_messages[2]["content"], str)
+    assert second_messages[3]["tool_calls"][0]["id"] == "first-0"
     assert json.loads(
-        second_messages[3]["content"]
+        second_messages[4]["content"]
     )["previous_action"] == completed.previous_action.to_dict()
-    context = json.loads(second_messages[4]["content"][1]["text"])
+    context = json.loads(second_messages[5]["content"][1]["text"])
     assert context["previous_action"] == completed.previous_action.to_dict()
-    assert second_messages[4]["content"][0]["image_url"]["url"] == (
+    assert second_messages[5]["content"][0]["image_url"]["url"] == (
         f"data:image/jpeg;base64,{_JPEG_B64}"
     )
     assert json.dumps(second_messages).count(_JPEG_B64) == 1
@@ -1390,7 +900,7 @@ def test_consecutive_visual_calls_keep_only_the_latest_tool_exchange_text_only()
     third_messages = clients[0].requests[2]["messages"]
     encoded = json.dumps(third_messages)
     assert "second-0" in encoded
-    assert "first-0" not in encoded
+    assert "first-0" in encoded
     assert encoded.count(_JPEG_B64) == 1
 
 
@@ -1448,10 +958,10 @@ def test_drag_retry_keeps_one_native_action_and_the_current_jpeg() -> None:
 
     messages = clients[0].requests[1]["messages"]
     assert [message["role"] for message in messages] == [
-        "system", "user", "assistant", "tool", "user",
+        "system", "user", "user", "assistant", "tool", "user",
     ]
-    assert isinstance(messages[1]["content"], str)
-    assert messages[2]["tool_calls"][0]["function"] == {
+    assert isinstance(messages[2]["content"], str)
+    assert messages[3]["tool_calls"][0]["function"] == {
         "name": "drag",
         "arguments": json.dumps(
             {"points": drag_arguments["points"]},
@@ -1459,10 +969,10 @@ def test_drag_retry_keeps_one_native_action_and_the_current_jpeg() -> None:
             separators=(",", ":"),
         ),
     }
-    assert json.loads(messages[3]["content"])["previous_action"] == (
+    assert json.loads(messages[4]["content"])["previous_action"] == (
         after_drag.previous_action.to_dict()
     )
-    assert messages[4]["content"][0]["image_url"]["url"] == (
+    assert messages[5]["content"][0]["image_url"]["url"] == (
         f"data:image/jpeg;base64,{_JPEG_B64}"
     )
 
@@ -1504,10 +1014,10 @@ def test_rejection_feedback_discards_the_unexecuted_native_action() -> None:
 
     messages = clients[0].requests[1]["messages"]
     assert [message["role"] for message in messages] == [
-        "system", "user", "user",
+        "system", "user", "user", "user",
     ]
     assert "rejected-0" not in json.dumps(messages)
-    assert "schema_mismatch" in messages[1]["content"]
+    assert "schema_mismatch" in messages[2]["content"]
 
 
 @pytest.mark.parametrize(
@@ -1814,7 +1324,7 @@ def test_actor_rejects_unknown_strict_schema_keywords_before_transport() -> None
     "name, arguments, expected",
     [
         (
-            "claim_obligation_done",
+            "reply_to_user",
             {"concise_claim": "The greeting is visibly present."},
             {
                 "format": "actor-proposal/0",
@@ -2119,233 +1629,6 @@ def test_actor_rejects_fragment_semantics_the_renderer_would_reject(
         )
 
 
-class _RecordingStatusProvider:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def resolve(self, name: str) -> dict[str, Any]:
-        self.calls.append(name)
-        if name == "get_agent_status":
-            return {"format": "agent-status/1", "model": "vision-model"}
-        if name == "get_memory_status":
-            return {
-                "format": "memory-status/1",
-                "long_term_experience_memory": "disabled",
-                "experience_policy": "disabled",
-            }
-        if name == "get_capabilities":
-            return {
-                "format": "capabilities/1",
-                "direct_reply": True,
-                "observe_desktop": True,
-            }
-        raise ValueError(name)
-
-
-def _status_response(
-    name: str,
-    *,
-    call_id: str,
-) -> dict[str, Any]:
-    return {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": "{}",
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-
-
-def test_status_tool_tolerates_surplus_fields_like_owned_tools() -> None:
-    reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "status read",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    status = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "status-surplus-1",
-                            "type": "function",
-                            "function": {
-                                "name": "get_memory_status",
-                                "arguments": (
-                                    '{"task_state_update": '
-                                    '{"scratchpad": "keep me"}}'
-                                ),
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients([status, reply])
-    provider = _RecordingStatusProvider()
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        status_provider=provider,
-    )
-
-    admission = actor.begin_turn("check memory")
-
-    assert admission.kind == "reply"
-    assert provider.calls == ["get_memory_status"]
-
-
-def test_connector_tool_tolerates_surplus_fields_like_owned_tools() -> None:
-    reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "fetched",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients(
-        [
-            _connector_response(
-                "search_connector_tools",
-                {
-                    "query": "issue",
-                    "connector": "github",
-                    "task_state_update": {"scratchpad": "keep"},
-                },
-                call_id="search-surplus-1",
-            ),
-            reply,
-        ]
-    )
-    gateway = _RecordingConnectorGateway()
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        connector_gateway=gateway,
-    )
-
-    admission = actor.begin_turn("search github issues")
-
-    assert admission.kind == "reply"
-    assert gateway.searches == [{"query": "issue", "connector": "github"}]
-
-
-def test_initial_actor_resolves_own_status_without_a_desktop_lease() -> None:
-    reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "memory is disabled",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients(
-        [
-            _status_response("get_memory_status", call_id="status-1"),
-            reply,
-        ]
-    )
-    provider = _RecordingStatusProvider()
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        status_provider=provider,
-    )
-
-    admission = actor.begin_turn("Is long-term memory enabled?")
-
-    assert admission.kind == "reply"
-    assert admission.reply == "memory is disabled"
-    assert provider.calls == ["get_memory_status"]
-    assert len(clients[0].requests) == 2
-    assert [
-        tool["function"]["name"]
-        for tool in clients[0].requests[0]["tools"]
-    ] == [
-        "observe_desktop",
-        "get_agent_status",
-        "get_memory_status",
-        "get_capabilities",
-    ]
-    assert [message["role"] for message in clients[0].requests[1]["messages"]] == [
-        "system",
-        "user",
-        "assistant",
-        "tool",
-    ]
-    tool_result = json.loads(clients[0].requests[1]["messages"][3]["content"])
-    assert tool_result["experience_policy"] == "disabled"
-
-
-def test_status_tools_remain_available_near_the_model_call_limit() -> None:
-    reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "budget-safe reply",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients(reply)
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        status_provider=_RecordingStatusProvider(),
-    )
-
-    admission = actor.begin_turn(
-        "Answer without another tool round",
-        _model_call_limit=2,
-    )
-
-    assert admission.reply == "budget-safe reply"
-    assert len(clients[0].requests) == 1
-    assert [
-        tool["function"]["name"]
-        for tool in clients[0].requests[0]["tools"]
-    ] == [
-        "observe_desktop",
-        "get_agent_status",
-        "get_memory_status",
-        "get_capabilities",
-    ]
 def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> None:
     repaired = _tool_response(
         "type_text",
@@ -2390,128 +1673,6 @@ def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> N
     assert "tool_format_error" in tool_result
     assert "drag points" in tool_result["tool_format_error"]
 
-def test_initial_observe_with_arguments_is_repaired_once_then_terminates() -> None:
-    bad_observe = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "observe-with-args",
-                            "type": "function",
-                            "function": {
-                                "name": "observe_desktop",
-                                "arguments": '{"app":"notepad"}',
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-    good_observe = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "observe-fixed",
-                            "type": "function",
-                            "function": {
-                                "name": "observe_desktop",
-                                "arguments": "{}",
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients([bad_observe, good_observe])
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    admission = actor.begin_turn("Open notepad and wait")
-
-    assert admission.kind == "desktop"
-    assert len(clients[0].requests) == 2
-    repair_messages = clients[0].requests[1]["messages"]
-    assert repair_messages[-2]["tool_calls"][0]["id"] == "observe-with-args"
-    tool_result = json.loads(repair_messages[-1]["content"])
-    assert tool_result["tool_format_error"] == (
-        "observe_desktop does not accept arguments"
-    )
-
-
-def test_initial_observe_can_repair_repeated_format_failures() -> None:
-    bad_observe = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "observe-with-args",
-                            "type": "function",
-                            "function": {
-                                "name": "observe_desktop",
-                                "arguments": '{"app":"notepad"}',
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-    good_observe = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "observe-fixed",
-                            "type": "function",
-                            "function": {
-                                "name": "observe_desktop",
-                                "arguments": "{}",
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients([bad_observe, bad_observe, good_observe])
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    admission = actor.begin_turn(
-        "Open notepad and wait",
-        _model_call_limit=3,
-    )
-
-    assert admission.kind == "desktop"
-    assert len(clients[0].requests) == 3
-    second_feedback = json.loads(
-        clients[0].requests[2]["messages"][-1]["content"]
-    )
-    assert second_feedback["tool_format_error"] == (
-        "observe_desktop does not accept arguments"
-    )
-    assert second_feedback["model_calls_remaining"] == 1
 
 class _RecordingShellRunner:
     def __init__(self) -> None:
@@ -2561,57 +1722,6 @@ def test_failed_tool_activity_keeps_error_and_actionable_output() -> None:
             "ok": False,
         }
     ]
-
-
-def test_initial_turn_rejects_unoffered_shell_without_execution() -> None:
-    shell_response = _tool_response(
-        name="run_shell",
-        arguments={"command": "Get-Process notepad", "timeout_s": 300},
-        call_id="shell-call",
-    )
-    observe = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "observe-call",
-                            "type": "function",
-                            "function": {
-                                "name": "observe_desktop",
-                                "arguments": "{}",
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients([shell_response, observe])
-    runner = _RecordingShellRunner()
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        shell_runner=runner,
-    )
-
-    admission = actor.begin_turn(
-        "Check if notepad is running",
-        _model_call_limit=2,
-    )
-
-    assert admission.kind == "desktop"
-    assert runner.calls == []
-    assert len(clients[0].requests) == 2
-    assert "run_shell" not in {
-        tool["function"]["name"]
-        for tool in clients[0].requests[0]["tools"]
-    }
-    repair = json.loads(clients[0].requests[1]["messages"][-1]["content"])
-    assert "unapproved tool" in repair["tool_format_error"]
 
 
 def test_visual_turn_can_write_file_then_launch_it_detached() -> None:
@@ -3191,7 +2301,7 @@ def test_visual_turn_keeps_repeated_window_text_body() -> None:
     assert tool_results[2]["text"] == "changed text"
 
 
-def test_next_visual_turn_keeps_gui_action_but_drops_local_tool_transcript() -> None:
+def test_next_visual_turn_keeps_gui_action_but_drops_local_narration() -> None:
     shell_call = _tool_response(
         name="run_shell",
         arguments={
@@ -3255,7 +2365,7 @@ def test_next_visual_turn_keeps_gui_action_but_drops_local_tool_transcript() -> 
     messages = clients[0].requests[-1]["messages"]
     encoded = json.dumps(messages, ensure_ascii=False)
     assert [message["role"] for message in messages] == [
-        "system", "user", "assistant", "tool", "assistant", "tool", "user",
+        "system", "user", "user", "assistant", "tool", "assistant", "tool", "user",
     ]
     assert "unique-command" in encoded
     assert "UNIQUE-DIAGNOSTIC-BODY" in encoded
@@ -3264,11 +2374,11 @@ def test_next_visual_turn_keeps_gui_action_but_drops_local_tool_transcript() -> 
     assert "private old reasoning" not in encoded
     assert "final-gui-0" in encoded
     assert json.loads(
-        messages[4]["tool_calls"][0]["function"]["arguments"]
+        messages[5]["tool_calls"][0]["function"]["arguments"]
     ) == {"text": "hello"}
     assert _JPEG_B64 in encoded
     assert encoded.count(_JPEG_B64) == 1
-    current_context = json.loads(messages[6]["content"][1]["text"])
+    current_context = json.loads(messages[7]["content"][1]["text"])
     assert current_context["mission"]["original_goal"] == (
         turn.mission.original_goal
     )
@@ -3346,54 +2456,94 @@ def test_shell_tool_is_absent_without_runner() -> None:
     assert "run_shell" not in names
 
 
-def test_initial_truncation_continues_with_a_shorter_status_call() -> None:
-    truncated = {
+def test_visual_turn_recovers_after_one_provider_rejection() -> None:
+    rejection = {
         "choices": [{
-            "finish_reason": "length",
+            "finish_reason": "content_filter",
             "message": {
                 "role": "assistant",
-                "content": "partial implementation",
+                "content": "provider-specific refusal prose",
                 "tool_calls": [],
             },
         }],
     }
-    reply = {
-        "choices": [{
-            "finish_reason": "stop",
-            "message": {
-                "role": "assistant",
-                "content": "finished",
-                "tool_calls": [],
-            },
-        }],
-    }
-    _, clients = _build_clients([
-        truncated,
-        _status_response("get_agent_status", call_id="short-status"),
-        reply,
-    ])
-    provider = _RecordingStatusProvider()
+    _, clients = _build_clients([rejection, _tool_response()])
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
-        status_provider=provider,
+    )
+    detail = (
+        "provider rejected model response: "
+        "finish_reason=content_filter"
     )
 
-    admission = actor.begin_turn("Complete the implementation")
+    with pytest.raises(InvalidActorProposal, match=detail):
+        actor.propose(
+            _actor_turn(),
+            image_b64=_JPEG_B64,
+            image_media_type="image/jpeg",
+            submitted_size=(640, 480),
+        )
 
-    assert admission.kind == "reply"
-    assert admission.reply == "finished"
-    assert provider.calls == ["get_agent_status"]
-    assert all(
-        message.get("content") != "partial implementation"
-        for message in clients[0].requests[1]["messages"]
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+        rejection_feedback=detail,
     )
-    assert any(
-        message.get("content")
-        == "Output was truncated. Continue with a shorter tool call."
-        for message in clients[0].requests[1]["messages"]
+
+    assert decision.proposal["action"] == "type_text"
+    assert len(clients[0].requests) == 2
+
+
+def test_visual_turn_keeps_retrying_after_provider_rejections() -> None:
+    first = {
+        "choices": [{
+            "finish_reason": "content_filter",
+            "message": {
+                "role": "assistant",
+                "content": "first refusal text",
+                "tool_calls": [],
+            },
+        }],
+    }
+    second = deepcopy(first)
+    second["choices"][0]["finish_reason"] = "safety"
+    second["choices"][0]["message"]["content"] = "different refusal text"
+    _, clients = _build_clients([first, second])
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
     )
+    detail = (
+        "provider rejected model response: "
+        "finish_reason=content_filter"
+    )
+
+    with pytest.raises(InvalidActorProposal, match=detail):
+        actor.propose(
+            _actor_turn(),
+            image_b64=_JPEG_B64,
+            image_media_type="image/jpeg",
+            submitted_size=(640, 480),
+        )
+
+    second_detail = (
+        "provider rejected model response: "
+        "finish_reason=safety"
+    )
+    with pytest.raises(InvalidActorProposal, match=second_detail):
+        actor.propose(
+            _actor_turn(),
+            image_b64=_JPEG_B64,
+            image_media_type="image/jpeg",
+            submitted_size=(640, 480),
+            rejection_feedback=detail,
+        )
+    assert len(clients[0].requests) == 2
 
 
 def test_visual_turn_keeps_model_selected_dependent_shell_chain() -> None:
@@ -3532,94 +2682,6 @@ def test_visual_turn_executes_model_selected_shell_batch_in_parallel() -> None:
         for tool in clients[0].requests[1]["tools"]
     ]
     assert "run_shell" in names
-
-
-def test_initial_batch_preflights_then_reissues_without_partial_execution() -> None:
-    invalid_batch = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "would-have-searched",
-                            "type": "function",
-                            "function": {
-                                "name": "search_connector_tools",
-                                "arguments": json.dumps(
-                                    {"query": "paint", "connector": "github"}
-                                ),
-                            },
-                        },
-                        {
-                            "id": "bad-observe",
-                            "type": "function",
-                            "function": {
-                                "name": "observe_desktop",
-                                "arguments": '{"unexpected":true}',
-                            },
-                        },
-                    ],
-                }
-            }
-        ]
-    }
-    valid_batch = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "reissued-search",
-                            "type": "function",
-                            "function": {
-                                "name": "search_connector_tools",
-                                "arguments": json.dumps(
-                                    {"query": "paint", "connector": "github"}
-                                ),
-                            },
-                        },
-                        {
-                            "id": "reissued-observe",
-                            "type": "function",
-                            "function": {
-                                "name": "observe_desktop",
-                                "arguments": "{}",
-                            },
-                        },
-                    ],
-                }
-            }
-        ]
-    }
-    _, clients = _build_clients([invalid_batch, valid_batch])
-    gateway = _RecordingConnectorGateway()
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        connector_gateway=gateway,
-    )
-
-    admission = actor.begin_turn("Inspect only after the command")
-
-    assert admission.kind == "desktop"
-    assert gateway.searches == [{"query": "paint", "connector": "github"}]
-    assert len(clients[0].requests) == 2
-    repair_messages = clients[0].requests[1]["messages"]
-    feedback = json.loads(repair_messages[-1]["content"])
-    assert repair_messages[-2]["role"] == "assistant"
-    assert repair_messages[-1]["role"] == "user"
-    assert feedback["tools_executed"] == 0
-    assert feedback["tool_format_error"] == (
-        "observe_desktop does not accept arguments"
-    )
-    assert "search_connector_tools" in {
-        tool["function"]["name"] for tool in clients[0].requests[1]["tools"]
-    }
 
 
 def test_propose_injects_rejection_feedback_into_native_context() -> None:
@@ -3817,7 +2879,7 @@ def test_copy_current_view_result_remains_in_this_run_without_old_image() -> Non
 
     next_messages = clients[0].requests[2]["messages"]
     assert [message["role"] for message in next_messages] == [
-        "system", "user", "assistant", "tool", "assistant", "tool", "user",
+        "system", "user", "user", "assistant", "tool", "assistant", "tool", "user",
     ]
     encoded = json.dumps(next_messages)
     assert "copy_screen_to_clipboard" in encoded

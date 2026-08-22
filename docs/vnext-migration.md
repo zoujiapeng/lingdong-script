@@ -33,40 +33,29 @@ POST /api/v2/goals/runs
 vNext graph。它不读取应用名或任务关键词来选择 Legacy、工具或固定步骤。vNext live
 route 不可用时返回失败，不执行 Legacy fallback。
 
-同一个 `LiveVisualActor` 先直接回复、调用显式配置的通用 connector，或请求
-`observe_desktop`。只有最后一种选择才创建 run-bound lease；Electron 让出前台后，
-客户端再用精确 `run_id + lease_id` 交付 desktop target。该交接是机械事实，不是
-运行时选择权。
+服务端在第一次模型调用前建立中性的桌面 workspace 并捕获完整真实桌面 JPEG。同一个
+`LiveVisualActor` 首次调用即保留原始 goal 与有界 Thread history，并可直接回复或选择
+connector、shell、GUI；Electron 不再参与桌面交接。
 
 ### 删除前端执行策略
 
-前端执行策略选择器及其完整状态链已经删除：
-
-```text
-renderer selector
-  -> request execution field
-  -> Goal Admission policy
-  -> Broker interaction mode
-  -> trace/evidence policy field
-```
+前端执行策略选择器，以及随后的 request、admission、runtime 与 trace policy 字段已经删除。
 
 用户口头强调 GUI 时，只提交原始 `goal`。显式配置 MCP 后，同一个 Actor 当前会同时
 看到两个通用 connector 工具与 reply/GUI 决策；没有配置时工具不出现。它们不读取
-任务关键词，远端 connector 当前仍只准入 read-only 调用。首轮不提供 shell；进入视觉线后，
-若 shell 已启用，通用 `run_shell`、`run_detached`、`write_file` 与 GUI 一起交给同一个
+任务关键词，也不按副作用标签拒绝模型选择。第一次视觉调用就把通用
+`run_shell`、`run_detached`、`write_file` 与 GUI 一起交给同一个
 Agent。它们的进程或文件回执不替代物理输入回执，也不决定任务完成；不能因此增加
 profiler、关键词路由、前端开关或第二套 planner。
 
-`ToolSpec.execution_medium` 暂时保留为执行事实和审计字段，不再参与用户意图的二次编码。Broker 只做工具 schema、runtime 可写性、目标/画面新鲜度和指针所有权等机械准入。真实 E2E 报告记录实际 OS 输入、shell 或 provider 回执，而不是验证某个策略选项。
+`ToolSpec.execution_medium` 暂时保留为执行事实和审计字段，不再参与用户意图的二次编码。MissionRuntime 与 Adapter 只保留工具 schema、目标/画面新鲜度、单写入和指针所有权等机械边界。真实 E2E 报告记录实际 OS 输入、shell 或 provider 回执，而不是验证某个策略选项。
 
 ## Connector、模型协议与缓存切片
 
-`LiveVisualActor` 现在在文本首轮和视觉回合都能看到
-`search_connector_tools` / `call_connector_tool`。目录只来自显式 MCP 配置，结果回到
-同一个 Actor；没有 connector 角色、service adapter 或 router。调用只允许明确
-`readOnlyHint=true` 且非 destructive 的 descriptor，并在发现、Gateway 和物理
-`call_tool` 边界重新核对 fingerprint/descriptor，服从同一 deadline/cancel。外部写入
-授权没有进入 live 产品。
+`LiveVisualActor` 在第一次及后续视觉调用都能看到 `search_connector_tools` /
+`call_connector_tool`。目录只来自显式 MCP 配置，结果回到
+同一个 Actor；没有 connector 角色、service adapter、router 或副作用分类器。调用在发现、
+Gateway 和物理 `call_tool` 边界重新核对 fingerprint/descriptor，服从同一 deadline/cancel。
 
 `.mcp.example.json` 提供 GitHub 官方 remote MCP 的只读配置和有限 toolsets，token 只
 通过 `${env:GITHUB_PAT_TOKEN}` 注入。仓库不携带 credential，也不实现 OAuth 登录；
@@ -327,32 +316,21 @@ B 为 Explorer `0/2`、Notepad 原始结果 `1/2`，且 B 的缺字样本发生�
 Runtime 误报失败。详细证据见架构重置文档 13.18。下一实验只检查跨族通用按键消费
 边界，不新增提示、自动最大化、重复按键规则或应用适配。
 
-后续 13.19 的真实前端复现证明当前 goal 入口在模型判断前无条件最小化 Electron，
-纯聊天也被预绑定到 GUI target，终态又没有由产品自行恢复。当前迁移出口因此新增一项
-前置门：同一个 `LiveVisualActor` 必须能在零系统提示下直接回复或申请
-`observe_desktop`，只有 run-bound lease 才允许隐藏；matching
-success/fail/cancel 必须 `restore/show`。测试型零提示矩阵严格 `9/12`，虽比 113 字
-提示的 `7/12` 更好且 6/6 GUI 均申请桌面，仍有聊天误租约与 provider 干扰，尚不
-准入预计净增 `250–330` 行的生产切片。下一唯一实验改为稳定 provider 下重复冻结的
-零提示 reply/lease 矩阵；不增加 router、第二模型角色、旧聊天链或提示教学。通用
-按键消费 A/B 顺延。
-
-13.20 已满足这项前置门并取代上述候选状态。主入口现在只提交 `goal + optional
-thread_id`；同一个 `LiveVisualActor` 在零系统提示首轮直接回复或请求
-`observe_desktop`，只有后者才触发精确 run-bound lease、Electron yield、target
-bind 和原有视觉线。matching terminal 自行恢复窗口；response loss、TOCTOU、
-stale/non-current run 和未启动 terminal 都有机械合同。服务端有界 Thread/Turn
-只把成功且有用户结果的原生交换交给下一轮，不增加第二模型或长期 memory。
+13.19 的真实前端复现证明旧入口在模型判断前无条件最小化 Electron，纯聊天也被预绑定到
+GUI target。当前实现已用更小的统一路径取代该设计：主入口只提交 `goal + optional
+thread_id`；服务端直接建立桌面 workspace，第一次模型调用便携带完整真实桌面 JPEG、
+原始目标和有界成功历史。回复、connector、shell 与 GUI 都由同一个
+`LiveVisualActor` 在该调用中选择，Electron 始终只是可见控制面。
 
 真实可见 Electron 已在同一 Thread 完成
 `6 个连续聊天 → 1 个显式鼠标键盘 Notepad 保存 → 1 个上下文追问`：外部文件精确为
-`DESKTOP-c419bb42`，恢复后追问也精确回复该值；聊天 Turn 均为 `reply`、lease idle，
-桌面 Turn 只在 Actor 请求后隐藏并在终态自行恢复。两次一次性 provider
+`DESKTOP-c419bb42`，追问也精确回复该值。该旧 run 只继续证明成功 Turn 的有界文本
+continuation，不再作为当前首调视觉生命周期的证据。两次一次性 provider
 `Connection error` 经普通用户原样重发成功，失败 Turn 未污染历史。该迁移切片为
 生产 `+1372/-155`，比预估大，所以下一轮冻结生产改动，只用至少 20 Turn、两个原生
 任务族的随机交错矩阵验证长时收益。Thread 跨服务重启的最小有界 checkpoint 已在 13.26
 用聊天连续性与 connector→Notepad 两族通过，不再是未实现边界。当前剩余迁移边界是
-pause 与 waiting lease 的真实 E2E、长历史下 connector/GUI 选择压力、provisional native
+pause/cancel 的真实 E2E、长历史下 connector/GUI 选择压力、provisional native
 model protocol 的真实凭据验收，以及视觉线内 shell/文件工具与 GUI 的长时联合 E2E；
 它们都不得通过预分类器实现。
 

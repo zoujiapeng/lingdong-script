@@ -142,7 +142,7 @@ const TOOL_LABELS: Record<string, string> = {
   click: '点击', draw_strokes: '连续绘制', type_text: '输入文字', hotkey: '快捷键', scroll: '滚动',
   drag: '拖拽', open_app: '打开应用', focus_window: '聚焦窗口', observe: '观察', done: '完成',
   capture_artifact: '创建工件', send_artifact: '发送工件', verify_delivery: '验证送达', open_conversation: '打开会话',
-  run_shell: '运行命令', observe_desktop: '观察桌面', read_window_text: '读取窗口文字',
+  run_shell: '运行命令', read_window_text: '读取窗口文字',
   capture_screen: '截取屏幕', list_windows: '读取窗口列表', paste_image: '粘贴图片',
   claim_obligation_done: '完成任务', blocked: '说明阻塞',
 };

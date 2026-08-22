@@ -16,7 +16,7 @@ reducer/replay、evidence/artifact registry 以及仅为它们服务的 wire 测
 
 - `LiveVisualActor` 视觉上下文只保留紧邻的一笔已完成原生 tool exchange；新 exchange
   覆盖旧 exchange，不积累无界视觉历史。
-- 首轮只提供回复、观察、状态和只读 connector；进入视觉线后，若启用 shell，通用
+- 首轮只提供回复、观察和显式配置的 connector；进入视觉线后，通用
   `run_shell`、`run_detached`、`write_file` 与 GUI 工具同轮可见。它们的回执不替代
   RawDevice 物理回执，也不构成任务完成。
 - 根 `pytest.ini` 现在同时收集根 `tests/` 与 `python/winpilot_home/tests/`，避免后者被
@@ -314,11 +314,9 @@ Electron「智能代理」
   -> POST /api/v2/goals/runs { original goal, optional thread_id }
   -> Goal Admission（不接收执行模式）
   -> 一个 Turn / 一个 LiveVisualActor
-  -> 原始 goal + 最多 12 条、16 KiB 的成功 Turn 原生历史
-  -> 同一模型直接 reply，或搜索/调用显式只读 connector，或申请 observe_desktop
-  -> 只有 observe_desktop 才建立 run-bound lease，Electron 随后让出前台并冻结 target
-  -> 同一 Actor 继续读取权威 JPEG + 有界 task state + 紧邻一笔 provider 原生 tool exchange
-  -> 模型选择一笔通用 GUI 工具调用
+  -> 服务端捕获当前完整桌面，建立不拥有前台窗口的中性 workspace anchor
+  -> 第一次模型调用同时收到原始 goal、最多 12 条/16 KiB 成功历史、权威 JPEG 和全部通用工具
+  -> 同一模型直接 reply，或调用 connector/shell/GUI；没有初始文本路由、桌面租约或 Electron handoff
   -> AtomicDesktopAdapter 唯一一次坐标映射
   -> RawDevice / SendInput 真实鼠标键盘
   -> 新权威帧与回执
@@ -333,8 +331,8 @@ Actor：必须显式配置、延迟发现、只读注解通过、物理调用前
 MCP 直调不是产品 connector owner。
 
 前端执行约束选项及其 request/admission/evidence 状态链已经删除。用户口头说
-“必须使用 GUI”时，只保留在原始 goal 中，由同一个模型理解。未来加入 shell 或
-provider 后，它们必须与 GUI 工具同时对该模型可见；不能恢复前端开关、Task
+“必须使用 GUI”时，只保留在原始 goal 中，由同一个模型理解。当前 shell 与 GUI 工具
+同时对该模型可见；未来加入 provider 也必须如此，不能恢复前端开关、Task
 Profiler、关键词预路由或另一个 planner。
 
 ## Replay / 离线流程现状
@@ -356,8 +354,8 @@ Action Queue，但不需要联网。不得再造 JS 离线执行器或把浏览�
 `934b79c77eb2d6120be63b8a47141c902f343affd49a14e393cc7629d755230b`。重复的 A 是模型参数/
 目标选择叠加测试过程中重新激活 Electron 的干扰；canonical 参数与 `physical_attempt` 一致，
 Runtime 没有背离，但原始第二轮口头任务不能据此称为干净完成。覆盖声明固定为
-`ordinary_arp_actions`。只读 connector 查询不是普通 ARP 动作，未来若加入有副作用的
-shell/provider 工具，必须先形成显式 unsupported trace，不能静默冒充“整场对话全部行为
+`ordinary_arp_actions`。connector 调用不是普通 ARP 动作；shell/provider 工具也必须
+形成显式 unsupported trace，不能静默冒充“整场对话全部行为
 已重放”。
 重启当前源码后又从可见 Electron 完成了一次同路径发布验收：默认约
 `902 x 582` 窗口确认 partial 提示、加载 16 节点并点击运行，
@@ -413,8 +411,7 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 | --- | --- | --- |
 | `LiveVisualActor` | 理解完整目标、看当前 JPEG、选择语义目标/精确坐标/下一动作、维护有界状态、决定结束 | 物理输入、应用脚本、隐藏策略 |
 | Thread/Turn Store | 机械绑定连续成功 Turn、并发与有界历史 | 摘要、长期 memory、理解任务 |
-| Desktop Lease | run-bound handoff、target 验证与窗口恢复状态机 | 判断是否需要桌面、选择目标语义 |
-| `ConnectorGateway` | 显式 MCP 目录、只读授权、边界、指纹与 receipt | connector 路由、应用规则、远端写入 |
+| `ConnectorGateway` | 显式 MCP 目录、参数/结果边界、指纹与 receipt | connector 路由、应用规则、自动重试 |
 | `ProviderProtocolAdapter` | 显式 wire 翻译和原生签名/tool exchange 回放 | provider 猜测、重试、模型选择 |
 | `MissionRuntime` | 驱动模型→动作→新帧的顺序循环 | 编译任务步骤、纠正模型答案 |
 | `FrameAuthority` / workspace | 当前窗口、区域、frame id、epoch、JPEG | 解释画面 |
@@ -429,16 +426,8 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 
 ## 动作面与上下文
 
-2026-08-03 整改后，初始文本轮带一个短通用角色说明
-`INITIAL_ACTOR_SYSTEM_CONTRACT`（回答聊天、混合目标先做任务、不编造结果），不包含
-应用配方、关键词 router 或坐标教学；模型仍自由选择直接回复、connector 或桌面。入口：
-
-- `observe_desktop`
-- `search_connector_tools`
-- `call_connector_tool`（只执行发现过的 read-only 工具）
-- `get_agent_status` / `get_memory_status` / `get_capabilities`（Actor 自持只读状态工具，不申请租约）
-
-申请桌面后，同一 Actor 进入视觉线；视觉动作面保持：
+没有独立初始文本轮。第一次和后续每次模型调用都走同一条视觉线：当前完整桌面 JPEG、
+原始目标、有界 Thread 历史、task state 与全部可用通用工具在同一个请求里。动作面保持：
 
 - `click`
 - `double_click`
@@ -453,11 +442,11 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
   含商店 UWP 应用，解析失败由工具自身上报）
 - `observe`（模型侧名称 `refresh_desktop`；不产生物理输入或完成判决，只把控制权交回
   下一张全桌面帧）
-- `claim_obligation_done`
+- `claim_obligation_done`（模型侧名称 `reply_to_user`）
 - `blocked`
 
-显式只读 connector 的两个通用入口和三个状态工具在文本/视觉回合可见；`run_shell`、
-`run_detached`、`write_file` 与 `read_window_text` 只在视觉线内可见。它们没有变成 GUI
+显式 connector 的两个通用入口、`run_shell`、`run_detached`、`write_file` 与
+`read_window_text` 都在这条视觉线内可见。它们没有变成 GUI
 动作、应用 adapter 或第二执行线。生产 Actor 的依赖工具链不再有按工具族或按视觉帧的
 强制截断；只保留
 `max_turns`、`max_runtime_s`、`max_model_calls` 三项机械预算。若当前局部工具结果开始重复，模型可自行调用
@@ -472,8 +461,8 @@ E2E 证明。
 schema 删除，不再要求模型为机械动作另写一份意图。连续 INVALID_PROPOSAL/ACTOR_ERROR 不再硬停：只有
 `max_turns`/`max_model_calls` 预算作为机械停止，模型可以在预算内持续自我纠正。
 
-视觉系统提示词保持短小（含聊天/任务混合目标与 `blocked` 停止判断）；
-初始文本轮只带上述短角色合同，不增加应用或界面教学。Thread
+视觉系统提示词保持短小（含聊天/任务混合目标与 `blocked` 停止判断），不增加应用或
+界面教学。Thread
 只保留最多 12 条、16 KiB 的成功用户/模型原生消息；失败 Turn 不进入历史。现有
 `AgentThreadStore` 还把最多 100 个 Thread 的这个有界成功投影原子写入私有 checkpoint，
 服务重启后恢复同一 `thread_id`、可见成功结果与原生消息；它不保存 trace 正文、失败 Turn、
@@ -560,8 +549,8 @@ adapter 尚无真实 provider credential 联机与跨任务族 Electron E2E，�
 以下结论保留因为它们是当前设计的来源；run 级明细不再重复，见
 `docs/GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md` 13.16–13.24。
 
-- 13.20 落成当前产品合同：入口只提交 `goal` + 可选 `thread_id`，同一
-  `LiveVisualActor` 首轮直接 reply/connector/`observe_desktop`；失败 Turn 不进历史；
+- 13.20 当时落成了“首轮再申请桌面”的产品合同；该两阶段入口现已删除。仍保留的结论是
+  入口只提交 `goal` + 可选 `thread_id`、同一个 `LiveVisualActor`、失败 Turn 不进历史；
   13.26 补有界私有 Thread checkpoint。
 - 屏幕优先帧（full_desktop）落地后的旧受控基线为 smoke `3/4`、矩阵 `6/10`；这些数字
   是 target-window 时代或早期 full-desktop 的旧基线，已被 2026-08-14/08-15 的

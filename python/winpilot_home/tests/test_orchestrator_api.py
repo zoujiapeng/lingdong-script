@@ -89,80 +89,6 @@ def _graph_payload():
     }
 
 
-def _client_execution_context():
-    return {
-        "format": "execution-context/1",
-        "entrypoint": "native_agent_cockpit",
-        "submitted_at": 1_000,
-        "desktop_handoff": {
-            "required": True,
-            "strategy": "foreground_after_control_surface_yield",
-            "yielded": True,
-            "control_surface_pid": 700,
-            "prepared_at": 1_001,
-            "reason": "",
-        },
-        "target_window": {
-            "format": "desktop-target/1",
-            "hwnd": 800,
-            "title": "External target",
-            "process_id": 900,
-            "class_name": "TargetWindow",
-            "rect": [0, 0, 1200, 800],
-            "captured_at": 1_002,
-            "foreground_verified": True,
-            "usable": True,
-            "failure_type": "",
-            "reason": "",
-            "binding_mode": "window",
-        },
-    }
-
-
-def _waiting_desktop_lease(monkeypatch, *, run_id):
-    from winpilot.orchestrator import live_agent
-    from winpilot.orchestrator.runtime import ArpExecution
-    from winpilot.utils.screenshot import Region
-
-    graph = live_agent.build_exact_live_vnext_graph(
-        "Complete the visible task"
-    )
-    facts = live_agent._TargetFacts(
-        hwnd=800,
-        root_hwnd=800,
-        process_id=900,
-        executable_identity=r"c:\apps\external-target.exe",
-        title="External target",
-        class_name="TargetWindow",
-        region=(0, 0, 1200, 800),
-        foreground_root_hwnd=800,
-    )
-    dependencies = live_agent._CompositionDependencies(
-        wall_clock=lambda: 1.002,
-        target_reader=lambda hwnd: facts if hwnd == facts.hwnd else None,
-        foreground_reader=lambda: facts.hwnd,
-        hit_test_root=lambda _x, _y: facts.hwnd,
-    )
-    monkeypatch.setattr(
-        live_agent,
-        "virtual_screen_region",
-        lambda: Region(0, 0, 1920, 1080),
-    )
-    lease = live_agent.DesktopLeaseSlot(
-        graph=graph,
-        dependencies=dependencies,
-        thread_id="thread-api-lease",
-        turn_id="turn-api-lease",
-    )
-    lease.request(run_id)
-    execution = ArpExecution(graph)
-    execution.runtime_state.update({
-        "desktop_lease": lease.snapshot(),
-        "_desktop_lease": lease,
-    })
-    return execution, lease
-
-
 def test_platform_overview_exposes_contracts_and_capabilities(client):
     response = client.get("/api/v2/platform")
 
@@ -681,10 +607,8 @@ def test_product_goal_admission_rejects_client_owned_projection_fields(
     body = {
         "goal": "Complete the visible task",
         field: (
-            _client_execution_context()
-            if field == "execution_context"
-            else {}
-            if field == "graph"
+            {}
+            if field in {"execution_context", "graph"}
             else "gui_required"
             if field == "execution_constraint"
             else "vnext"
@@ -729,133 +653,6 @@ def test_product_goal_admission_fails_closed_without_legacy_fallback(
     assert response.json()["detail"] == (
         "vNext live Agent is disabled; no legacy fallback was run"
     )
-
-
-def test_goal_desktop_lease_bind_requires_exact_ids_but_telemetry_is_advisory(
-    client,
-    monkeypatch,
-):
-    from winpilot import server
-
-    run_id = "arp-desktop-lease-bind"
-    execution, lease = _waiting_desktop_lease(
-        monkeypatch,
-        run_id=run_id,
-    )
-    monkeypatch.setattr(server.ARP_RUNS, "get", lambda _run_id: execution)
-    context = _client_execution_context()
-
-    wrong_run = client.post(
-        "/api/v2/goals/runs/arp-other-run/desktop-lease",
-        json={
-            "lease_id": lease.lease_id,
-            "execution_context": context,
-        },
-    )
-    assert wrong_run.status_code == 409
-    assert wrong_run.json()["detail"] == (
-        "desktop lease does not match the run"
-    )
-
-    wrong_lease = client.post(
-        f"/api/v2/goals/runs/{run_id}/desktop-lease",
-        json={
-            "lease_id": "lease-other",
-            "execution_context": context,
-        },
-    )
-    assert wrong_lease.status_code == 409
-    assert wrong_lease.json()["detail"] == (
-        "desktop lease does not match the run"
-    )
-
-    invalid_context = _client_execution_context()
-    invalid_context["target_window"]["usable"] = False
-    bound = client.post(
-        f"/api/v2/goals/runs/{run_id}/desktop-lease",
-        json={
-            "lease_id": lease.lease_id,
-            "execution_context": invalid_context,
-        },
-    )
-    assert bound.status_code == 200
-    payload = bound.json()
-    assert payload["run_id"] == run_id
-    assert payload["lease"]["run_id"] == run_id
-    assert payload["lease"]["lease_id"] == lease.lease_id
-    assert payload["lease"]["status"] == "delivered"
-    assert payload["target"]["hwnd"] == 800
-    assert execution.inputs["execution_context"] == {
-        **invalid_context,
-        "task_id": execution.graph.id,
-    }
-
-    duplicate = client.post(
-        f"/api/v2/goals/runs/{run_id}/desktop-lease",
-        json={
-            "lease_id": lease.lease_id,
-            "execution_context": context,
-        },
-    )
-    assert duplicate.status_code == 409
-    assert duplicate.json()["detail"] == (
-        "desktop lease does not match the run"
-    )
-    assert lease.snapshot()["status"] == "delivered"
-
-
-def test_goal_desktop_lease_fail_requires_exact_ids_and_closes_once(
-    client,
-    monkeypatch,
-):
-    from winpilot import server
-
-    run_id = "arp-desktop-lease-fail"
-    execution, lease = _waiting_desktop_lease(
-        monkeypatch,
-        run_id=run_id,
-    )
-    monkeypatch.setattr(server.ARP_RUNS, "get", lambda _run_id: execution)
-
-    wrong_run = client.post(
-        "/api/v2/goals/runs/arp-other-run/desktop-lease/fail",
-        json={"lease_id": lease.lease_id, "reason": "handoff failed"},
-    )
-    assert wrong_run.status_code == 409
-    assert wrong_run.json()["detail"] == (
-        "desktop lease does not match the run"
-    )
-
-    wrong_lease = client.post(
-        f"/api/v2/goals/runs/{run_id}/desktop-lease/fail",
-        json={"lease_id": "lease-other", "reason": "handoff failed"},
-    )
-    assert wrong_lease.status_code == 409
-    assert wrong_lease.json()["detail"] == (
-        "desktop lease does not match the run"
-    )
-
-    failed = client.post(
-        f"/api/v2/goals/runs/{run_id}/desktop-lease/fail",
-        json={"lease_id": lease.lease_id, "reason": "handoff failed"},
-    )
-    assert failed.status_code == 200
-    payload = failed.json()
-    assert payload["run_id"] == run_id
-    assert payload["lease"]["run_id"] == run_id
-    assert payload["lease"]["lease_id"] == lease.lease_id
-    assert payload["lease"]["status"] == "closed"
-    assert payload["lease"]["error"] == "handoff failed"
-
-    duplicate = client.post(
-        f"/api/v2/goals/runs/{run_id}/desktop-lease/fail",
-        json={"lease_id": lease.lease_id, "reason": "second failure"},
-    )
-    assert duplicate.status_code == 409
-    assert duplicate.json()["detail"] == (
-        "desktop lease does not match the run"
-    )
-    assert lease.snapshot()["error"] == "handoff failed"
 
 
 def test_start_execution_freezes_goal_admission_before_job_submission(

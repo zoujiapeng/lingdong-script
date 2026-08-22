@@ -8,12 +8,11 @@
 | --- | --- | --- | --- |
 | 托管 Runtime 身份 | `contract_version = 3` | `runtime_info.py`、TS client/server lifecycle | 防止 Renderer 与旧 Python 进程通信 |
 | Goal admission | `goal-admission/1` | `orchestrator/goal_admission.py` | 证明产品只选择 live vNext 且无 fallback |
-| Client execution context | `execution-context/1` | Renderer构造、Python严格绑定 | 描述 Electron 让出后的目标捕获 |
-| Desktop lease | `desktop-lease/1` | `DesktopLeaseSlot` | run/thread/turn/lease 的交付状态 |
+| Desktop target | `desktop-target/1` | `tasking/execution_context.py` | 服务端建立中性 desktop workspace 锚点 |
 | ARP graph | `arp/1` | `orchestrator/contracts.py` | 图、节点、边和 policy |
-| Mission definition | vNext mission format 常量 | `vnext/mission/contracts.py` | 原始 goal 与 obligation 声明 |
-| Runtime frame | `runtime-frame/0` | `vnext/runtime/contracts.py` | JPEG、帧身份和 evidence |
-| Runtime snapshot | `runtime-snapshot/0` | 同上 | Broker state + frame + target 原子视图 |
+| Mission state/card | `mission-card/1` | `vnext/mission/contracts.py` | 原始 goal、最后机械结果和终态 |
+| Runtime frame | `runtime-frame/0` | `vnext/runtime/contracts.py` | JPEG 与帧身份 |
+| Runtime snapshot | `runtime-snapshot/0` | 同上 | frame + target + pointer state 原子视图 |
 | Actor turn | `runtime-actor-turn/0` | 同上 | 给 Visual Actor 的有界事实 |
 | Controller transition | `controller-transition/0` | 同上 | 一笔输入的三态结果和后帧 |
 | Runtime result | `mission-runtime-result/0` | 同上 | 一轮 Runtime 的 typed status |
@@ -32,8 +31,7 @@ flowchart TD
   Turn --> Run["run_id"]
   Run --> Graph["graph.id / task_id"]
   Run --> Mission["mission_id"]
-  Run --> Lease["lease_id"]
-  Lease --> Target["binding_id + hwnd + pid + executable + epoch"]
+  Run --> Target["server desktop anchor / binding_id"]
   Target --> Frame["frame_id + region + submitted_size + image hash"]
   Frame --> Decision["decision_id / action_id"]
   Decision --> Attempt["physical_attempt"]
@@ -47,10 +45,9 @@ flowchart TD
 - Thread 可包含多个串行 Turn；
 - 一个产品 Turn绑定一个 run；
 - run绑定一个 server-owned graph；
-- live graph构造一个 Mission；
-- desktop lease只为该 run交付一次 target；
+- live graph构造一个 `MissionState`，并由服务端建立 desktop target；
 - frame同时绑定 target HWND/epoch；
-- decision绑定 Mission revision、obligation、Broker projection、frame与evidence scope；
+- decision绑定 Mission revision、frame、target 与 pointer 状态；
 - physical attempt 和 receipt 必须回指同一 decision。
 
 ## 3. 产品入口请求
@@ -71,7 +68,7 @@ Pydantic `extra="forbid"`。`goal` 至少一个字符，admission 再 trim 并�
 | 字段 | 含义 |
 | --- | --- |
 | `ok` | 请求已创建 execution，不表示用户目标完成 |
-| `run_id` | 后续查询、取消、租约和 UI 绑定的 run |
+| `run_id` | 后续查询、取消和 UI 绑定的 run |
 | `thread_id` / `turn_id` | 服务端对话身份 |
 | `runtime_version` | 当前应为 `vnext` |
 | `admission` | `goal-admission/1` 审计对象 |
@@ -95,41 +92,15 @@ Pydantic `extra="forbid"`。`goal` 至少一个字符，admission 再 trim 并�
 
 `_PreparedHandler` 在执行时再次检查这六个字段恰好存在且值一致。
 
-## 4. Desktop execution context
+## 4. 服务端 Desktop target
 
-Renderer 交付的顶层字段必须恰好为：
+`_PreparedHandler` 在模型首次调用前直接调用 `capture_desktop_workspace_context()`。返回的
+内部对象是 `desktop-target/1`，包含 Windows Shell 桌面锚点的 `hwnd`、`process_id`、
+`class_name`、虚拟桌面 `rect`、`captured_at`、`usable` 与 `binding_mode=desktop_shell`。
 
-```json
-{
-  "format": "execution-context/1",
-  "entrypoint": "native_agent_cockpit",
-  "submitted_at": 0,
-  "desktop_handoff": {
-    "required": true,
-    "strategy": "foreground_after_control_surface_yield",
-    "yielded": true,
-    "control_surface_pid": 123,
-    "prepared_at": 0,
-    "reason": ""
-  },
-  "target_window": {
-    "...": "capture_foreground_window_context 返回的目标事实"
-  }
-}
-```
-
-Python `bind_client_execution_context` 只接受这五个顶层键，再附加 server-owned `task_id`。Web workbench 没有 native bridge 时会形成 `yielded=false`，当前需要桌面的产品 run会因无法建立真实 handoff 而失败。
-
-Lease bind请求：
-
-```json
-{
-  "lease_id": "lease-...",
-  "execution_context": { "...": "上面的精确对象" }
-}
-```
-
-失败请求只允许 `lease_id` 和 1..1024 字符的 `reason`。
+这个对象不来自 Renderer，也不是 HTTP 请求字段。它只让现有 workspace/frame identity
+拥有一个中性锚点；默认模型画面仍是完整虚拟桌面，物理输入不受该 HWND 限制。若本机
+Windows Shell 桌面不可用，run 在首次模型调用前以 `target_binding` 阶段失败。
 
 ## 5. Target、Frame 与 Commit Identity
 
@@ -142,7 +113,6 @@ Lease bind请求：
 | `process_id` | 正整数 | 目标进程 |
 | `executable_identity` | 非空字符串 | 可执行文件身份；公开 trace 可只暴露 hash |
 | `title_snapshot` | 可空字符串 | 绑定时标题快照，不作为唯一身份 |
-| `established_by_evidence_ref` | 非空 ID | 建立绑定的证据 |
 | `epoch` | 非负整数 | target/frame 世代 |
 
 ### 5.2 `RuntimeFrameIdentity`
@@ -160,7 +130,7 @@ Lease bind请求：
 
 `RuntimeCommitIdentity` 是 frame + target identity，要求 HWND、epoch、scope 一致；fingerprint
 供 binder 关联当前快照和 trace 诊断。它不触发每动作许可握手，也不让 Envelope/Adapter
-重放整套 Mission/Broker 验证。
+重放整套 mission 校验。
 
 ### 5.3 `RuntimeFrame`
 
@@ -179,10 +149,7 @@ Lease bind请求：
   "format": "runtime-actor-turn/0",
   "mission": {
     "original_goal": "...",
-    "active_obligation": { "...": "完整目标 obligation" },
-    "verified_facts": [],
-    "failure": null,
-    "no_progress_streak": 0
+    "failure": null
   },
   "frame": {
     "image_available": true,
@@ -191,21 +158,22 @@ Lease bind请求：
     "coordinate_space": "submitted_image_pixels"
   },
   "task_state": { "...": "有界模型笔记" },
-  "tools": [],
-  "completed_action_summaries": [],
+  "budget": { "...": "turn/model-call/time 机械预算事实" },
   "previous_action": null,
   "pointer_held": false,
-  "submitted_size": [1120, 700]
+  "submitted_image_size": [1120, 700]
 }
 ```
 
-`submitted_size` 是模型请求层在序列化 context 后附加的字段；JPEG作为同一 user message 的 `image_url` 内容发送。
+`submitted_image_size` 是模型请求层在序列化 context 后附加的字段；JPEG作为同一 user
+message 的 `image_url` 内容发送，前面还带有有界成功 Thread 文本。工具 schema 通过 provider
+的 `tools` 字段同行发送，不复制进 context JSON。
 
 ### 6.1 Task state 与 action history
 
 - `task_state_update` 是可选的有界更新，缺省为 `{"scratchpad": null}`；
 - task state 是 in-memory、非权威提示，不进入 Mission truth；
-- 初始 observe、视觉动作或 Runtime apply 遇到格式错误的 task state 时只忽略该更新，
+- 当前响应或 Runtime apply 遇到格式错误的 task state 时只忽略该更新，
   不得因此拒绝同一响应里的有效动作或完成 claim；
 - 视觉上下文只保留紧邻一笔 provider 原生 `user image → assistant tool call → tool result`；
 - 被拒 proposal 不进入原生历史，避免旧屏幕和旧动作污染当前帧；
@@ -249,16 +217,14 @@ RawDevice 的 SendInput 边界处理。
 typed 结构解析；`bind_actor_decision` 只把结果绑定为 envelope，核心内容包括：
 
 - deterministic `decision_id`；
-- `mission_id`、`run_id`、Mission revision、obligation ID；
-- execution profile 与 Broker projection identity；
+- `mission_id`、`run_id`、Mission revision 与 turn index；
 - proposal的 kind/action/arguments；
-- frame region、submitted image size 与 image SHA；
-- target binding；
-- pointer lease identity；
-- tool catalog/schema identity。
+- frame ID/epoch/HWND/scope/region、submitted image size 与 image SHA；
+- target binding ID；
+- pointer disposition 与可选 held-pointer lease ID。
 
 Envelope fingerprint只用于跨层关联和 trace 诊断。binder不重新序列化后跑完整 schema，
-不重复验证 submitted-image bounds，也不在每轮重放 Mission/Broker admission；
+不重复验证 submitted-image bounds，也不在每轮重放 mission admission；
 `AtomicDesktopAdapter` 直接消费这笔 bound proposal的必要物理字段。
 
 ## 9. Raw action 与 ControllerTransition
@@ -286,49 +252,47 @@ trace 可以旁路保存 submitted arguments 与 physical arguments；它只帮�
 若 raw action 报告释放清理不完整，该动作与 pointer/key UP cleanup 始终占用同一个
 physical queue lease；cleanup 最多执行两轮，期间不能插入下一笔物理输入。
 
-### 9.3 Action effect
+### 9.3 动作后的最小结果
 
-`ActionEffectSummary` 绑定：action ID、before/after frame ID与evidence、两帧payload hash、target binding是否有效、帧是否可比、局部变化类别与ratio、reason、comparator version、effect evidence。
+`MissionState.last_transition` 只保留最近一次动作的 `action`、`input_completed`、
+`visible_effect`、可选 `frame_id/action_id/error_kind`。新结果覆盖旧结果；Runtime 不比较
+两帧像素来判断语义完成。
 
-`semantic_completion` 在机械比较中固定为 `unknown`。局部像素变化不能证明“文件已保存”或“题已答对”。
+## 10. MissionState
 
-## 10. Mission、Obligation 与 Reducer
+当前 live composition 从原始 goal 构造一个可变 `MissionState`：
 
-当前 live composition 从原始 goal 构造：
-
-| 层 | 核心字段 |
+| 字段 | 含义 |
 | --- | --- |
-| `MissionDefinition` | format、mission/run ID、original goal、goal revision、source、metadata、obligations、拓扑序、experience policy |
-| `ObligationSpec` | ID、desired state、acceptance criteria、required capabilities、dependencies、artifact refs/bindings、evidence policy、required |
-| `MissionProjection` | revision、status、active obligation、target binding、evidence refs、events派生状态 |
-| `MissionEvent` | event ID/kind、mission/run、base revision、payload、evidence refs |
+| `mission_id` / `run_id` | 当前 run 内身份 |
+| `original_goal` | 不改写的用户目标 |
+| `target_binding` | 服务端 desktop workspace 锚点 |
+| `revision` / `status` | 顺序变化号与 running/verified/blocked/canceled |
+| `last_transition` | 最近一次机械结果 |
+| `failure_summary` / `last_error` | 终态失败或取消事实 |
 
-Reducer采用乐观 revision：事件的 `base_revision` 必须等于当前 projection revision。陈旧事件会被拒绝，避免模型思考期间的旧结果覆盖新状态。
-
-当前 live的 obligation必须：required、desired state 等于原始 goal、无依赖/输入工件/输出绑定、required capability仅 `visual.interact`，且禁用独立视觉 verifier。
-
-Actor 的 completion claim 会在写入辅助 Mission history、completion snapshot 或诊断投影之前
-缓存为最终 narration 与 `user_result`。这些旁路记录即使失败，也不能撤销
-`MISSION_VERIFIED`，不能丢失已缓存的 `user_result`。
+`MissionRuntime` 的 turn lock 是唯一写 owner。`reply_to_user` 调用 `complete()`，`blocked`
+调用 `block()`；没有 obligation 图、事件 reducer/replay、evidence registry 或第二完成验证器。
+辅助 trace 写入失败不能撤销已完成状态，也不能丢失已缓存的 `user_result`。
 
 ## 11. Runtime statuses
 
 | 状态 | 含义 | 外层是否继续 |
 | --- | --- | --- |
-| `ACTION_RECORDED` | 输入与对应事件已记录 | 是，新帧下一 Turn |
+| `ACTION_RECORDED` | 输入结果已记录 | 是，新帧下一 Turn |
+| `OBSERVATION_REQUESTED` | 模型请求下一张完整桌面帧 | 是 |
 | `STALE_DISCARDED` | 明确未执行，或 identity 一致但结果不明且释放清理正常；均不重放 | 是 |
-| `VERIFICATION_RECORDED` | 中间验证事件已接受 | 是 |
-| `VERIFICATION_REQUIRED` | enum 保留值；当前生产 `MissionRuntime` 没有返回它的路径 | 当前不应观测到 |
-| `MISSION_VERIFIED` | Actor完成 claim 的状态投影 | 终态成功 |
+| `MISSION_VERIFIED` | Actor通过 `reply_to_user` 完成 | 终态成功 |
 | `INVALID_PROPOSAL` | 模型结构/参数非法 | 是，在剩余预算内持续重决策 |
 | `ACTOR_ERROR` | 模型调用或角色执行异常 | 是，在剩余预算内持续重决策 |
-| `STATE_REJECTED` | 身份、证据、合同或预算无法证明 | 终态失败 |
+| `STATE_REJECTED` | 当前机械合同或预算不成立 | 终态失败 |
 | `UNAVAILABLE` | 当前 route/tool不成立 | 通常失败；pause边界有特殊投影 |
 | `BLOCKED` | Actor/Mission 主动报告不可推进，或 controller 异常、identity 错乱、释放清理未确认 | 终态 |
 | `CANCELED` | stop被接受 | 终态 |
 | `BUSY` | 同一 Runtime已有 Turn持锁 | 调用错误/不可并发 |
 
-ARP对外状态另有 `queued/running/paused/reply/done/failed/canceled`。不要把这两个枚举混用。
+ARP对外状态另有 `queued/running/paused/reply/done/failed/canceled`；当前产品成功投影为
+`done`，`reply` 仅为兼容历史状态。不要把这两个枚举混用。
 
 ## 12. ARP 图合同
 
@@ -407,15 +371,13 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 | GET | `/api/v2/jobs/{job_id}` | 异步job状态/结果 |
 | POST | `/api/v2/jobs/{job_id}/cancel` | 取消job |
 
-### 14.3 产品 goal、Thread 与 lease
+### 14.3 产品 goal 与 Thread
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | POST | `/api/v2/goals/runs` | 唯一产品自然语言 goal入口 |
+| GET | `/api/v2/threads` | Thread列表 |
 | GET | `/api/v2/threads/{thread_id}` | 服务端 Thread/Turn快照 |
-| GET | `/api/v2/desktop-context` | Electron让出后捕获当前外部目标 |
-| POST | `/api/v2/goals/runs/{run_id}/desktop-lease` | 精确交付 execution context |
-| POST | `/api/v2/goals/runs/{run_id}/desktop-lease/fail` | 明确关闭未交付lease |
 
 ### 14.4 ARP、Automation IR 与生成辅助
 
@@ -428,7 +390,6 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 | POST | `/api/v2/automation-ir/runs` | 按 IR `runtime.kind` 分支：`arp_graph` 返回 `run`；`wps_replay` 返回 `replay_id/job`。当前 Studio 运行按钮只生成前者 |
 | GET | `/api/v2/arp/runs/{run_id}` | ARP execution快照 |
 | POST | `/api/v2/arp/runs/{run_id}/cancel` | ARP取消 |
-| POST | `/api/v2/arp/runs/{run_id}/gate` | human gate决策 |
 
 `POST /api/v2/task-contracts/compile`（Task Contract 编译）已随旧任务契约链删除。
 
@@ -483,13 +444,13 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 
 | 类型 | 路径 | 说明 |
 | --- | --- | --- |
-| WebSocket | `/ws/events?token=...` | 广播已认证 BUS 事件；大多数 run 投影可由 HTTP 快照刷新，但 handoff release 有终态后重载缺口，见运行时第 6.2 节 |
+| WebSocket | `/ws/events?token=...` | 广播已认证 BUS 事件；run 投影也可由 HTTP 快照刷新 |
 
-### 14.9 挂载应用
+### 14.9 已移除的挂载应用
 
-| 类型 | 路径 | 说明 |
-| --- | --- | --- |
-| Streamable HTTP MCP | `/mcp` | 挂载的 ChatGPT connector MCP 应用；受控制 token middleware 保护，不是 Electron `:7880` 的兼容 MCP 服务 |
+WinPilot 的 Streamable HTTP `/mcp` 挂载已删除。产品 Actor 只通过显式配置的外部 MCP 和
+`ConnectorGateway` 使用 connector；Electron `:7880/mcp` 是流程编辑兼容面，不是产品
+Agent server。
 
 ## 15. Electron IPC 总表
 
@@ -498,7 +459,6 @@ OPTIONS交给 CORS middleware，真实请求仍要 token。API文档端点被关
 | 组 | Channel |
 | --- | --- |
 | 原生窗口 | `window:set-titlebar-theme`, `window:minimize`, `window:toggle-maximize`, `window:close` |
-| 桌面交接 | `window:prepare-desktop-handoff`, `window:bind-desktop-handoff`, `window:release-desktop-handoff` |
 | 文件 | `dialog:openFile`, `dialog:saveFile`, `file:read`, `file:write` |
 | 旧 Flow engine | `engine:start`, `engine:stop`, `engine:pause`, `engine:resume`, `engine:status` |
 | 托管 Runtime | `winpilot:url`, `winpilot:connection`, `winpilot:ensure`, `winpilot:restart` |
@@ -570,7 +530,7 @@ never infer wire from:
 | Bound proposal | envelope/frame correlation | 这笔已解析 proposal 对应哪张屏幕 | OS收到输入 |
 | Physical | physical args/raw route/receipt | 实际尝试内容及输入完成三态 | 用户目标满足 |
 | Next screen | 新权威屏幕 | 动作后的真实可见状态 | 应该怎样解释该状态 |
-| Mission | reducer events/Actor claim | 模型何时判断完成 | 独立语义复核 |
+| Mission | `MissionState` / Actor result | 模型何时判断完成 | 独立语义复核 |
 | E2E report | 真实应用终态与测试事件 | 当前测试样本结果 | 替代生产 Actor 的完成判断 |
 
 这些层只用于从结果反向定位同一 decision 的首个分歧。trace、报告和 memory 都不加入

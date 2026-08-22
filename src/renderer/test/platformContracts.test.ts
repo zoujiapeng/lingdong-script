@@ -168,42 +168,6 @@ describe('control plane client contracts', () => {
     }
   });
 
-  it('captures the post-handoff desktop target through the authenticated control plane', async () => {
-    const target = {
-      format: 'desktop-target/1',
-      hwnd: 501,
-      title: 'Visible target',
-      process_id: 902,
-      class_name: 'TargetWindow',
-      rect: [10, 20, 1210, 820],
-      captured_at: 1_750_000,
-      foreground_verified: true,
-      usable: true,
-      failure_type: '',
-      reason: '',
-    };
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ ok: true, target }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }));
-    vi.stubGlobal('fetch', fetchMock);
-    try {
-      await expect(
-        new ControlPlaneClient('http://127.0.0.1:8765', 'managed-token')
-          .captureDesktopContext(7712),
-      ).resolves.toEqual(target);
-
-      expect(String(fetchMock.mock.calls[0][0])).toContain(
-        '/api/v2/desktop-context?exclude_process_id=7712',
-      );
-      expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({
-        Authorization: 'Bearer managed-token',
-      });
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
   it('keeps the managed control token in the client transport', async () => {
     (window as any).electronAPI = {
       ensureWinpilot: vi.fn(async () => ({

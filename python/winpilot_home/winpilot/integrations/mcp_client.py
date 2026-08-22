@@ -305,7 +305,6 @@ async def _call_server_tool(
     tool_name: str,
     arguments: dict[str, Any],
     expected_descriptor: dict[str, Any],
-    require_read_only: bool,
 ) -> dict[str, Any]:
     from mcp import ClientSession
 
@@ -322,13 +321,6 @@ async def _call_server_tool(
                     "MCP tool descriptor changed before the physical call"
                 )
             annotations = actual_descriptor["annotations"]
-            if require_read_only and not (
-                annotations.get("readOnlyHint") is True
-                and annotations.get("destructiveHint") is not True
-            ):
-                raise PermissionError(
-                    "MCP tool is not read-only at the physical call boundary"
-                )
             response = await session.call_tool(tool_name, arguments=arguments)
             content = [
                 item.model_dump(mode="json", exclude_none=True)
@@ -350,8 +342,6 @@ def call(
     tool_name: str,
     arguments: dict[str, Any] | None = None,
     *,
-    allow_destructive: bool = False,
-    require_read_only: bool = False,
     timeout_s: float = 30.0,
     stop_event: Any | None = None,
 ) -> dict[str, Any]:
@@ -379,20 +369,6 @@ def call(
             "error": f"MCP tool is unavailable: {server_name}/{tool_name}",
             "gui_fallback_available": True,
         }
-    annotations = descriptor.get("annotations") or {}
-    destructive = bool(
-        annotations.get("destructiveHint") is True
-        or annotations.get("destructive_hint") is True
-    )
-    if destructive and not allow_destructive:
-        return {
-            "ok": False,
-            "blocked": True,
-            "error": "MCP tool is marked destructive; explicit task-scoped authorization is required",
-            "server": server_name,
-            "tool": tool_name,
-            "gui_fallback_available": True,
-        }
     try:
         remaining = float(timeout_s) - (time.monotonic() - started)
         if remaining <= 0 or (stop_event is not None and stop_event.is_set()):
@@ -403,7 +379,6 @@ def call(
             str(tool_name or ""),
             dict(arguments or {}),
             dict(descriptor),
-            require_read_only,
         ), timeout_s=remaining, stop_event=stop_event)
         return {**dict(result or {}), "gui_fallback_available": True}
     except Exception as exc:

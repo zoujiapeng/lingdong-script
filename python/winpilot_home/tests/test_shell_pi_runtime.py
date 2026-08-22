@@ -127,34 +127,6 @@ def test_other_shell_wrapper_is_left_to_the_command_body() -> None:
     assert shell._unwrap_redundant_shell_command(command, "powershell") == command
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        (
-            "Stop-Process -Name "
-            f"{shell.os.path.splitext(shell.os.path.basename(shell.sys.executable))[0]} "
-            "-Force"
-        ),
-        f"taskkill /F /IM {shell.os.path.basename(shell.sys.executable)}",
-        f"Stop-Process -Id {shell.os.getpid()} -Force",
-    ],
-)
-def test_runtime_host_termination_is_the_one_process_kill_boundary(
-    command: str,
-) -> None:
-    result = shell._runtime_host_termination_guard(command)
-
-    assert result is not None
-    assert result["blocked"] is True
-    assert "intended child PID" in result["error"]
-
-
-def test_targeted_child_process_kill_remains_available() -> None:
-    command = f"Stop-Process -Id {shell.os.getpid() + 100000} -Force"
-
-    assert shell._runtime_host_termination_guard(command) is None
-
-
 def test_result_above_generic_boundary_is_recoverable(monkeypatch) -> None:
     monkeypatch.setattr(
         shell,
@@ -179,8 +151,7 @@ def test_result_above_generic_boundary_is_recoverable(monkeypatch) -> None:
     not hasattr(subprocess, "CREATE_NO_WINDOW"),
     reason="Windows PowerShell contract",
 )
-def test_powershell_default_file_writes_are_utf8(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
+def test_powershell_default_file_writes_are_utf8(tmp_path) -> None:
     target = tmp_path / "unicode-source.py"
     escaped = str(target).replace("'", "''")
 
@@ -197,9 +168,7 @@ def test_powershell_default_file_writes_are_utf8(tmp_path, monkeypatch) -> None:
     not hasattr(subprocess, "CREATE_NO_WINDOW"),
     reason="Windows PowerShell contract",
 )
-def test_powershell_preserves_native_exit_code_and_stderr(monkeypatch) -> None:
-    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
-
+def test_powershell_preserves_native_exit_code_and_stderr() -> None:
     result = shell.run(
         'cmd /c "echo ACTIONABLE 1>&2 & exit /b 23"',
         shell="powershell",
@@ -215,9 +184,7 @@ def test_powershell_preserves_native_exit_code_and_stderr(monkeypatch) -> None:
     not hasattr(subprocess, "CREATE_NO_WINDOW"),
     reason="Windows PowerShell contract",
 )
-def test_powershell_uses_final_statement_status(monkeypatch) -> None:
-    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
-
+def test_powershell_uses_final_statement_status() -> None:
     result = shell.run(
         "cmd /c exit 23; Write-Output recovered",
         shell="powershell",
@@ -232,8 +199,7 @@ def test_powershell_uses_final_statement_status(monkeypatch) -> None:
     not hasattr(subprocess, "CREATE_NO_WINDOW"),
     reason="Windows PowerShell contract",
 )
-def test_powershell_preserves_formatted_object_output(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
+def test_powershell_preserves_formatted_object_output(tmp_path) -> None:
     escaped = str(tmp_path).replace("'", "''")
 
     result = shell.run(
@@ -248,7 +214,6 @@ def test_powershell_preserves_formatted_object_output(tmp_path, monkeypatch) -> 
 
 def test_empty_command_publishes_the_rejection(monkeypatch) -> None:
     events = []
-    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
     monkeypatch.setattr(
         shell.BUS,
         "publish",
@@ -294,8 +259,6 @@ def test_run_detached_returns_started_receipt_and_pollable_artifacts(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(shell, "SCRIPTS_DIR", tmp_path)
-    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
-    monkeypatch.setattr(shell.safety, "guard", lambda _script: None)
     monkeypatch.setattr(
         shell,
         "run",
@@ -336,7 +299,6 @@ def test_run_detached_status_and_logs_follow_real_child_exit(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(shell, "SCRIPTS_DIR", tmp_path)
-    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
 
     result = shell.run_detached(
         "Write-Output 'DETACHED_OK'; "

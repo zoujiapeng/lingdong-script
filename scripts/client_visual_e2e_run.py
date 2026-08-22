@@ -347,29 +347,6 @@ def _focus_window(hwnd: int) -> dict[str, Any]:
     }
 
 
-def _focus_target_after_desktop_yield(
-    electron_hwnd: int,
-    target_hwnd: int,
-    *,
-    timeout: float = 30.0,
-    poll_interval: float = 0.02,
-) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if win32gui.IsIconic(electron_hwnd):
-            evidence = _focus_window(target_hwnd)
-            return {
-                **evidence,
-                "electron_hwnd": int(electron_hwnd),
-                "electron_minimized_observed": True,
-            }
-        time.sleep(poll_interval)
-    raise RuntimeError(
-        "Electron did not minimize for a desktop lease; "
-        "the target window was not focused"
-    )
-
-
 def _capture_window(hwnd: int, path: Path) -> str:
     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
     ImageGrab.grab(
@@ -984,20 +961,6 @@ def run_visual_case(
             target_hwnd, case_dir / "target-before-submit.png",
         )
 
-        def handoff(
-            driver: client_harness.ElectronClientDriver,
-            _client_result: dict[str, Any],
-        ) -> dict[str, Any]:
-            evidence = _focus_target_after_desktop_yield(
-                int(driver.identity.hwnd),
-                target_hwnd,
-            )
-            evidence["screenshot"] = _capture_window(
-                target_hwnd,
-                driver.output_dir / "target-after-submit.png",
-            )
-            return evidence
-
         oracle_result: dict[str, Any] = {}
 
         def verify_external_state(_client_result: dict[str, Any]) -> dict[str, Any]:
@@ -1071,7 +1034,6 @@ def run_visual_case(
             _client_case_spec(source),
             output_root=case_dir / "client",
             reset_session=True,
-            after_submit=handoff,
             independent_verifier=verify_external_state,
         )
         result["client_result"] = client_result

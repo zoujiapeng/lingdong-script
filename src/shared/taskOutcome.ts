@@ -125,7 +125,6 @@ export function taskResultText(value: unknown): string {
 
 const FAILURE_STAGE_LABELS: Record<string, string> = {
   model_routing: '模型决策',
-  desktop_handoff: '桌面交接',
   target_binding: '目标窗口绑定',
   screenshot: '画面截图',
   tool_format: '工具调用格式',

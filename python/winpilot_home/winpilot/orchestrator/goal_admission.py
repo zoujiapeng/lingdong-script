@@ -6,7 +6,6 @@ specific steps.
 """
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -17,13 +16,6 @@ from .contracts import ArpRuntimeVersion
 
 
 GOAL_ADMISSION_FORMAT = "goal-admission/1"
-_CLIENT_EXECUTION_CONTEXT_FIELDS = {
-    "format",
-    "entrypoint",
-    "submitted_at",
-    "desktop_handoff",
-    "target_window",
-}
 
 
 class GoalAdmissionError(ValueError):
@@ -45,24 +37,6 @@ class GoalRunRequest(BaseModel):
 
     goal: str = Field(min_length=1)
     thread_id: str = Field(default="", max_length=128)
-
-
-class DesktopLeaseRequest(BaseModel):
-    """One exact external target captured after the control surface yields."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    lease_id: str = Field(min_length=1, max_length=128)
-    execution_context: dict[str, Any]
-
-
-class DesktopLeaseFailureRequest(BaseModel):
-    """Client-side failure to prepare one requested desktop lease."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    lease_id: str = Field(min_length=1, max_length=128)
-    reason: str = Field(min_length=1, max_length=1024)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,35 +83,6 @@ def admit_goal(
     )
 
 
-def bind_client_execution_context(
-    execution_context: dict[str, Any],
-    *,
-    task_id: str,
-) -> dict[str, Any]:
-    """Bind a client-owned handoff context to the server-owned graph identity."""
-
-    if type(execution_context) is not dict:
-        raise GoalAdmissionError("execution_context must be a plain JSON object")
-    context = deepcopy(execution_context)
-    if type(context) is not dict:  # pragma: no cover - validator invariant
-        raise GoalAdmissionError("execution_context must be a plain JSON object")
-    actual = set(context)
-    if actual != _CLIENT_EXECUTION_CONTEXT_FIELDS:
-        raise GoalAdmissionError(
-            "execution_context fields mismatch: "
-            f"missing={sorted(_CLIENT_EXECUTION_CONTEXT_FIELDS - actual)!r}, "
-            f"unknown={sorted(actual - _CLIENT_EXECUTION_CONTEXT_FIELDS)!r}"
-        )
-    if type(task_id) is not str or not task_id:
-        raise GoalAdmissionError("server-owned task_id must be non-empty")
-    return {
-        "execution_context": {
-            **context,
-            "task_id": task_id,
-        },
-    }
-
-
 __all__ = [
     "GOAL_ADMISSION_FORMAT",
     "GoalAdmissionDecision",
@@ -145,8 +90,5 @@ __all__ = [
     "GoalAdmissionUnavailable",
     "GoalExecutionRoute",
     "GoalRunRequest",
-    "DesktopLeaseFailureRequest",
-    "DesktopLeaseRequest",
     "admit_goal",
-    "bind_client_execution_context",
 ]

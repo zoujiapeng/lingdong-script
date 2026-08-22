@@ -47,27 +47,18 @@ from .common import (
 
 
 VISUAL_ACTOR_MODEL_ROLE = "vnext_visual_actor"
+_PROVIDER_REJECTION_PREFIX = (
+    "provider rejected model response: finish_reason="
+)
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
 Use original_goal, current JPEG, task_state, previous action, and tools. Choose
 one tool, or batch independent non-GUI tools. Briefly narrate. Coordinates are
 exact submitted-image pixels. Chat and act naturally; runtime does not classify
-or route. If the current
-screen shows the goal complete with none remaining, call claim_obligation_done.
+or route. To answer a chat request, or when the current screen shows the goal
+complete with none remaining, call reply_to_user with the answer or result.
 If an external condition no tool can change blocks progress, call blocked.
 pointer_held persists until deliberately released. The current JPEG is the
 only authoritative visual state."""
-
-INITIAL_ACTOR_SYSTEM_CONTRACT = """\
-You are a Windows desktop agent on the user's real computer. Answer chat
-questions directly in the user's language. The observe_desktop tool grants
-access to the live screen; use it when you need to look at or operate the
-desktop. You may chat, act, or interleave both freely: narrate what you are
-doing briefly when useful. Tool calls in one response run concurrently; put
-dependent steps in later responses after reading their results. Keep any
-useful phase in task_state_update and dependent unfinished work in its
-remaining_items; revise both as you learn. For
-mixed requests, respond naturally while you work and summarize at the end.
-Never invent results; verify by looking at the screen."""
 
 _TOOL_DESCRIPTIONS = {
     "move_mouse": (
@@ -131,8 +122,8 @@ _TOOL_DESCRIPTIONS = {
         "reconsider the next step."
     ),
     "claim_obligation_done": (
-        "Finish without further mutation when the current image shows the "
-        "requested result and your remaining_items has no unfinished work."
+        "Answer the user or finish without further mutation. Put the concise "
+        "answer or completed result in concise_claim."
     ),
     "blocked": (
         "Report an external blocker only when no supplied action can advance."
@@ -142,6 +133,7 @@ _TOOL_DESCRIPTIONS = {
 _MODEL_TOOL_NAMES = {
     "hotkey": "press_key",
     "observe": "refresh_desktop",
+    "claim_obligation_done": "reply_to_user",
     "copy_current_view": "copy_screen_to_clipboard",
 }
 _RUNTIME_TOOL_NAMES = {
@@ -179,17 +171,6 @@ _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
 _CONNECTOR_TOOLS = frozenset({_CONNECTOR_SEARCH_TOOL, _CONNECTOR_CALL_TOOL})
 _FLOW_FRAGMENT_TOOL = "propose_flow_fragment"
-_STATUS_AGENT_TOOL = "get_agent_status"
-_STATUS_MEMORY_TOOL = "get_memory_status"
-_STATUS_CAPABILITIES_TOOL = "get_capabilities"
-_STATUS_TOOLS = frozenset(
-    {
-        _STATUS_AGENT_TOOL,
-        _STATUS_MEMORY_TOOL,
-        _STATUS_CAPABILITIES_TOOL,
-    }
-)
-_STANDALONE_STATUS_CALL_ALLOWANCE = 2
 _SHELL_TOOL = "run_shell"
 _DETACHED_SHELL_TOOL = "run_detached"
 _WRITE_FILE_TOOL = "write_file"
@@ -211,12 +192,6 @@ _OPTIONAL_TOOL_DEFAULTS = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class _InitialExchange:
-    messages: tuple[dict[str, Any], ...]
-    tool_call_id: str
-
-
 @dataclass(slots=True)
 class _VisualExchange:
     """One pending provider-native tool transcript awaiting its GUI result."""
@@ -230,7 +205,7 @@ class _VisualExchange:
 def _text_only_tool_transcript(
     messages: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], ...]:
-    """Keep this run's tool conversation without retaining old screenshots."""
+    """Keep this run's tool conversation without old screenshots or reasoning."""
 
     transcript: list[dict[str, Any]] = []
     for message in messages:
@@ -252,15 +227,6 @@ def _text_only_tool_transcript(
             item["content"] = ""
         transcript.append(item)
     return tuple(transcript)
-
-
-@dataclass(frozen=True, slots=True)
-class VisualActorTurnAdmission:
-    """One text-first Actor result before any desktop lease is acquired."""
-
-    kind: str
-    reply: str = ""
-    narration: str = ""
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
@@ -378,6 +344,16 @@ def _finish_reason(response: Any) -> str:
     ):
         return ""
     return str(member(choices[0], "finish_reason") or "").casefold()
+
+
+def _provider_rejection_detail(response: Any) -> str:
+    """Classify a provider-side refusal without inspecting response prose."""
+
+    reason = _finish_reason(response)
+    if reason in {"", "stop", "tool_calls", "length"}:
+        return ""
+    reason = re.sub(r"[^a-z0-9._-]+", "_", reason).strip("_")[:80]
+    return _PROVIDER_REJECTION_PREFIX + (reason or "unknown")
 
 
 def _truncation_messages(response: Any) -> list[dict[str, Any]]:
@@ -623,10 +599,9 @@ def _actor_parameters_from_schema(
         raise LiveModelRoleError(
             f"Actor tool {name!r} shadows Actor-owned metadata"
         )
-    # Only one native visual exchange is retained between calls.  Keep the
-    # model-owned scratchpad channel available on every semantic action so a
-    # fact read correctly on an earlier screen is not forced back through OCR
-    # on every later screen.  This is context, not a runtime plan or verifier.
+    # Completed tool/result exchanges are retained without old images or
+    # prose. Keep the model-owned scratchpad available for facts that should
+    # not be forced back through OCR. This is context, not a runtime plan.
     properties["task_state_update"] = {
         **deepcopy(TASK_STATE_UPDATE_SCHEMA),
         "default": {"scratchpad": None},
@@ -1205,55 +1180,6 @@ def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _status_tool_definitions() -> list[dict[str, Any]]:
-    """Read-only Actor-owned status tools resolved without a desktop lease."""
-
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": _STATUS_AGENT_TOOL,
-                "description": "Read agent status.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": _STATUS_MEMORY_TOOL,
-                "description": "Read memory status.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": _STATUS_CAPABILITIES_TOOL,
-                "description": "Read current capabilities.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            },
-        },
-    ]
-
-
 def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
     """Expose the generic local primitives implemented by the active runner."""
 
@@ -1433,81 +1359,6 @@ def _list_windows_tool_definitions() -> list[dict[str, Any]]:
             },
         },
     ]
-
-
-def _status_exchange(
-    response: Any,
-) -> tuple[dict[str, Any], str, str, dict[str, Any]] | None:
-    """Detect one Actor-owned read-only status tool call."""
-    message = response_message(response)
-    calls = member(message, "tool_calls")
-    if (
-        isinstance(calls, (str, bytes))
-        or not isinstance(calls, Sequence)
-        or len(calls) != 1
-    ):
-        return None
-    call = calls[0]
-    function = member(call, "function")
-    name = member(function, "name") if function is not None else None
-    if name not in _STATUS_TOOLS:
-        return None
-    if member(call, "type") != "function":
-        raise LiveModelRoleError("Actor status tool call must be a function")
-    call_id = member(call, "id")
-    raw_arguments = member(function, "arguments")
-    if type(call_id) is not str or not call_id:
-        raise LiveModelRoleError("Actor status tool call requires an id")
-    arguments = _decode_arguments(raw_arguments)
-    # Status tools declare no parameters; surplus fields (for example the
-    # optional task_state_update scratchpad) are tolerated like owned tools.
-    for field in tuple(arguments):
-        arguments.pop(field, None)
-    content = member(message, "content")
-    if content is not None and type(content) is not str:
-        raise LiveModelRoleError("Actor status content must be text or null")
-    assistant: dict[str, Any] = {
-        "role": "assistant",
-        "content": content or "",
-        "tool_calls": [
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "arguments": raw_arguments,
-                },
-            }
-        ],
-    }
-    reasoning = member(message, "reasoning_content")
-    if type(reasoning) is str:
-        assistant["reasoning_content"] = reasoning
-    return assistant, call_id, name, arguments
-
-
-def _call_status(
-    provider: Any,
-    name: str,
-    arguments: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Resolve one Actor-owned status query from the injected Runtime facts."""
-
-    if provider is None or not callable(getattr(provider, "resolve", None)):
-        return _actionable_tool_result(
-            name,
-            {"ok": False, "error": "status provider is unavailable"},
-        )
-    try:
-        result = provider.resolve(name)
-    except Exception as exc:
-        return _actionable_tool_error(name, exc)
-    if not isinstance(result, Mapping):
-        return _actionable_tool_error(
-            name,
-            TypeError("status provider returned a non-object result"),
-        )
-    return _actionable_tool_result(name, result)
 
 
 def _window_text_exchange(
@@ -2033,76 +1884,6 @@ def _initial_calls_from_response(
     return list(calls)
 
 
-def _initial_call_envelope(
-    call: Mapping[str, Any],
-) -> tuple[str, str, dict[str, Any]]:
-    """Validate transcript fields before any call in the batch can execute."""
-    if member(call, "type") != "function":
-        raise LiveModelRoleError("Actor initial tool call must be a function")
-    call_id = member(call, "id")
-    if type(call_id) is not str or not call_id:
-        raise LiveModelRoleError("Actor initial tool call requires an id")
-    function = member(call, "function")
-    name = member(function, "name") if function is not None else None
-    if type(name) is not str or name not in {
-        "observe_desktop",
-        *_STATUS_TOOLS,
-        *_CONNECTOR_TOOLS,
-    }:
-        raise LiveModelRoleError(
-            f"Actor initial turn returned an unapproved tool: {name!r}"
-        )
-    arguments = _decode_arguments(member(function, "arguments"))
-    return call_id, name, arguments
-
-
-def _execute_initial_call(
-    call: Mapping[str, Any],
-    *,
-    status_provider: Any,
-    connector_gateway: Any,
-    timeout_s: float,
-    stop_event: Any | None,
-) -> dict[str, Any]:
-    """Execute one non-terminal initial tool call and return its result."""
-    _call_id, name, arguments = _initial_call_envelope(call)
-    if name in _STATUS_TOOLS:
-        if status_provider is None or not callable(
-            getattr(status_provider, "resolve", None)
-        ):
-            return _actionable_tool_result(
-                str(name),
-                {"ok": False, "error": "status provider is unavailable"},
-            )
-        # Status tools declare no parameters; surplus fields are tolerated.
-        for field in tuple(arguments):
-            arguments.pop(field, None)
-        try:
-            result = status_provider.resolve(name)
-        except Exception as exc:
-            return _actionable_tool_error(str(name), exc)
-        if not isinstance(result, Mapping):
-            return _actionable_tool_error(
-                str(name),
-                TypeError("status provider returned a non-object result"),
-            )
-        return _actionable_tool_result(str(name), result)
-    if name is not None and name in _CONNECTOR_TOOLS:
-        try:
-            return _call_connector(
-                connector_gateway,
-                name,
-                arguments,
-                timeout_s=timeout_s,
-                stop_event=stop_event,
-            )
-        except Exception as exc:
-            return _actionable_tool_error(str(name), exc)
-    raise LiveModelRoleError(
-        f"Actor initial turn returned an unapproved tool: {name!r}"
-    )
-
-
 def _visual_batch_call(
     call: Mapping[str, Any],
 ) -> tuple[str, str, dict[str, Any]]:
@@ -2120,9 +1901,7 @@ def _visual_batch_call(
         }],
     }
     exchange = None
-    if name in _STATUS_TOOLS:
-        exchange = _status_exchange(response)
-    elif name == _SHELL_TOOL:
+    if name == _SHELL_TOOL:
         exchange = _shell_exchange(response)
     elif name in _LOCAL_UTILITY_TOOLS:
         exchange = _local_utility_exchange(response)
@@ -2148,7 +1927,6 @@ def _execute_visual_batch_call(
     name: str,
     arguments: Mapping[str, Any],
     *,
-    status_provider: Any,
     shell_runner: Any,
     connector_gateway: Any,
     window_text_reader: Any,
@@ -2158,8 +1936,6 @@ def _execute_visual_batch_call(
     stop_event: Any | None,
 ) -> dict[str, Any]:
     """Execute one model-selected non-GUI batch item."""
-    if name in _STATUS_TOOLS:
-        return _call_status(status_provider, name, arguments)
     if name == _SHELL_TOOL:
         return _call_shell(
             shell_runner,
@@ -2178,71 +1954,6 @@ def _execute_visual_batch_call(
         arguments,
         timeout_s=timeout_s,
         stop_event=stop_event,
-    )
-
-
-def _initial_admission_from_response(
-    response: Any,
-    messages: Sequence[Mapping[str, Any]],
-) -> tuple[VisualActorTurnAdmission, _InitialExchange | None]:
-    message = response_message(response)
-    content = member(message, "content")
-    calls = _initial_calls_from_response(response)
-    if not calls:
-        if type(content) is not str or not content.strip():
-            raise LiveModelRoleError(
-                "Actor initial turn returned neither a reply nor a desktop observation"
-            )
-        return VisualActorTurnAdmission(
-            kind="reply",
-            reply=content.strip(),
-        ), None
-    if content is not None and type(content) is not str:
-        raise LiveModelRoleError(
-            "Actor initial content must be text or null"
-        )
-    observe_calls = [
-        call for call in calls
-        if member(member(call, "function"), "name") == "observe_desktop"
-    ]
-    if len(observe_calls) != 1:
-        raise LiveModelRoleError(
-            "Actor initial turn must request at most one desktop observation"
-        )
-    call = observe_calls[0]
-    call_id = member(call, "id")
-    function = member(call, "function")
-    arguments = member(function, "arguments") if function is not None else None
-    if type(call_id) is not str or not call_id:
-        raise LiveModelRoleError("Actor initial tool call requires an id")
-    if _decode_arguments(arguments):
-        raise LiveModelRoleError("observe_desktop does not accept arguments")
-    assistant: dict[str, Any] = {
-        "role": "assistant",
-        "content": content or "",
-        "tool_calls": [
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {
-                    "name": "observe_desktop",
-                    "arguments": arguments,
-                },
-            }
-        ],
-    }
-    reasoning = member(message, "reasoning_content")
-    if type(reasoning) is str:
-        assistant["reasoning_content"] = reasoning
-    return (
-        VisualActorTurnAdmission(
-            kind="desktop",
-            narration=(content or "").strip(),
-        ),
-        _InitialExchange(
-            messages=tuple(deepcopy([*messages, assistant])),
-            tool_call_id=call_id,
-        ),
     )
 
 
@@ -2354,7 +2065,7 @@ class FlowFragmentProposer:
 
 
 class LiveVisualActor:
-    """Visual decisions with one bounded native exchange and no mutation authority."""
+    """One model choosing from a bounded native exchange and generic tools."""
 
     def __init__(
         self,
@@ -2368,11 +2079,11 @@ class LiveVisualActor:
         on_response: Callable[[Any], None] | None = None,
         on_activity: Callable[[Mapping[str, Any]], None] | None = None,
         connector_gateway: Any | None = None,
-        status_provider: Any | None = None,
         shell_runner: Any | None = None,
         window_text_reader: Any | None = None,
         copy_current_view_runner: Any | None = None,
         windows_reader: Any | None = None,
+        history: Sequence[Mapping[str, Any]] = (),
         max_attempts: int = 1,
     ) -> None:
         if client is None:
@@ -2400,11 +2111,6 @@ class LiveVisualActor:
             if getattr(connector_gateway, "available", False) is True
             else None
         )
-        self._status_provider = (
-            status_provider
-            if callable(getattr(status_provider, "resolve", None))
-            else None
-        )
         self._shell_runner = (
             shell_runner
             if callable(getattr(shell_runner, "run", None))
@@ -2421,6 +2127,11 @@ class LiveVisualActor:
         self._windows_reader = (
             windows_reader if callable(windows_reader) else None
         )
+        if isinstance(history, (str, bytes)) or not isinstance(
+            history, Sequence
+        ):
+            raise LiveModelRoleError("Actor thread history must be a sequence")
+        self._thread_history = tuple(deepcopy(history))
         if (
             type(max_attempts) is not int
             or not 1 <= max_attempts <= 5
@@ -2428,14 +2139,10 @@ class LiveVisualActor:
             raise LiveModelRoleError("max_attempts must be in [1, 5]")
         self._max_attempts = max_attempts
         self._previous_visual_exchange: _VisualExchange | None = None
-        # A new frame is the visual truth.  Keep only the immediately
-        # preceding completed tool exchange so the model gets the result of
-        # its last action without accumulating a second, stale transcript of
-        # the task.
-        self._completed_visual_exchange: tuple[dict[str, Any], ...] = ()
-        self._initial_exchange: _InitialExchange | None = None
-        self._initial_turn_started = False
-        self._initial_turn_terminal = False
+        # Keep the completed action/result chain for task continuity. Old
+        # screenshots, narration, and private reasoning are stripped above;
+        # the current JPEG remains the only visual truth.
+        self._completed_visual_history: list[dict[str, Any]] = []
         self._pending_task_state: ActorTaskStateUpdate | None = None
         self._state_lock = threading.Lock()
 
@@ -2444,10 +2151,6 @@ class LiveVisualActor:
         """Finite fallback for direct role users outside the live Runtime."""
 
         local_allowance = (
-            _STANDALONE_STATUS_CALL_ALLOWANCE
-            if self._status_provider is not None
-            else 0
-        ) + (
             _STANDALONE_CONNECTOR_CALL_ALLOWANCE
             if self._connector_gateway is not None
             else 0
@@ -2607,346 +2310,6 @@ class LiveVisualActor:
             raise LiveModelRoleError("Actor model-call allowance is invalid")
         return model_call_limit
 
-    def begin_turn(
-        self,
-        goal: str,
-        *,
-        history: Sequence[Mapping[str, Any]] = (),
-        stop_event: threading.Event | None = None,
-        _model_call_limit: int | None = None,
-    ) -> VisualActorTurnAdmission:
-        """Reply directly or request the first desktop observation."""
-
-        if type(goal) is not str or not goal.strip():
-            raise LiveModelRoleError("goal must not be empty")
-        goal = goal.strip()
-        with self._state_lock:
-            if self._initial_turn_started:
-                raise LiveModelRoleError("Actor initial turn is call-once")
-            self._initial_turn_started = True
-        system_message = {
-            "role": "system",
-            "content": INITIAL_ACTOR_SYSTEM_CONTRACT,
-        }
-        messages = _thread_messages(history, goal)
-        terminal_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "observe_desktop",
-                    "description": "Observe the desktop.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "task_state_update": {
-                                **deepcopy(TASK_STATE_UPDATE_SCHEMA),
-                                "default": {"scratchpad": None},
-                            },
-                        },
-                        "required": [],
-                        "additionalProperties": False,
-                    },
-                    "strict": True,
-                },
-            },
-        ]
-        status_tools = (
-            _status_tool_definitions()
-            if self._status_provider is not None
-            else []
-        )
-        connector_tools = _connector_tool_definitions(self._connector_gateway)
-        provider_request = {
-            "model": self._model,
-            "messages": [system_message, *messages],
-            "tools": [
-                *terminal_tools,
-                *status_tools,
-                *connector_tools,
-            ],
-            "tool_choice": "auto",
-            "temperature": 0.0,
-            "max_completion_tokens": self._max_output_tokens,
-        }
-        admission: VisualActorTurnAdmission | None = None
-        exchange: _InitialExchange | None = None
-        model_call_allowance = self._model_call_allowance(_model_call_limit)
-        seen_tool_results: dict[tuple[str, str], tuple[str, int]] = {}
-        for model_call_index in range(model_call_allowance):
-            outcome = invoke_chat_completion(
-                self._client,
-                decision_id=_initial_decision_id(goal, history),
-                model_role=VISUAL_ACTOR_MODEL_ROLE,
-                purpose="reply_observe_or_connector",
-                provider_request=provider_request,
-                policy=ModelRetryPolicy(
-                    max_attempts=self._max_attempts,
-                    total_timeout_s=self._total_timeout_s,
-                ),
-                stop_event=stop_event,
-                on_attempt=self._on_attempt,
-                runtime=self._runtime,
-            )
-            self._record_response(outcome.response)
-            model_calls_remaining = model_call_allowance - model_call_index - 1
-            if _finish_reason(outcome.response) == "length":
-                messages.extend(_truncation_messages(outcome.response))
-                provider_request["messages"] = [system_message, *messages]
-                continue
-            try:
-                calls = _initial_calls_from_response(outcome.response)
-            except LiveModelRoleError as exc:
-                raise InvalidActorProposal(str(exc)) from exc
-            # The model may emit several tool calls in one response (status,
-            # connector, then observe_desktop).  Execute every
-            # non-terminal call and keep observe_desktop as the terminal
-            # admission.  A bare text reply ends the initial turn.
-            if not calls:
-                try:
-                    admission, exchange = _initial_admission_from_response(
-                        outcome.response,
-                        messages,
-                    )
-                    break
-                except LiveModelRoleError as exc:
-                    if model_calls_remaining <= 0:
-                        raise InvalidActorProposal(str(exc)) from exc
-                    repair = _tool_format_repair(outcome.response, str(exc))
-                    if repair is None:
-                        raise InvalidActorProposal(str(exc)) from exc
-                    assistant, call_id = repair
-                    messages.extend(
-                        (
-                            assistant,
-                            {
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "content": _canonical_json(
-                                    {
-                                        "tool_format_error": str(exc),
-                                        "model_calls_remaining": (
-                                            model_calls_remaining
-                                        ),
-                                        "action": (
-                                            "return exactly one valid tool call "
-                                            "with the required fields"
-                                        ),
-                                    }
-                                ),
-                            },
-                        )
-                    )
-                    provider_request["messages"] = [system_message, *messages]
-                    continue
-            preflight_error = ""
-            try:
-                envelopes = [_initial_call_envelope(call) for call in calls]
-                call_ids = [
-                    call_id for call_id, _name, _arguments in envelopes
-                ]
-                if len(set(call_ids)) != len(call_ids):
-                    raise LiveModelRoleError(
-                        "Actor initial tool-call ids must be unique"
-                    )
-                observe_envelopes = [
-                    envelope
-                    for envelope in envelopes
-                    if envelope[1] == "observe_desktop"
-                ]
-                if len(observe_envelopes) > 1:
-                    raise LiveModelRoleError(
-                        "Actor initial turn must request at most one "
-                        "desktop observation"
-                    )
-                if observe_envelopes:
-                    observe_arguments = dict(observe_envelopes[0][2])
-                    observe_arguments.pop("task_state_update", None)
-                    if observe_arguments:
-                        raise LiveModelRoleError(
-                            "observe_desktop does not accept arguments"
-                        )
-            except LiveModelRoleError as exc:
-                preflight_error = str(exc)
-            if preflight_error:
-                if model_calls_remaining <= 0:
-                    raise LiveModelRoleError(preflight_error)
-                repair = _tool_format_repair(
-                    outcome.response,
-                    preflight_error,
-                )
-                feedback = {
-                    "tool_format_error": preflight_error,
-                    "tools_executed": 0,
-                    "model_calls_remaining": model_calls_remaining,
-                    "action": (
-                        "return a valid tool batch; independent calls may "
-                        "remain together"
-                    ),
-                }
-                if repair is not None:
-                    repaired_assistant, repaired_call_id = repair
-                    messages.extend(
-                        (
-                            repaired_assistant,
-                            {
-                                "role": "tool",
-                                "tool_call_id": repaired_call_id,
-                                "content": _canonical_json(feedback),
-                            },
-                        )
-                    )
-                else:
-                    # A malformed multi-call batch cannot be echoed as a
-                    # provider tool exchange. No call ran, so ask the same
-                    # model to reissue the batch without removing its tools.
-                    messages.extend(
-                        (
-                            {
-                                "role": "assistant",
-                                "content": narration_content(
-                                    response_message(outcome.response)
-                                ),
-                            },
-                            {
-                                "role": "user",
-                                "content": _canonical_json(feedback),
-                            },
-                        )
-                    )
-                provider_request["messages"] = [system_message, *messages]
-                continue
-            terminal = None
-            executed_any = False
-            message = response_message(outcome.response)
-            content = member(message, "content")
-            reasoning = member(message, "reasoning_content")
-            assistant: dict[str, Any] = {
-                "role": "assistant",
-                "content": content or "",
-                "tool_calls": [
-                    {
-                        "id": member(call, "id"),
-                        "type": "function",
-                        "function": {
-                            "name": member(member(call, "function"), "name"),
-                            "arguments": member(
-                                member(call, "function"),
-                                "arguments",
-                            ),
-                        },
-                    }
-                    for call in calls
-                ],
-            }
-            if type(reasoning) is str:
-                assistant["reasoning_content"] = reasoning
-            pending_tool_messages: list[Mapping[str, Any]] = []
-            executable_calls: list[Any] = []
-            for call in calls:
-                call_function = member(call, "function")
-                call_name = (
-                    member(call_function, "name")
-                    if call_function is not None
-                    else None
-                )
-                if call_name == "observe_desktop":
-                    terminal = call
-                    continue
-                self._record_tool_start(call)
-                executable_calls.append(call)
-
-            def execute(call: Mapping[str, Any]) -> dict[str, Any]:
-                return _execute_initial_call(
-                    call,
-                    status_provider=self._status_provider,
-                    connector_gateway=self._connector_gateway,
-                    timeout_s=min(30.0, self._total_timeout_s),
-                    stop_event=stop_event,
-                )
-
-            try:
-                if len(executable_calls) > 1:
-                    # Tool calls in one model response are one model-selected
-                    # parallel batch. Dependencies remain separate responses;
-                    # preserve call order only for the provider transcript.
-                    with ThreadPoolExecutor(
-                        thread_name_prefix="visual-actor-tool",
-                    ) as executor:
-                        results = list(executor.map(execute, executable_calls))
-                else:
-                    results = [execute(call) for call in executable_calls]
-            except LiveModelRoleError as exc:
-                raise InvalidActorProposal(str(exc)) from exc
-
-            for call, result in zip(executable_calls, results, strict=True):
-                call_function = member(call, "function")
-                call_name = (
-                    member(call_function, "name")
-                    if call_function is not None
-                    else None
-                )
-                self._record_tool_result(str(call_name or "tool"), result)
-                executed_any = True
-                call_id = member(call, "id")
-                if type(call_id) is not str or not call_id:
-                    raise InvalidActorProposal(
-                        "Actor initial tool call requires an id"
-                    )
-                try:
-                    _call_id, canonical_name, _arguments = (
-                        _initial_call_envelope(call)
-                    )
-                except LiveModelRoleError:
-                    canonical_name = str(call_name or "tool")
-                provider_result = _project_tool_result(
-                    seen_tool_results,
-                    name=canonical_name,
-                    call_id=call_id,
-                    result=result,
-                    model_calls_remaining=model_calls_remaining,
-                )
-                pending_tool_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": _canonical_json(provider_result),
-                    }
-                )
-            if terminal is not None:
-                terminal_id = member(terminal, "id")
-                # Keep the full assistant tool-call list and every executed
-                # result in the exchange so the provider transcript stays
-                # consistent; observe_desktop is the terminal admission.  The
-                # visual turn appends the synthetic observation result after
-                # these messages.
-                exchange = _InitialExchange(
-                    messages=tuple(
-                        deepcopy(
-                            [*messages, assistant, *pending_tool_messages]
-                        )
-                    ),
-                    tool_call_id=terminal_id,
-                )
-                admission = VisualActorTurnAdmission(
-                    kind="desktop",
-                    narration=(content or "").strip(),
-                )
-                self._record_tool_start(terminal)
-                break
-            if not executed_any:
-                raise InvalidActorProposal(
-                    "Actor initial turn returned an unapproved tool"
-                )
-            messages.extend((assistant, *pending_tool_messages))
-            provider_request["messages"] = [system_message, *messages]
-        if admission is None:
-            raise LiveModelRoleError(
-                "Actor initial turn exhausted its model-call allowance"
-            )
-        self._initial_exchange = deepcopy(exchange)
-        self._initial_turn_terminal = admission.kind == "reply"
-        return admission
-
     def propose(
         self,
         turn: ActorTurnInput,
@@ -2958,10 +2321,6 @@ class LiveVisualActor:
         _model_call_limit: int | None = None,
         rejection_feedback: str | None = None,
     ) -> ActorTurnDecision:
-        if self._initial_turn_terminal:
-            raise LiveModelRoleError(
-                "Actor cannot observe after a terminal direct reply"
-            )
         if type(turn) is not ActorTurnInput:
             raise LiveModelRoleError(
                 "Visual Actor requires canonical ActorTurnInput"
@@ -2978,11 +2337,6 @@ class LiveVisualActor:
             image_b64, image_media_type, submitted_size
         )
         terminal_tools = _tool_definitions(turn)
-        status_tools = (
-            _status_tool_definitions()
-            if self._status_provider is not None
-            else []
-        )
         shell_tools = (
             _shell_tool_definitions(self._shell_runner)
             if self._shell_runner is not None
@@ -3078,47 +2432,47 @@ class LiveVisualActor:
                 },
             ],
         }
-        native_context: list[dict[str, Any]] = []
-        initial_exchange = self._initial_exchange
-        if initial_exchange is not None:
-            native_context.extend(deepcopy(initial_exchange.messages))
-            native_context.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": initial_exchange.tool_call_id,
-                    "content": _canonical_json(
-                        {"desktop_observation": "available"}
-                    ),
-                }
+        native_context: list[dict[str, Any]] = list(
+            deepcopy(
+                _thread_messages(
+                    self._thread_history,
+                    turn.mission.original_goal,
+                )
             )
+        )
         previous_exchange = self._previous_visual_exchange
-        if rejection_feedback:
-            # The latest proposal has no safely reusable completed exchange.
-            # Never attach its raw call to an older same-named physical action.
-            self._previous_visual_exchange = None
-        elif (
-            previous_exchange is not None
-            and turn.previous_action is not None
-            and turn.previous_action.action
-            == previous_exchange.runtime_tool_name
-        ):
-            previous_exchange.result_content = {
-                "previous_action": turn.previous_action.to_dict()
-            }
-            self._completed_visual_exchange = (
-                *_text_only_tool_transcript(previous_exchange.messages),
+        completed_result: dict[str, Any] | None = None
+        # Rejection feedback means the pending proposal never completed and
+        # must not be attached to any earlier same-named physical action.
+        if not rejection_feedback and previous_exchange is not None:
+            if previous_exchange.runtime_tool_name == "observe":
+                # Reaching this fresh authoritative frame completes the
+                # preceding observation call without a physical transition.
+                completed_result = {"desktop_observation": "available"}
+            elif (
+                turn.previous_action is not None
+                and turn.previous_action.action
+                == previous_exchange.runtime_tool_name
+            ):
+                completed_result = {
+                    "previous_action": turn.previous_action.to_dict()
+                }
+        if previous_exchange is not None and completed_result is not None:
+            previous_exchange.result_content = completed_result
+            self._completed_visual_history.extend(
+                deepcopy(previous_exchange.messages)
+            )
+            self._completed_visual_history.append(
                 {
                     "role": "tool",
                     "tool_call_id": previous_exchange.tool_call_id,
                     "content": _canonical_json(
                         previous_exchange.result_content
                     ),
-                },
+                }
             )
-            self._previous_visual_exchange = None
-        else:
-            self._previous_visual_exchange = None
-        native_context.extend(deepcopy(self._completed_visual_exchange))
+        self._previous_visual_exchange = None
+        native_context.extend(deepcopy(self._completed_visual_history))
         if rejection_feedback:
             native_context.append(
                 {
@@ -3143,7 +2497,6 @@ class LiveVisualActor:
             ],
             "tools": [
                 *terminal_tools,
-                *status_tools,
                 *shell_tools,
                 *window_text_tools,
                 *copy_current_view_tools,
@@ -3183,6 +2536,9 @@ class LiveVisualActor:
                 current_exchange.extend(truncation)
                 provider_request["messages"].extend(truncation)
                 continue
+            provider_rejection = _provider_rejection_detail(outcome.response)
+            if provider_rejection:
+                raise InvalidActorProposal(provider_rejection)
             try:
                 visual_calls = _initial_calls_from_response(outcome.response)
             except LiveModelRoleError as exc:
@@ -3232,7 +2588,6 @@ class LiveVisualActor:
                     return _execute_visual_batch_call(
                         name,
                         arguments,
-                        status_provider=self._status_provider,
                         shell_runner=self._shell_runner,
                         connector_gateway=self._connector_gateway,
                         window_text_reader=self._window_text_reader,
@@ -3263,36 +2618,6 @@ class LiveVisualActor:
                     )
                 current_exchange.extend(batch_messages)
                 provider_request["messages"].extend(batch_messages)
-                continue
-            status = None
-            if self._status_provider is not None:
-                try:
-                    status = _status_exchange(outcome.response)
-                except LiveModelRoleError as exc:
-                    raise InvalidActorProposal(str(exc)) from exc
-            if status is not None:
-                assistant, call_id, name, arguments = status
-                self._record_tool_start(
-                    _initial_calls_from_response(outcome.response)[0]
-                )
-                result = _call_status(
-                    self._status_provider,
-                    name,
-                    arguments,
-                )
-                self._record_tool_result(name, result)
-                connector_messages = [
-                    assistant,
-                    _projected_tool_message(
-                        seen_tool_results,
-                        name=name,
-                        call_id=call_id,
-                        result=result,
-                        model_calls_remaining=model_calls_remaining,
-                    ),
-                ]
-                current_exchange.extend(connector_messages)
-                provider_request["messages"].extend(connector_messages)
                 continue
             shell = None
             if self._shell_runner is not None:
@@ -3554,14 +2879,11 @@ class LiveVisualActor:
                 tool_call_id=exchange[1],
                 runtime_tool_name=exchange[2],
             )
-        self._initial_exchange = None
         return decision
 
 
 __all__ = [
     "VISUAL_ACTOR_MODEL_ROLE",
     "VISUAL_ACTOR_SYSTEM_CONTRACT",
-    "INITIAL_ACTOR_SYSTEM_CONTRACT",
     "LiveVisualActor",
-    "VisualActorTurnAdmission",
 ]

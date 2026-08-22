@@ -431,14 +431,14 @@ flowchart LR
 | `python/winpilot_home/tests/test_client_thread_connector_e2e_harness.py` | 16 | 单一 stdio connector fixture、token 不进 goal、预开 Notepad、真实只读 tool、Thread/history/restart 证据。 |
 | `python/winpilot_home/tests/test_client_visual_e2e_harness.py` | 13 | 通用手势矩阵与 spoken GUI requirement、target focus 几何、浏览器事件与 Runtime run 绑定。 |
 | `python/winpilot_home/tests/test_coding_tools.py` | 10 | coding tool schema、临时目录 read/write/search/apply_patch 唯一匹配与错误。 |
-| `python/winpilot_home/tests/test_connector_gateway.py` | 12 | 只显式配置才 available、环境引用、配置优先级、延迟发现、read-only annotations、descriptor 指纹重检。 |
+| `python/winpilot_home/tests/test_connector_gateway.py` | 23 | 只显式配置才 available、环境引用、配置优先级、延迟发现、副作用工具透传、descriptor 指纹重检。 |
 | `python/winpilot_home/tests/test_control_plane_auth.py` | 3 | Bearer auth、Renderer CORS preflight、WebSocket 错 token 拒绝。 |
 | `python/winpilot_home/tests/test_coordinate_diagnostics.py` | 3 | capture 坐标不匹配报告、真实 executor click 与文本验证、cursor offset 拒绝。 |
 | `python/winpilot_home/tests/test_desktop_action_queue.py` | 31 | 全局/窗口 writer 串行化、可重入、不同 HWND 并行、取消/超时/held cleanup、trace。 |
 | `python/winpilot_home/tests/test_desktop_file_tools.py` | 9 | target-window screenshot、managed full/region screenshot artifact、物理坐标与 manifest evidence。 |
 | `python/winpilot_home/tests/test_desktop_geometry.py` | 2 | 虚拟桌面负坐标 clamp、capture 像素→物理屏变换。 |
 | `python/winpilot_home/tests/test_desktop_image_evidence.py` | 7 | base64 折叠、draw/batch 前后图、managed artifact 与 trace 脱敏。 |
-| `python/winpilot_home/tests/test_execution_context_handoff.py` | 10 | execution context 仅保留合同字段、control surface 未 yield 时模型前失败、target identity/恢复状态机。 |
+| `python/winpilot_home/tests/test_execution_context_handoff.py` | 16 | 历史 context helper 与当前 server-side desktop workspace 捕获、Windows Shell 锚点及缺失失败。 |
 | `python/winpilot_home/tests/test_executor_launch.py` | 3 | URL 走 Windows protocol handler、browser wrapper 提取 URL、普通路径保持 shell launch。 |
 | `python/winpilot_home/tests/test_fast_controller.py` | 237 | 最大旧 fast controller 回归：batch action schema、连续输入、observation/cache、grounding、watcher、subgoal、工具转发和错误边。 |
 | `python/winpilot_home/tests/test_frame_authority.py` | 11 | immutable current frame、lost update、完整 identity pin、epoch/frame commit。 |
@@ -448,7 +448,7 @@ flowchart LR
 | `python/winpilot_home/tests/test_human_replay_integration.py` | 1 | 录制 steps 经 validation 后由真实 replay 路径消费（动作层用 monkeypatch）。 |
 | `python/winpilot_home/tests/test_image_ink_stats.py` | 10 | nonblank/blankish/color 统计与临时图像 fixture。 |
 | `python/winpilot_home/tests/test_launch_verification.py` | 24 | 复用已有窗口、process/title identity、启动后验证、重复 open、失败/焦点行为。 |
-| `python/winpilot_home/tests/test_live_agent_composition.py` | 64 | 当前 live agent 的窗口/帧/lease/Actor/Capability/AtomicAdapter/trace 组合；也是旧包静态缺席边界的重要集成合同。 |
+| `python/winpilot_home/tests/test_live_agent_composition.py` | 64 | 当前 live agent 的桌面锚点、帧、Actor、MissionState、AtomicAdapter 与 trace 组合；也是旧包静态缺席边界的重要集成合同。 |
 
 ### 7.2 测试文件 49–96（部分已删除）
 
@@ -504,7 +504,7 @@ flowchart LR
 | `python/winpilot_home/tests/test_vnext_evidence_registry.py` | 7 | 同 id 同内容幂等、冲突/错 scope/value type 无写入、append_many 原子。 |
 | `python/winpilot_home/tests/test_vnext_execution_profile.py` | 25 | profile strict versioned canonical wire、plain complete object、拒绝 legacy alias/错误 literal。 |
 | `python/winpilot_home/tests/test_vnext_kernel_boundaries.py` | 14 | kernel 仅 stdlib/自身 pure package、vnext root 无 eager/lazy import、主组合根与旧执行链保持隔离。 |
-| `python/winpilot_home/tests/test_vnext_live_model_roles.py` | 26 | Actor 零 retry client、首轮零 system prompt、observe 后同一 actor、原生 history/tool exchange。 |
+| `python/winpilot_home/tests/test_vnext_live_model_roles.py` | 26 | 同一 Actor 首调含 JPEG/goal/history、无独立 observe 路由、原生 tool exchange。 |
 | `python/winpilot_home/tests/test_vnext_mission.py` | 52 | mission definition/obligation/event strict wire、canonical hash、state transition/claim/block。 |
 | `python/winpilot_home/tests/test_vnext_mission_completion_verifier.py` | 14 | verifier request strict replayable scope、只接受完整可信 evidence，拒绝 actor/telemetry 自证。 |
 | `python/winpilot_home/tests/test_vnext_mission_runtime.py` | 36 | approved action exactly once、跨帧 held drag lease、keep_holding/release/stop/claim 顺序。 |

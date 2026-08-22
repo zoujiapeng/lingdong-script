@@ -853,9 +853,9 @@ class ElectronClientDriver:
                 raise ValueError("Electron window has no capturable rectangle")
             ImageGrab.grab(bbox=bbox, all_screens=True).save(path)
         except (OSError, SystemError, ValueError):
-            # During desktop handoff Electron can be minimized between the
-            # UIA rectangle read and ImageGrab.  This screenshot is diagnostic
-            # only, so preserve the run and capture the real desktop instead.
+            # The Electron window can change state between the UIA rectangle
+            # read and ImageGrab. This screenshot is diagnostic only, so keep
+            # the run and capture the real desktop instead.
             ImageGrab.grab(all_screens=True).save(path)
         return str(path)
 

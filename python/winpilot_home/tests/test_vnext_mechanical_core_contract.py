@@ -33,7 +33,6 @@ MECHANICAL_CORE_MODULES = (
     "winpilot.action.executor",
     "winpilot.action.raw_device",
     "winpilot.action.replay_policy",
-    "winpilot.action.safety",
     "winpilot.action.shell",
     "winpilot.utils.dpi",
     "winpilot.utils.image_capture",

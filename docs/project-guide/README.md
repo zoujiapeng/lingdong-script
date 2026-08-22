@@ -43,13 +43,12 @@ MCP、宏和测试靶场。只阅读某个大文件，很容易得到三个错�
 flowchart LR
   User["用户原始 goal"] --> Electron["可见 Electron 智能代理"]
   Electron --> GoalAPI["POST /api/v2/goals/runs"]
-  GoalAPI --> Actor["一个 LiveVisualActor"]
-  Actor -->|直接回答| Reply["reply 终态"]
-  Actor -->|只读连接器| Connector["MCP search/call 后回到同一 Actor"]
-  Actor -->|需要桌面| Lease["run-bound desktop lease"]
-  Lease --> Frame["当前全桌面权威 JPEG"]
-  Frame --> Decision["一笔通用动作 / claim / blocked"]
-  Decision --> Physical["AtomicDesktopAdapter → RawDevice/SendInput"]
+  GoalAPI --> Frame["服务端桌面锚点 + 当前全桌面权威 JPEG"]
+  Frame --> Actor["一个 LiveVisualActor\n原始 goal + 有界 history"]
+  Actor -->|直接回答| Reply["reply_to_user"]
+  Actor -->|连接器或 shell| Local["结果回到同一 Actor"]
+  Local --> Actor
+  Actor -->|GUI| Physical["AtomicDesktopAdapter → RawDevice/SendInput"]
   Physical --> NewFrame["新帧 + receipt"]
   NewFrame --> Actor
 ```
@@ -58,7 +57,7 @@ flowchart LR
 
 | 代码线 | 用户/开发入口 | 当前 owner | 可以做什么 | 不能据此声称什么 |
 | --- | --- | --- | --- | --- |
-| 产品 vNext | Electron“智能代理” → `/api/v2/goals/runs` | `orchestrator/live_agent.py` 组合的单一 `LiveVisualActor` + `MissionRuntime` | 直接回复、显式只读 connector、按需租约、当前帧上的通用 GUI 动作 | 旧 Agent/Flow 已成为 fallback；受控靶场通过等于任意软件可靠 |
+| 产品 vNext | Electron“智能代理” → `/api/v2/goals/runs` | `orchestrator/live_agent.py` 组合的单一 `LiveVisualActor` + `MissionRuntime` | 首次调用即看完整桌面，直接回复或选择显式 connector、shell、GUI | 旧 Agent/Flow 是主链 fallback；受控靶场通过等于任意软件可靠 |
 | Studio/确定性自动化 | 流程工作台把当前 FlowScript 导出为 `runtime.kind=arp_graph` 的 Automation IR；资料页另走 `/api/replay` | `arp_graph` 进入 ARP；`ACTION_BATCH` 直连 `fast.controller`；replay 由 Replayer/RuntimeJob 持有 | 编辑、验证、零模型确定性节点、录制/导出/重放 | Studio 节点矩阵等于自然语言 Agent 能力，或 API v2 都属于产品 vNext |
 | 兼容与开发接口 | `:7880`、CLI、旧 engine、feature、本地模板 scheduler（WinPilot Agent schedule API、`/api/chat`、webui、AI interface 已删除） | 各自旧 owner | 保持旧消费者、调试、迁移、脚本或外部集成 | 它们是当前 GUI 产品的第二条规划或兜底链 |
 
@@ -68,7 +67,7 @@ flowchart LR
 
 | 路径 | 当前职责 | 重要边界 |
 | --- | --- | --- |
-| `src/main/` | Electron 生命周期、可信 preload、IPC、托管 Python、旧本地 API/调度/feature 桥 | 负责进程和前台交接，不做 Agent 语义规划 |
+| `src/main/` | Electron 生命周期、可信 preload、IPC、托管 Python、旧本地 API/调度/feature 桥 | 负责进程与窗口生命周期，不做 Agent 语义规划 |
 | `src/renderer/` | 智能代理、Studio、运行记录、资产、设置、Flow 编辑器 | `ControlPlaneClient` 只消费 Python API；浏览器状态不是服务端权威 |
 | `src/cli/` | 旧命令行入口 | 是开发/兼容面，不是 GUI E2E 入口（`src/ai-interface/` 已删除） |
 | `python/winpilot_home/winpilot/vnext/` | Actor、MissionRuntime、桌面 adapter 与最小运行合同 | 当前 live 执行内核；不得恢复固定 Broker/profile 或独立 Evidence Plane |
@@ -76,7 +75,7 @@ flowchart LR
 | `python/winpilot_home/winpilot/action/` | RawDevice、单写入队列、执行与 Studio/回放仍使用的旧验证基础 | 物理动作层不解释应用语义 |
 | `python/winpilot_home/winpilot/visual_runtime/` | 帧权威、观察、坐标与视觉状态 | 当前 JPEG 和窗口身份的机械真相 |
 | `python/winpilot_home/winpilot/modeling/` | 模型调用、协议 adapter、超时与 attempt | 不新增第二 planner 或 answer fixer |
-| `python/winpilot_home/winpilot/integrations/` | 显式 MCP connector gateway | 当前只允许重新核验过的只读、非 destructive 工具 |
+| `python/winpilot_home/winpilot/integrations/` | 显式 MCP connector gateway | 调用已发现并重新核验 descriptor 的通用工具 |
 | `python/winpilot_home/winpilot/fast/` | Studio ACTION_BATCH 的确定性 Controller 与 GUI 能力 | 服务显式离线流程，不能整体接回主循环 |
 | `python/winpilot_home/winpilot/perception/` | Win32/UIA/OCR/CV/应用发现等 | 结构化感知是可审计辅助，不替代当前像素语义 |
 | `python/winpilot_home/winpilot/tasking/` | 仅剩 vNext/Studio 共享模块：`artifacts.py`（工件存储）、`execution_context.py`（桌面上下文）、`evidence.py`（技能证据） | Task Contract 编译链与 StageRuntime 已删除 |
@@ -152,8 +151,8 @@ python scripts/generate_project_guide.py --prefix src/ --output output/project-p
 | goal | 用户提交的完整原始目标；产品主链不把它改写成关键词步骤 |
 | Thread / Turn | 服务端有界对话容器 / 一次用户请求；只有成功且有用户结果的 Turn 进入后续历史 |
 | ARP | 仓库中的图与执行容器；产品 vNext 固定生成 `start → full-goal AGENT_GOAL → end` 三节点壳，其中只有一个语义节点；Studio 可提交更一般的图 |
-| Visual Actor | 唯一语义模型角色；先决定 reply/connector/desktop，进入桌面后每轮看权威 JPEG 选一个工具 |
-| desktop lease | 某个 run 请求 Electron 让出前台并交付精确目标窗口的单次绑定 |
+| Visual Actor | 唯一语义模型角色；首次调用即看权威全桌面 JPEG，并选择 reply、connector、shell 或 GUI 工具 |
+| desktop anchor | 服务端在 run 内建立的中性 Windows Shell workspace 锚点；不限制模型点击哪个可见窗口 |
 | target binding | `binding_id`、HWND、PID、可执行身份、标题快照、建立它的 evidence ref 与 epoch；目标 region 属于冻结目标/RuntimeFrame，不是该 wire contract 的字段 |
 | authoritative frame | 与目标、epoch、区域、捕获时间和 payload hash 原子绑定的当前 JPEG |
 | canonical arguments | 模型参数经过严格 schema 解析后的运行时参数；其中坐标型动作的坐标仍处于模型实际收到的 submitted-image 像素空间 |

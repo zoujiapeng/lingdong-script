@@ -19,21 +19,19 @@ PlatformWorkbench
   -> useControlPlane.startGoal
   -> POST /api/v2/goals/runs
   -> server-owned Thread / Turn + Goal Admission
-  -> LiveVisualActor.begin_turn
-       -> direct reply -> reply terminal
-       -> generic connector search/call -> same Actor continues
-       -> observe_desktop -> run-bound desktop lease
-          -> Electron yield + exact target bind
-          -> same LiveVisualActor -> MissionRuntime
-          -> AtomicDesktopAdapter -> RawDevice
+  -> server captures a neutral desktop target and builds MissionRuntime
+  -> same LiveVisualActor.propose
+       -> original goal + bounded Thread history + current full-desktop JPEG
+       -> direct reply / connector / shell / GUI
+       -> AtomicDesktopAdapter -> RawDevice for physical input
+       -> new full-desktop JPEG -> same Actor continues
 ```
 
 `POST /api/v2/goals/runs` 是主 Agent 用户入口。请求只携带 `goal` 和可选
 `thread_id`；不携带预绑定桌面、不接受客户端选择的执行媒介、`graph`、
 `runtime_version` 或 `task_id`。服务端当前唯一选择 vNext，构造规范图并生成、绑定
-图身份；vNext 不可用时请求失败，不静默回退 Legacy。只有同一 Actor 调用
-`observe_desktop` 后，前端才通过匹配 `run_id + lease_id` 的独立请求交付当时的桌面
-上下文。
+图身份；vNext 不可用时请求失败，不静默回退 Legacy。服务端在模型首次调用前直接
+建立中性的桌面 workspace 锚点并捕获完整真实桌面，不再等待客户端交付桌面上下文。
 
 这一主路径的 canonical composition owner 是 `orchestrator/live_agent.py`；
 `vnext.live_agent_enabled=true` 是 fail-closed 的产品可用性配置，不是按任务选择的
@@ -48,9 +46,9 @@ runtime 的 `/api/v2/arp/runs` 暂留给 Studio、自动化编辑和兼容调用
 ### 2. 一个完整目标和一条执行主线
 
 Goal Admission 把用户原始目标直接绑定到一个 full-goal vNext turn。相同的
-`LiveVisualActor` 先在没有截图、没有系统提示的原生文本回合中直接回答、调用显式
-配置的两个通用 connector 工具，或调用 `observe_desktop`。只有后者才进入
-full-goal GUI mission；connector 结果也只回到同一个 Actor 继续决定。模型可在运行中
+`LiveVisualActor` 第一次 provider 调用就收到完整真实桌面 JPEG、原始目标和有界成功
+Thread history，并可直接回复或选择 connector、shell、GUI 工具。局部工具结果只回到
+同一个 Actor 继续决定。模型可在运行中
 调整、替换或放弃工作计划，最新画面与动作结果优先于旧计划的一致性。任务不能在
 看见界面前被 compiler 拆成一串应用专属微步骤，也不能因任务名称切换到另一套
 Agent、工具或提示词。旧 Task Contract 已删除。
@@ -107,9 +105,9 @@ runtime 不再用独立 verifier/evidence 链复判语义。工具 `ok` 和物�
 测试中的真实业务成功仍由独立应用/browser oracle 判断。历史帧只能证明先前发生过什么，
 不能替代用户要求持续保持的当前状态。
 
-纯文本回答使用独立 `reply` 终态：它返回模型原始文本，不能构造 frame、target、
-`physical_attempt` 或 mission evidence。`reply` 表示这一轮成功完成，但不会证明
-任何外部应用状态；需要桌面操作的 `done` 仍必须由独立 oracle 验证用户结果。
+纯文本回答由同一视觉调用中的 `reply_to_user` 完成；它可以在看过当前 JPEG 后不产生
+`physical_attempt`。这只完成当前用户回复，不证明任何外部应用状态；测试中的桌面结果
+仍须由独立 oracle 验证。
 
 ## 控制平面
 
@@ -117,21 +115,19 @@ runtime 不再用独立 verifier/evidence 链复判语义。工具 `ok` 和物�
 
 主 Agent 不再有前端“执行约束”选择器，也没有对应的请求字段或 Goal Admission 状态。用户口头强调“必须使用 GUI”时，这句话只存在于原始 `goal`，由同一个语义 Agent 理解；系统不再要求用户把同一意图重复编码到系统开关，也不增加关键词路由器或第二个 Task Profiler。
 
-当前 live vNext 在存在显式 MCP 配置时，把 `search_connector_tools` 和
-`call_connector_tool` 与首轮 `observe_desktop` 同时交给同一个 Actor。首轮不提供
-shell；进入视觉线后，若 shell 已启用，`run_shell`、`run_detached` 和 `write_file` 会与
-GUI/control、connector 同轮可见。因此同一个 Actor 自主选择直接回复、只读 connector、
+当前 live vNext 在第一次视觉调用中把 GUI/control、`run_shell`、`run_detached`、
+`write_file` 与显式配置的 `search_connector_tools` / `call_connector_tool` 一起交给
+同一个 Actor。因此同一个 Actor 自主选择直接回复、connector、
 本地通用工具或 GUI；shell 的进程/文件回执不替代 RawDevice 的物理输入回执，也不决定
 任务完成。后续能力仍必须作为同一 Agent 的普通工具加入同一轮选择；`execution_medium`
 只描述实际执行，不承载用户策略。Runtime 只保留 schema、可信画面、窗口/指针所有权与
 不可逆动作边界等机械约束，不解释任务类型。
 
-桌面交接上下文只存在于一次性 lease bind。服务端在生成规范图之后绑定 `task_id`，
-因此客户端上下文不能借机注入图身份或选择 runtime。真实验收检查“Agent 实际用了
-什么”和外部结果，不检查前端策略状态。更完整的迁移边界、兼容面和退出门见
+桌面 workspace 上下文由服务端在 run 内部捕获，客户端不能借机注入 target、图身份或
+选择 runtime。真实验收检查“Agent 实际用了什么”和外部结果，不检查前端策略状态。更完整的迁移边界、兼容面和退出门见
 [vNext 迁移](vnext-migration.md)。
 
-### Thread、Turn 与桌面租约
+### Thread、Turn 与桌面锚点
 
 前端为一次对话保存不透明 `thread_id`，服务端为每条消息创建一个 Turn，并且同一
 Thread 同时最多有一个活动 Turn。历史只保留最近成功且有用户可见结果的原生
@@ -142,11 +138,10 @@ Thread 同时最多有一个活动 Turn。历史只保留最近成功且有用�
 原生消息。失败/取消/空结果、视觉帧、connector 正文、trace 正文和未完成 run 不写入，
 损坏或超限 checkpoint fail closed。它只延续短会话，不承担长期记忆或语义总结。
 
-`DesktopLeaseSlot` 是一次性的机械交接状态机。Actor 请求后状态进入
-`waiting`，Electron 让出前台并提交精确 `run_id + lease_id + target`，服务端验证后
-才进入 `delivered` 并允许首帧与物理动作。拒绝、超时或失败关闭 lease；matching
-terminal 由 Electron 自行恢复窗口，stale run、stale lease 或重复终态不能恢复其他
-运行。发送消息本身不再隐藏窗口。
+`_PreparedHandler` 在模型资源建立前调用 `capture_desktop_workspace_context()`，取得一个
+中性的 Windows Shell 桌面锚点；`_build_live_session` 由此建立 workspace，并默认捕获
+完整虚拟桌面。锚点只服务帧与窗口生命周期，不限制模型点击哪个可见窗口。Electron
+在 Agent run 前后保持普通可见控制面，不改变 taskbar、minimize 或 focus 状态。
 
 ### Studio / ARP 兼容入口
 
@@ -164,8 +159,7 @@ Task Contract、TASK_STAGE、StageRuntime 和 InteractionStageEngine 已删除�
 | --- | --- | --- |
 | `AgentThreadStore` | 保存并恢复有界成功 Turn 文本与已完成 run 投影 | 长期记忆、语义总结、执行选择 |
 | `LiveVisualActor` | 理解完整目标和当前 JPEG，选择一笔工具调用 | 物理输入、应用脚本、第二角色委派 |
-| `ConnectorGateway` | 有界发现显式 MCP，并把只读调用结果及 receipt 返回同一 Actor | 服务专属 adapter、任务路由、外部写入授权 |
-| `DesktopLeaseSlot` + Electron handoff | 精确配对桌面让出、target 交付和窗口恢复 | 按任务词预租约、替模型决定是否用 GUI |
+| `ConnectorGateway` | 有界发现显式 MCP，并把调用结果及 receipt 返回同一 Actor | 服务专属 adapter、任务路由、应用规则 |
 | `MissionRuntime` | 顺序驱动模型、动作、新帧与一个 goal 的最小状态 | 关键词规划、纠正模型答案 |
 | `FrameAuthority` / workspace | 发布当前 frame、epoch、hwnd、region、图像身份 | 理解画面或选择目标 |
 | `AtomicDesktopAdapter` / `RawDevice` | 唯一坐标映射、真实输入和机械回执 | snap、offset、语义成功 |
@@ -179,11 +173,10 @@ Task Contract、TASK_STAGE、StageRuntime 和 InteractionStageEngine 已删除�
 
 ### 原生视觉主路径
 
-当同一 Actor 申请桌面后，首个 GUI 回合保留初始有界文本消息及其原生
-`assistant observe_desktop → tool result`，再附加当前权威 JPEG、完整原始目标和
-有界 task state。后续 GUI 回合只保留紧邻的一笔 provider 原生
+第一次模型调用直接包含有界成功 Thread 文本、完整原始目标、当前权威 JPEG 和有界
+task state。后续回合只保留紧邻的一笔 provider 原生
 `user image → assistant tool call → tool result`，新动作替换上一笔；同一回合内的
-模型选择的本地/connector 工具链（status/shell/connector/window_text）只受剩余模型调用预算约束。
+模型选择的本地/connector 工具链（shell/connector/window_text）只受剩余模型调用预算约束。
 模型从画面理解语义并提出一笔
 typed transaction；动作后重新捕获权威帧，下一回合以新 exchange 替换上一笔。
 这里没有无界聊天历史、第二 planner 或独立 Grounder/Verifier。
@@ -331,9 +324,8 @@ MCP 是显式可选的 capability source。只有 `.mcp.json`、配置路径或
 adapter、关键词 router 或 GUI 失败后的自动 fallback。
 
 `search_connector_tools` 返回有界、标为不可信的 descriptor 和不透明 ref；
-`call_connector_tool` 只接受该 ref 与 JSON object 参数。当前 live Actor 始终不授予
-外部 mutation：只有 `readOnlyHint=true` 且 `destructiveHint` 不为 true 的工具可以
-执行。Gateway 在调用前重新发现并核对 descriptor/fingerprint，MCP client 又在同一
+`call_connector_tool` 只接受该 ref 与 JSON object 参数。Gateway 在调用前重新发现并核对
+descriptor/fingerprint，MCP client 又在同一
 物理连接的 `call_tool` 前核对一次 annotations 与完整 descriptor；整次发现/调用服从
 单一 deadline/cancel，且不会重试含糊的远端动作。结果有大小上限、hash 与 receipt，
 但仍是不可信数据，模型和外部 oracle 不能把远端 `ok` 当任务完成。

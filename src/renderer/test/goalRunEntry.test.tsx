@@ -10,27 +10,8 @@ import {
 import { ControlPlaneClient } from '../platform/client';
 import type {
   ArpExecutionSnapshot,
-  ClientExecutionContext,
-  DesktopTargetContext,
   GoalRunStart,
 } from '../platform/contracts';
-import { fulfillDesktopLease } from '../platform/useControlPlane';
-
-function target(): DesktopTargetContext {
-  return {
-    format: 'desktop-target/1',
-    hwnd: 991,
-    title: 'External target',
-    process_id: 8812,
-    class_name: 'TargetWindow',
-    rect: [0, 0, 1200, 800],
-    captured_at: 850,
-    foreground_verified: true,
-    usable: true,
-    failure_type: '',
-    reason: '',
-  };
-}
 
 function snapshot(): ArpExecutionSnapshot {
   return {
@@ -104,7 +85,7 @@ describe('active run status contract', () => {
 });
 
 describe('primary goal-run transport', () => {
-  it('posts only the goal and existing thread id before any desktop handoff', async () => {
+  it('posts only the goal and existing thread id', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(
       goalRunStart(snapshot(), 'thread-existing'),
     ), {
@@ -131,201 +112,6 @@ describe('primary goal-run transport', () => {
     expect(submitted).not.toHaveProperty('graph');
     expect(submitted).not.toHaveProperty('runtime_version');
     expect(submitted).not.toHaveProperty('execution_context');
-  });
-
-  it('prepares, captures, locally binds, then server-binds only after a desktop lease request', async () => {
-    const order: string[] = [];
-    const prepareDesktopHandoff = vi.fn(async () => {
-      order.push('prepare');
-      return {
-        yielded: true,
-        control_surface_pid: 7712,
-        prepared_at: 800,
-      };
-    });
-    const bindDesktopHandoff = vi.fn(async () => {
-      order.push('local-bind');
-      return true;
-    });
-    const releaseDesktopHandoff = vi.fn(async () => true);
-    (window as any).electronAPI = {
-      prepareDesktopHandoff,
-      bindDesktopHandoff,
-      releaseDesktopHandoff,
-    };
-    const captureDesktopContext = vi.fn(async () => {
-      order.push('capture');
-      return target();
-    });
-    const bindDesktopLease = vi.fn(async (
-      _runId: string,
-      _leaseId: string,
-      _context: ClientExecutionContext,
-    ) => {
-      order.push('server-bind');
-      return {};
-    });
-    const failDesktopLease = vi.fn(async () => ({}));
-
-    expect(prepareDesktopHandoff).not.toHaveBeenCalled();
-    expect(captureDesktopContext).not.toHaveBeenCalled();
-    expect(bindDesktopHandoff).not.toHaveBeenCalled();
-    expect(bindDesktopLease).not.toHaveBeenCalled();
-
-    await fulfillDesktopLease(
-      { captureDesktopContext, bindDesktopLease, failDesktopLease } as never,
-      'run-goal-test',
-      'lease-goal-test',
-    );
-
-    expect(prepareDesktopHandoff).toHaveBeenCalledOnce();
-    expect(bindDesktopHandoff).toHaveBeenCalledWith('run-goal-test');
-    expect(releaseDesktopHandoff).not.toHaveBeenCalled();
-    expect(captureDesktopContext).toHaveBeenCalledWith(7712);
-    expect(failDesktopLease).not.toHaveBeenCalled();
-    expect(order).toEqual(['prepare', 'capture', 'local-bind', 'server-bind']);
-    expect(bindDesktopLease).toHaveBeenCalledOnce();
-    const [runId, leaseId, context] = bindDesktopLease.mock.calls[0];
-    expect(runId).toBe('run-goal-test');
-    expect(leaseId).toBe('lease-goal-test');
-    expect(context).toMatchObject({
-      format: 'execution-context/1',
-      entrypoint: 'native_agent_cockpit',
-      desktop_handoff: {
-        required: true,
-        yielded: true,
-        control_surface_pid: 7712,
-      },
-      target_window: target(),
-    });
-    expect(context).not.toHaveProperty('task_id');
-  });
-
-  it('keeps the surface yielded when a delivered lease response is lost', async () => {
-    const releaseDesktopHandoff = vi.fn(async () => true);
-    (window as any).electronAPI = {
-      prepareDesktopHandoff: vi.fn(async () => ({
-        yielded: true,
-        control_surface_pid: 7712,
-        prepared_at: 800,
-      })),
-      bindDesktopHandoff: vi.fn(async () => true),
-      releaseDesktopHandoff,
-    };
-    const failDesktopLease = vi.fn(async () => ({}));
-
-    await expect(fulfillDesktopLease(
-      {
-        captureDesktopContext: vi.fn(async () => target()),
-        bindDesktopLease: vi.fn(async () => {
-          throw new Error('response lost');
-        }),
-        failDesktopLease,
-        run: vi.fn(async () => ({
-          ok: true,
-          run: snapshot(),
-          arp: {
-            ...snapshot(),
-            desktop_lease: {
-              format: 'desktop-lease/1',
-              run_id: 'run-goal-test',
-              thread_id: 'thread-goal-test',
-              turn_id: 'turn-goal-test',
-              lease_id: 'lease-goal-test',
-              status: 'delivered',
-              error: '',
-            },
-          },
-        })),
-      } as never,
-      'run-goal-test',
-      'lease-goal-test',
-    )).resolves.toBeUndefined();
-
-    expect(failDesktopLease).not.toHaveBeenCalled();
-    expect(releaseDesktopHandoff).not.toHaveBeenCalled();
-  });
-
-  it('keeps the surface yielded when a waiting snapshot loses a fail race', async () => {
-    const releaseDesktopHandoff = vi.fn(async () => true);
-    (window as any).electronAPI = {
-      prepareDesktopHandoff: vi.fn(async () => ({
-        yielded: true,
-        control_surface_pid: 7712,
-        prepared_at: 800,
-      })),
-      bindDesktopHandoff: vi.fn(async () => true),
-      releaseDesktopHandoff,
-    };
-    const failDesktopLease = vi.fn(async () => {
-      throw new Error('already delivered');
-    });
-
-    await expect(fulfillDesktopLease(
-      {
-        captureDesktopContext: vi.fn(async () => target()),
-        bindDesktopLease: vi.fn(async () => {
-          throw new Error('response lost');
-        }),
-        failDesktopLease,
-        run: vi.fn(async () => ({
-          ok: true,
-          run: snapshot(),
-          arp: {
-            ...snapshot(),
-            desktop_lease: {
-              format: 'desktop-lease/1',
-              run_id: 'run-goal-test',
-              thread_id: 'thread-goal-test',
-              turn_id: 'turn-goal-test',
-              lease_id: 'lease-goal-test',
-              status: 'waiting',
-              error: '',
-            },
-          },
-        })),
-      } as never,
-      'run-goal-test',
-      'lease-goal-test',
-    )).rejects.toThrow('response lost');
-
-    expect(failDesktopLease).toHaveBeenCalledOnce();
-    expect(releaseDesktopHandoff).not.toHaveBeenCalled();
-  });
-
-  it('keeps local handoff binding advisory and still delivers the desktop', async () => {
-    const prepareDesktopHandoff = vi.fn(async () => ({
-      yielded: true,
-      control_surface_pid: 7712,
-      prepared_at: 800,
-    }));
-    const bindDesktopHandoff = vi.fn(async () => {
-      throw new Error('ipc unavailable');
-    });
-    const releaseDesktopHandoff = vi.fn(async () => {
-      throw new Error('release unavailable');
-    });
-    (window as any).electronAPI = {
-      prepareDesktopHandoff,
-      bindDesktopHandoff,
-      releaseDesktopHandoff,
-    };
-    const failDesktopLease = vi.fn(async () => ({}));
-    const bindDesktopLease = vi.fn(async () => ({}));
-
-    await expect(fulfillDesktopLease(
-      {
-        captureDesktopContext: vi.fn(async () => target()),
-        bindDesktopLease,
-        failDesktopLease,
-      } as never,
-      'run-goal-test',
-      'lease-goal-test',
-    )).resolves.toBeUndefined();
-
-    expect(bindDesktopLease).toHaveBeenCalledOnce();
-    expect(failDesktopLease).not.toHaveBeenCalled();
-    expect(releaseDesktopHandoff).toHaveBeenCalledOnce();
   });
 
 });

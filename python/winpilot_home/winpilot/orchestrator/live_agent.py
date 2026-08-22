@@ -1,8 +1,8 @@
 """Product composition root for the minimal live vNext desktop loop.
 
-Electron yields the control surface before the run starts.  The Actor then
-sees and operates the whole desktop; the initial HWND is only a stable frame
-anchor for the existing wire contracts, never an input owner.
+The first Actor turn sees and operates the whole real desktop.  The initial
+HWND is only a stable frame anchor for the existing wire contracts, never an
+input owner.
 """
 from __future__ import annotations
 
@@ -14,13 +14,11 @@ from copy import deepcopy
 import hashlib
 import json
 import os
-from pathlib import Path
 import threading
 import time
 from typing import Any, Protocol
 import uuid
 
-from ..config import CONFIG, TRACES_DIR
 from ..action.executor import (
     ADMITTED_PHYSICAL_CLICK_BACKEND,
     ADMITTED_PHYSICAL_DRAG_BACKEND,
@@ -51,6 +49,7 @@ from ..modeling.contracts import ModelAttempt
 from ..modeling.openai_transport import create_openai_client
 from ..modeling.provider_protocols import ProviderProtocolAdapter
 from ..modeling.runtime import ModelCallRuntime
+from ..tasking.execution_context import capture_desktop_workspace_context
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS
 from ..utils.screenshot import Region, virtual_screen_region, window_region
@@ -68,10 +67,8 @@ from ..vnext.mission import (
 )
 from ..vnext.model_roles import (
     FlowFragmentProposer,
-    INITIAL_ACTOR_SYSTEM_CONTRACT,
     VISUAL_ACTOR_MODEL_ROLE,
     LiveVisualActor,
-    VisualActorTurnAdmission,
 )
 from ..vnext.runtime import (
     ActorToolView,
@@ -190,7 +187,6 @@ class _CompositionDependencies:
     session_builder: Callable[["_SessionBuild"], _SessionPort] | None = None
     connector_factory: Callable[[], Any] | None = None
     provider_transport_factory: Callable[[], Any] | None = None
-    config_snapshot: Callable[[], dict[str, Any]] | None = None
     shell_factory: Callable[[], Any] | None = None
 
 
@@ -226,176 +222,6 @@ class _FrozenTarget:
                 "desktop_shell" if self.desktop_shell else "window"
             ),
         }
-
-
-class DesktopLeaseError(ValueError):
-    """A desktop lease transition or target binding was rejected."""
-
-
-class DesktopLeaseSlot:
-    """One run-bound target handoff delivered after the Actor requests it."""
-
-    def __init__(
-        self,
-        *,
-        graph: ArpGraph,
-        dependencies: _CompositionDependencies,
-        thread_id: str,
-        turn_id: str,
-    ) -> None:
-        self.lease_id = f"lease-{uuid.uuid4().hex}"
-        self._graph = graph
-        self._dependencies = dependencies
-        self._thread_id = thread_id
-        self._turn_id = turn_id
-        self._run_id = ""
-        self._state = "idle"
-        self._target: _FrozenTarget | None = None
-        self._error = ""
-        self._condition = threading.Condition(threading.RLock())
-
-    def request(self, run_id: str) -> dict[str, Any]:
-        with self._condition:
-            if self._state != "idle" or not run_id:
-                raise DesktopLeaseError("desktop lease cannot be requested")
-            self._run_id = run_id
-            self._state = "waiting"
-            snapshot = self.snapshot()
-        BUS.publish(
-            "desktop_lease_requested",
-            run_id=run_id,
-            thread_id=self._thread_id,
-            turn_id=self._turn_id,
-            lease_id=self.lease_id,
-            status="waiting",
-        )
-        return snapshot
-
-    def bind(
-        self,
-        *,
-        run_id: str,
-        lease_id: str,
-        inputs: dict[str, Any],
-    ) -> _FrozenTarget:
-        with self._condition:
-            if (
-                self._state != "waiting"
-                or run_id != self._run_id
-                or lease_id != self.lease_id
-            ):
-                raise DesktopLeaseError("desktop lease does not match the run")
-            self._state = "validating"
-        try:
-            target = _freeze_prebound_target(
-                self._graph,
-                deepcopy(inputs),
-                dependencies=self._dependencies,
-            )
-        except Exception as exc:
-            with self._condition:
-                rejected = self._state == "validating"
-                if rejected:
-                    self._state = "waiting"
-                    self._error = str(exc)
-                detail = self._error or str(exc)
-                self._condition.notify_all()
-            if rejected:
-                BUS.publish(
-                    "desktop_lease_rejected",
-                    run_id=run_id,
-                    thread_id=self._thread_id,
-                    turn_id=self._turn_id,
-                    lease_id=self.lease_id,
-                    status="waiting",
-                    error=str(exc),
-                )
-            raise DesktopLeaseError(detail) from exc
-        with self._condition:
-            if self._state != "validating":
-                raise DesktopLeaseError(
-                    "desktop lease closed during target validation"
-                )
-            self._target = target
-            self._error = ""
-            self._state = "delivered"
-            self._condition.notify_all()
-        BUS.publish(
-            "desktop_lease_bound",
-            run_id=run_id,
-            thread_id=self._thread_id,
-            turn_id=self._turn_id,
-            lease_id=self.lease_id,
-            status="delivered",
-            target=target.trace_identity(),
-        )
-        return target
-
-    def fail(
-        self,
-        *,
-        run_id: str,
-        lease_id: str,
-        reason: str,
-    ) -> None:
-        with self._condition:
-            if (
-                self._state not in {"waiting", "validating"}
-                or run_id != self._run_id
-                or lease_id != self.lease_id
-            ):
-                raise DesktopLeaseError("desktop lease does not match the run")
-            self._state = "closed"
-            self._error = str(reason or "desktop handoff failed")
-            self._condition.notify_all()
-        BUS.publish(
-            "desktop_lease_failed",
-            run_id=run_id,
-            thread_id=self._thread_id,
-            turn_id=self._turn_id,
-            lease_id=self.lease_id,
-            status="closed",
-            error=self._error,
-        )
-
-    def wait(
-        self,
-        *,
-        stop_event: Any,
-        deadline: Callable[[], float],
-        clock: Callable[[], float],
-    ) -> _FrozenTarget:
-        with self._condition:
-            while self._state in {"waiting", "validating"}:
-                if stop_event.is_set():
-                    self._state = "closed"
-                    self._error = "run canceled while awaiting desktop lease"
-                    self._condition.notify_all()
-                    break
-                remaining = float(deadline()) - float(clock())
-                if remaining <= 0:
-                    self._state = "closed"
-                    self._error = "desktop lease timed out"
-                    self._condition.notify_all()
-                    break
-                self._condition.wait(timeout=min(0.1, remaining))
-            if self._state == "delivered" and self._target is not None:
-                return self._target
-            raise DesktopLeaseError(
-                self._error or "desktop lease closed without a target"
-            )
-
-    def snapshot(self) -> dict[str, Any]:
-        with self._condition:
-            return {
-                "format": "desktop-lease/1",
-                "run_id": self._run_id,
-                "thread_id": self._thread_id,
-                "turn_id": self._turn_id,
-                "lease_id": self.lease_id,
-                "status": self._state,
-                "error": self._error,
-            }
 
 
 @dataclass(frozen=True, slots=True)
@@ -685,118 +511,6 @@ def _process_executable_identity(process_id: int) -> str:
         kernel32.CloseHandle(handle)
 
 
-class _LiveAgentStatusProvider:
-    """Read-only Actor-owned status facts resolved without a desktop lease."""
-
-    _STATUS_FORMAT = "agent-status/1"
-    _MEMORY_FORMAT = "memory-status/1"
-    _CAPABILITIES_FORMAT = "capabilities/1"
-
-    def __init__(
-        self,
-        *,
-        runtime_version: str,
-        model: str,
-        budget: _Budget,
-        run_id: str,
-        mission_id: str,
-        thread_id: str,
-        turn_id: str,
-        live_agent_enabled: bool,
-        experience_policy: str,
-        connector_available: bool,
-        config_experience_memory: bool,
-        memory_store_present: bool,
-    ) -> None:
-        self._runtime_version = runtime_version
-        self._model = model
-        self._budget = budget
-        self._run_id = run_id
-        self._mission_id = mission_id
-        self._thread_id = thread_id
-        self._turn_id = turn_id
-        self._live_agent_enabled = live_agent_enabled
-        self._experience_policy = experience_policy
-        self._connector_available = connector_available
-        self._config_experience_memory = config_experience_memory
-        self._memory_store_present = memory_store_present
-
-    def resolve(self, name: str) -> dict[str, Any]:
-        if name == "get_agent_status":
-            return self._agent_status()
-        if name == "get_memory_status":
-            return self._memory_status()
-        if name == "get_capabilities":
-            return self._capabilities()
-        raise ValueError(f"unknown Actor status tool: {name!r}")
-
-    def _agent_status(self) -> dict[str, Any]:
-        return {
-            "format": self._STATUS_FORMAT,
-            "runtime_version": self._runtime_version,
-            "model": self._model,
-            "live_agent_enabled": self._live_agent_enabled,
-            "budget": self._budget.to_dict(),
-            "run_id": self._run_id,
-            "mission_id": self._mission_id,
-            "thread_id": self._thread_id,
-            "turn_id": self._turn_id,
-            "experience_policy": self._experience_policy,
-            "connector_available": self._connector_available,
-        }
-
-    def _memory_status(self) -> dict[str, Any]:
-        enabled = self._experience_policy == "allow"
-        return {
-            "format": self._MEMORY_FORMAT,
-            "long_term_experience_memory": (
-                "enabled" if enabled else "disabled"
-            ),
-            "enabled": enabled,
-            "experience_policy": self._experience_policy,
-            "reason": (
-                "long-term experience memory is active in this Agent chain"
-                if enabled
-                else (
-                    "vNext live Agent chain experience_policy=disabled; "
-                    "no memory retrieval or experience write is attached"
-                )
-            ),
-            "config_agent_experience_memory": self._config_experience_memory,
-            "store_present": self._memory_store_present,
-        }
-
-    def _capabilities(self) -> dict[str, Any]:
-        return {
-            "format": self._CAPABILITIES_FORMAT,
-            "direct_reply": True,
-            "status_queries": (
-                "get_agent_status",
-                "get_memory_status",
-                "get_capabilities",
-            ),
-            "connector": (
-                "search_connector_tools, call_connector_tool"
-                if self._connector_available
-                else "unavailable"
-            ),
-            "observe_desktop": True,
-            "observation_tools": ("refresh_desktop",),
-            "desktop_actions": (
-                "click",
-                "double_click",
-                "move_mouse",
-                "drag",
-                "scroll",
-                "type_text",
-                "hotkey",
-                "input_sequence",
-                "launch_application",
-            ),
-            "outcome_tools": ("claim_obligation_done", "blocked"),
-        }
-
-
 def _window_text_reader_factory() -> Any:
     """Read-only UIA text from the window that owns focus when called."""
     _WINDOW_TEXT_FORMAT = "window-text/1"
@@ -1051,10 +765,9 @@ def _freeze_prebound_target(
     dependencies: _CompositionDependencies,
 ) -> _FrozenTarget:
     context = _plain_dict(inputs.get("execution_context"), "execution_context")
-    # The lease itself already binds this payload to one run.  Keep only the
-    # task association; frontend format versions and focus/handoff telemetry
-    # are hints and must never decide whether the model may see or use the
-    # desktop.
+    # Keep only the task association.  The server owns this neutral desktop
+    # anchor; format and focus telemetry never decide whether the model may
+    # see or use the desktop.
     if context.get("task_id") != graph.id:
         raise ValueError("desktop context does not match the requested task")
     target = _plain_dict(
@@ -1881,25 +1594,6 @@ class _BudgetedActor:
         finally:
             self._counter.finish(VISUAL_ACTOR_MODEL_ROLE)
 
-    def begin_turn(
-        self,
-        *args: Any,
-        **kwargs: Any,
-    ) -> VisualActorTurnAdmission:
-        admitted = self._counter.begin(
-            VISUAL_ACTOR_MODEL_ROLE,
-            # Text replies, status reads, and connector work can legitimately
-            # contain a dependent chain before a screen is needed.  Local
-            # computer tools intentionally start only after the Actor has the
-            # real desktop frame.
-            reserve=None,
-        )
-        try:
-            kwargs["_model_call_limit"] = admitted
-            return self._role.begin_turn(*args, **kwargs)
-        finally:
-            self._counter.finish(VISUAL_ACTOR_MODEL_ROLE)
-
     def propose_flow_fragment(
         self,
         *args: Any,
@@ -1913,7 +1607,7 @@ class _BudgetedActor:
 
 
 class PreparedLiveActor:
-    """Exactly-once model resources shared by text admission and visual work."""
+    """Exactly-once model resources for one live visual task."""
 
     def __init__(
         self,
@@ -2183,9 +1877,9 @@ def _build_actor_resources(
     model: _ModelConfig,
     dependencies: _CompositionDependencies,
     deadline: Callable[[], float],
+    history: tuple[dict[str, str], ...] = (),
     publish_run_telemetry: bool = True,
     role_factory: Callable[..., Any] = LiveVisualActor,
-    status_provider: _LiveAgentStatusProvider | None = None,
 ) -> PreparedLiveActor:
     raw_client: Any | None = None
     try:
@@ -2385,14 +2079,13 @@ def _build_actor_resources(
             "max_attempts": _configured_max_attempts(model.api),
         }
         if role_factory is LiveVisualActor:
+            role_kwargs["history"] = tuple(deepcopy(history))
             role_kwargs["on_activity"] = publish_actor_activity
             role_kwargs["connector_gateway"] = (
                 dependencies.connector_factory()
                 if dependencies.connector_factory is not None
                 else None
             )
-            if status_provider is not None:
-                role_kwargs["status_provider"] = status_provider
             if dependencies.shell_factory is not None:
                 role_kwargs["shell_runner"] = dependencies.shell_factory()
             role_kwargs["window_text_reader"] = _window_text_reader_factory()
@@ -2787,13 +2480,12 @@ def classify_live_agent_failure_stage(
     terminal_status: RuntimeStatus,
     detail: str,
     *,
-    lease_state: Mapping[str, Any],
     stage_hint: str = "",
 ) -> str:
     """Classify one terminal vNext failure into a product-visible stage.
 
-    Stages: model_routing, desktop_handoff, target_binding, screenshot,
-    tool_format, physical_input, result_verification.  The classification is
+    Stages: model_routing, target_binding, screenshot, tool_format,
+    physical_input, result_verification.  The classification is
     mechanical; it never rewrites the underlying detail string.
     """
     if terminal_status is RuntimeStatus.MISSION_VERIFIED:
@@ -2812,12 +2504,8 @@ def classify_live_agent_failure_stage(
     # buckets; it is the model layer deciding to stop.
     if status in {"blocked"}:
         return "model_routing"
-    lease_status = str(lease_state.get("status") or "")
-    lease_error = str(lease_state.get("error") or "")
     if status == "state_rejected":
-        lowered = f"{detail} {lease_error}".lower()
-        if "desktop lease" in lowered or "handoff" in lowered:
-            return "desktop_handoff"
+        lowered = detail.lower()
         if "target" in lowered and (
             "mismatch" in lowered
             or "missing" in lowered
@@ -2837,11 +2525,6 @@ def classify_live_agent_failure_stage(
             return "model_routing"
         if "connector" in lowered:
             return "model_routing"
-    if lease_status in {"closed"} and lease_error:
-        lowered = lease_error.lower()
-        if "target" in lowered or "binding" in lowered:
-            return "target_binding"
-        return "desktop_handoff"
     # A state_rejected with no recognized keyword is a Runtime/controller
     # precondition failure (physical input gate, permit, evidence), not an
     # automatic model-routing verdict.  Surface it as physical_input so the
@@ -2958,7 +2641,6 @@ class _PreparedHandler:
         model: _ModelConfig,
         dependencies: _CompositionDependencies,
         history: tuple[dict[str, str], ...],
-        desktop_lease: DesktopLeaseSlot,
         thread_id: str,
         turn_id: str,
     ) -> None:
@@ -2968,7 +2650,6 @@ class _PreparedHandler:
         self._model = model
         self._dependencies = dependencies
         self._history = tuple(deepcopy(history))
-        self._desktop_lease = desktop_lease
         self._thread_id = thread_id
         self._turn_id = turn_id
         self._claimed = False
@@ -2994,53 +2675,6 @@ class _PreparedHandler:
             self._dependencies.monotonic() - started,
         )
         return bool(allowed and not stop_event.is_set())
-
-    def _status_provider(
-        self,
-        run_id: str,
-        mission_id: str,
-    ) -> _LiveAgentStatusProvider:
-        from ..config import MEMORY_DB_PATH, MEMORY_PATH, ROOT_DIR
-
-        config_snapshot = _plain_dict(
-            self._dependencies.config_snapshot(),
-            "config snapshot",
-        ) if self._dependencies.config_snapshot is not None else {}
-        live_agent_enabled = bool(
-            isinstance(config_snapshot.get("vnext"), dict)
-            and config_snapshot["vnext"].get("live_agent_enabled") is True
-        )
-        config_experience_memory = bool(
-            isinstance(config_snapshot.get("agent"), dict)
-            and config_snapshot["agent"].get("experience_memory") is True
-        )
-        try:
-            db_path = Path(MEMORY_DB_PATH)
-            mem_path = Path(MEMORY_PATH)
-            if (
-                db_path == Path(ROOT_DIR) / "memory.db"
-                and mem_path != Path(ROOT_DIR) / "experience_memory.json"
-            ):
-                db_path = mem_path.with_suffix(".db")
-            store_present = db_path.is_file()
-        except Exception:
-            store_present = False
-        return _LiveAgentStatusProvider(
-            runtime_version=_RUNTIME_VERSION,
-            model=self._model.model,
-            budget=self._budget,
-            run_id=run_id,
-            mission_id=mission_id,
-            thread_id=self._thread_id,
-            turn_id=self._turn_id,
-            live_agent_enabled=live_agent_enabled,
-            experience_policy="disabled",
-            connector_available=(
-                self._dependencies.connector_factory is not None
-            ),
-            config_experience_memory=config_experience_memory,
-            memory_store_present=store_present,
-        )
 
     def __call__(
         self,
@@ -3096,8 +2730,20 @@ class _PreparedHandler:
             deadline=lambda: deadline[0],
         )
         actor_bundle: PreparedLiveActor | None = None
+        initial_stage = "target_binding"
         try:
-            status_provider = self._status_provider(run_id, mission_id)
+            target = _freeze_prebound_target(
+                self._graph,
+                {
+                    "execution_context": {
+                        "task_id": self._graph.id,
+                        "target_window": capture_desktop_workspace_context(),
+                    }
+                },
+                dependencies=self._dependencies,
+            )
+            runtime_state["target_binding_id"] = target.binding_id
+            initial_stage = "model_routing"
             actor_bundle = _build_actor_resources(
                 run_id=run_id,
                 mission_id=mission_id,
@@ -3105,7 +2751,7 @@ class _PreparedHandler:
                 model=self._model,
                 dependencies=self._dependencies,
                 deadline=lambda: deadline[0],
-                status_provider=status_provider,
+                history=self._history,
             )
             BUS.publish(
                 "live_agent_start",
@@ -3122,77 +2768,9 @@ class _PreparedHandler:
                 deadline,
             ):
                 raise RuntimeError(
-                    "run canceled before the initial Actor turn"
+                    "run canceled before vNext session composition"
                 )
-            admission = actor_bundle.actor.begin_turn(
-                self._goal,
-                history=self._history,
-                stop_event=bounded_stop,
-            )
-            if admission.narration.strip():
-                BUS.publish(
-                    "live_agent_message",
-                    run_id=run_id,
-                    mission_id=mission_id,
-                    runtime_version=_RUNTIME_VERSION,
-                    narration=admission.narration.strip(),
-                    phase="starting",
-                )
-            if admission.kind == "reply":
-                runtime_state["user_result"] = admission.reply
-                model_usage = actor_bundle.usage_total
-                runtime_state["model_usage"] = model_usage
-                output = {
-                    "runtime_version": _RUNTIME_VERSION,
-                    "runtime_budget": budget_wire,
-                    "no_legacy_fallback": True,
-                    "status": "reply",
-                    "turns_used": 1,
-                    "model_calls": actor_bundle.counter.count,
-                }
-                if model_usage.get("prompt_tokens") or model_usage.get(
-                    "completion_tokens"
-                ):
-                    output["model_usage"] = model_usage
-                BUS.publish(
-                    "live_agent_done",
-                    run_id=run_id,
-                    mission_id=mission_id,
-                    runtime_version=_RUNTIME_VERSION,
-                    runtime_budget=budget_wire,
-                    no_legacy_fallback=True,
-                    status="reply",
-                    turns_used=1,
-                    model_calls=actor_bundle.counter.count,
-                    model_usage=model_usage,
-                    detail="",
-                )
-                actor_bundle.close()
-                return NodeResult(
-                    ok=True,
-                    branch="reply",
-                    output=output,
-                )
-            if admission.kind != "desktop":
-                raise RuntimeError(
-                    "initial Actor turn returned an unsupported result"
-                )
-            runtime_state["desktop_lease"] = (
-                self._desktop_lease.request(run_id)
-            )
-            target = self._desktop_lease.wait(
-                stop_event=bounded_stop,
-                deadline=lambda: deadline[0],
-                clock=self._dependencies.monotonic,
-            )
-            runtime_state["desktop_lease"] = (
-                self._desktop_lease.snapshot()
-            )
-            runtime_state["target_binding_id"] = target.binding_id
         except Exception as exc:
-            runtime_state["desktop_lease"] = (
-                self._desktop_lease.snapshot()
-            )
             model_usage = (
                 actor_bundle.usage_total
                 if actor_bundle is not None
@@ -3204,7 +2782,7 @@ class _PreparedHandler:
                     actor_bundle.close()
                 except Exception:
                     pass
-            detail = str(exc) or "vNext initial Actor turn failed"
+            detail = str(exc) or "vNext live Agent composition failed"
             failure_stage = classify_live_agent_failure_stage(
                 (
                     RuntimeStatus.CANCELED
@@ -3212,15 +2790,7 @@ class _PreparedHandler:
                     else RuntimeStatus.STATE_REJECTED
                 ),
                 detail,
-                lease_state=self._desktop_lease.snapshot(),
-                stage_hint=(
-                    "desktop_handoff"
-                    if isinstance(exc, DesktopLeaseError)
-                    and "target" not in detail.lower()
-                    else "target_binding"
-                    if isinstance(exc, DesktopLeaseError)
-                    else "model_routing"
-                ),
+                stage_hint=initial_stage,
             )
             BUS.publish(
                 "live_agent_done",
@@ -3557,11 +3127,6 @@ class _PreparedHandler:
                 "failure_stage": classify_live_agent_failure_stage(
                     terminal_status,
                     detail,
-                    lease_state=(
-                        self._desktop_lease.snapshot()
-                        if terminal_status is not RuntimeStatus.MISSION_VERIFIED
-                        else {}
-                    ),
                 ),
                 "turns_used": turns_used,
                 "model_calls": model_calls,
@@ -3624,20 +3189,12 @@ def _configured_max_attempts(api: Mapping[str, Any]) -> int:
 
 
 def _shell_runner_factory() -> Any | None:
-    """Return the vNext shell runner when shell execution is enabled.
-
-    ``config.agent.shell_enabled`` gates the whole capability; when disabled
-    the tool is simply not offered to the Actor (same as connector/status).
-    The runner is the existing bounded shell primitive with its safety guard.
-    """
+    """Return the generic shell runner when its module is available."""
     try:
         from ..action import shell as shell_module
-
-        if shell_module.shell_enabled():
-            return shell_module
+        return shell_module
     except Exception:
         return None
-    return None
 
 
 def prepare_live_vnext_execution(
@@ -3655,7 +3212,6 @@ def prepare_live_vnext_execution(
 
     dependencies = _dependencies or _CompositionDependencies(
         connector_factory=ConnectorGateway,
-        config_snapshot=CONFIG.snapshot,
         shell_factory=_shell_runner_factory,
     )
     if type(config_snapshot) is not dict:
@@ -3672,12 +3228,6 @@ def prepare_live_vnext_execution(
     if not thread_id or not turn_id:
         raise ValueError("vNext Agent execution requires thread and turn ids")
     frozen_history = tuple(deepcopy(history))
-    desktop_lease = DesktopLeaseSlot(
-        graph=graph,
-        dependencies=dependencies,
-        thread_id=thread_id,
-        turn_id=turn_id,
-    )
     prepare = getattr(run_manager, "prepare", None)
     if not callable(prepare):
         raise TypeError("run_manager must provide prepare()")
@@ -3688,7 +3238,6 @@ def prepare_live_vnext_execution(
         model=model,
         dependencies=dependencies,
         history=frozen_history,
-        desktop_lease=desktop_lease,
         thread_id=thread_id,
         turn_id=turn_id,
     )
@@ -3707,8 +3256,6 @@ def prepare_live_vnext_execution(
             "experience_policy": "disabled",
             "thread_id": thread_id,
             "turn_id": turn_id,
-            "desktop_lease": desktop_lease.snapshot(),
-            "_desktop_lease": desktop_lease,
         }
     )
     return execution
@@ -3725,7 +3272,7 @@ def propose_live_flow_fragment(
 ) -> dict[str, Any]:
     """Build one inert editor proposal with the configured model/provider path.
 
-    This auxiliary call has no desktop lease, connector tools, thread history,
+    This auxiliary call has no desktop, connector tools, thread history,
     saved-document authority, or execution authority.
     """
 
@@ -3808,8 +3355,6 @@ def propose_live_flow_fragment(
 
 
 __all__ = [
-    "DesktopLeaseError",
-    "DesktopLeaseSlot",
     "build_exact_live_vnext_graph",
     "prepare_live_vnext_execution",
     "propose_live_flow_fragment",

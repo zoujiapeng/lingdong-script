@@ -22,14 +22,12 @@
 Electron「智能代理」
   -> POST /api/v2/goals/runs { goal, optional thread_id }
   -> server-owned Thread / Turn + Goal Admission
-  -> 同一个 LiveVisualActor：direct reply、通用 connector 调用或 observe_desktop
-       -> reply 终态（窗口始终可见）
-       -> 显式配置的 MCP：search/call 后仍由同一个 Actor 继续决定
-       -> run-bound desktop lease（此时才让出前台）
-          -> 精确 target + 当前权威 JPEG + 小工具面
-          -> 模型一笔动作 / 新帧 / 同一视觉线
-          -> claim 或 blocked
-  -> matching terminal 由产品自行恢复窗口
+  -> 服务端建立桌面锚点并捕获完整真实桌面 JPEG
+  -> 同一个 LiveVisualActor 首次调用即看到原始 goal、有界 Thread history 和 JPEG
+       -> 直接回复，或调用 connector / shell / GUI
+       -> 本地或 connector 结果回到同一个 Actor
+       -> GUI 动作经唯一坐标映射和 RawDevice 执行，再提供新帧
+       -> reply_to_user 或 blocked
 ```
 
 这是当前 GUI 产品验收的唯一语义入口。内部仍会托管 ARP job 和兼容数据，但它们不能获得第二份任务计划或执行策略。显式 MCP 只作为同一 Actor 的普通工具；旧 `/api/chat` 已删除，CLI、直接 API runner、FlowScript 或直接 MCP 调用仍不能替代客户端 E2E，也不能发展成另一套产品主循环。
@@ -39,9 +37,8 @@ Electron「智能代理」
 | 组件 | 职责 | 不应承担 |
 | --- | --- | --- |
 | `AgentThreadStore` | 保存有界成功 Turn 文本并绑定 run 终态 | 长期记忆、摘要模型、执行选择 |
-| `LiveVisualActor` | 直接回复、选择 connector 或请求桌面；进入视觉线后看 JPEG 并选一笔工具 | 物理输入、应用脚本、隐藏执行策略 |
-| `ConnectorGateway` | 向同一 Actor 暴露显式配置的 MCP 目录和只读调用回执 | 服务专属 adapter、关键词路由、外部写入授权 |
-| `DesktopLeaseSlot` / Electron | 精确配对桌面让出、target 交付和窗口恢复 | 预判任务类型、替模型选择 GUI |
+| `LiveVisualActor` | 首次调用即看完整桌面 JPEG，直接回复或选择 connector、shell、GUI 工具 | 物理输入、应用脚本、第二角色委派 |
+| `ConnectorGateway` | 向同一 Actor 暴露显式配置的 MCP 目录和调用回执 | 服务专属 adapter、关键词路由、应用规则 |
 | `MissionRuntime` | 驱动模型 → 工具 → 新帧循环，保存最小任务状态 | 关键词规划、修正目标、替模型重试策略 |
 | `FrameAuthority` | 原子发布帧、窗口、区域、epoch 和提交图片尺寸 | 解释画面或选择动作 |
 | `AtomicDesktopAdapter` | 将模型提交图片坐标映射一次并执行一笔输入 | 目标吸附、offset 补偿、应用特判 |
@@ -59,13 +56,11 @@ Electron「智能代理」
 - 当前 live 模型面提供点击、双击、文本输入、快捷键、滚轮、拖拽和连续/跨帧 held-pointer；
 - 按下后目标才出现时，跨权威帧保留一个有超时和强制清理的 held-pointer session；
 - 动作前帧新鲜度检查、物理完成回执、新权威帧，以及不阻塞输入的异步 trace；任务是否完成由同一个模型在真实屏幕上判断；
-- 同一模型的 direct reply 与按需桌面租约；只有模型请求桌面后才隐藏，matching
-  terminal 自行恢复；
+- 同一模型首次调用就看到完整真实桌面；Electron 在 run 前后保持普通可见控制面；
 - 有界 Thread/Turn 上下文：只保留最近成功且有用户结果的原生文本交换，失败 Turn
   不污染下一轮；
 - 两个通用 connector 工具 `search_connector_tools` / `call_connector_tool`；它们只发现
-  显式配置的 MCP，并与 reply/GUI 同时交给同一个 Actor，不经过关键词 router；
-- connector 当前只执行明确标注 `readOnlyHint=true` 且未标注 destructive 的工具；
+  显式配置的 MCP，并与 reply/GUI 同时交给同一个 Actor，不经过关键词 router 或副作用门禁；
   调用前重新核对完整 descriptor，并服从同一 deadline/cancel；
 - run 级冷启动、session 引用、Memory Graph 和已验证 Skill replay；
 - 真实 Electron 客户端 E2E harness 与浏览器侧可信指针 oracle。
@@ -91,7 +86,7 @@ provider 返回的 cache hit/write token，观测本身不等于创建缓存。
 - 可见 Electron 受控桌面套件 `18/18`；99 次物理尝试与 99 次 RawDevice 回执一一对应，
   全部 `applied/input_completed`，32 次输入释放清理全部完成，trace 零丢失/零写入失败。
 - 安全真实应用探针 `5/5`：Notepad 精确落盘、Calculator 显示精确结果、聊天后继续桌面任务、
-  缺失文件诚实结束、Paint 外部图像判定检出真实笔画。含纯聊天首轮的 6 个 trace 共
+  缺失文件诚实结束、Paint 外部图像判定检出真实笔画。含纯聊天样本的 6 个 trace 共
   34 次物理尝试/34 次回执，11 次释放清理全部完成。
 - 可见 Studio 离线流程 `2/2`：click 外部计数 `0 → 1`，clipboard 条件走 YES 分支并生成
   1920×1080 managed screenshot；两个 run 均零模型调用、trace 完整。
@@ -100,9 +95,9 @@ provider 返回的 cache hit/write token，观测本身不等于创建缓存。
 
 - 没有独立的“用户点击可见 Stop 按钮后，held pointer/key 完整释放”命名 E2E；机械释放已有
   单元/集成覆盖。
-- 首轮只提供回复、桌面观察、状态和显式配置的只读 connector；进入视觉线后，若启用
-  shell，才与 GUI/control 一同提供通用 `run_shell`、`run_detached`、`write_file`。这些
-  工具的进程或文件回执不替代物理输入回执，也不决定任务完成。
+- 第一次视觉调用就同时提供回复、显式 connector、shell 与 GUI/control；通用
+  `run_shell`、`run_detached`、`write_file` 的进程或文件回执不替代物理输入回执，
+  也不决定任务完成。
 - Studio、Replay、Memory、旧 Flow/feature/F9 和本地 7880 API 仍是有真实消费者的兼容面；
   继续删除必须按消费者推进，不能重新引入 AgentRunner、Task Contract 或第二 verifier。
 - 真实消费软件、多窗口、托盘、弹窗、高 DPI、多显示器和不可逆外部动作的安全覆盖仍不足；

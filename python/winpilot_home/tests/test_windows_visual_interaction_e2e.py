@@ -599,42 +599,13 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
         assert graph.get("metadata", {}).get("experience_policy") == "disabled", graph
         assert set(graph.get("policy") or {}) <= {"max_node_visits", "fail_fast"}
 
-        # Reproduce the native client's handoff/capture/start sequence. The
-        # endpoint supplies a neutral desktop anchor; the real full-screen
-        # frame and point-selected physical input remain free to use this
-        # browser or any other window.
+        # The server captures its neutral desktop anchor when this run starts.
+        # The Actor's first model call therefore sees the same real full-screen
+        # workspace that subsequent physical actions operate on.
         assert _find_window(title, timeout_s=3.0) == browser_hwnd
-        desktop_context = _request(
-            "GET",
-            f"{base}/api/v2/desktop-context?exclude_process_id=0",
-        )
-        target_window = desktop_context.get("target") or {}
-        assert target_window.get("usable") is True, target_window
-        assert target_window.get("foreground_verified") is False, target_window
-        assert target_window.get("binding_mode") == "desktop_shell", target_window
-        assert int(target_window.get("hwnd") or 0) > 0, target_window
-        submitted_at = int(time.time() * 1000)
-        execution_context = {
-            "format": "execution-context/1",
-            "entrypoint": "native_agent_cockpit",
-            "task_id": contract.get("task_id"),
-            "submitted_at": submitted_at,
-            "desktop_handoff": {
-                "required": True,
-                "strategy": "foreground_after_control_surface_yield",
-                "yielded": True,
-                "control_surface_pid": 0,
-                "prepared_at": int(target_window.get("captured_at") or submitted_at),
-                "reason": "real E2E control surface already yielded",
-            },
-            "target_window": target_window,
-        }
         started = _request("POST", f"{base}/api/v2/arp/runs", {
             "graph": graph,
-            "inputs": {
-                "e2e_case_id": case_id,
-                "execution_context": execution_context,
-            },
+            "inputs": {"e2e_case_id": case_id},
         })
         run_id = str(started["run_id"])
         timeout_s = float(os.environ.get("WINPILOT_REAL_VISUAL_TIMEOUT_S", "240"))
@@ -667,7 +638,6 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
                 "run_api": "/api/v2/arp/runs",
                 "require_gui": True,
                 "cold_start": True,
-                "execution_context": execution_context,
             },
             "run_id": run_id,
             "case_id": case_id,

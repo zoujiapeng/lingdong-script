@@ -193,7 +193,7 @@ fail closed，因此不能记为聊天或 GUI 完成。下一轮只尝试删除 
    偷偷注入，并须记录实际准入默认值；
 4. 通过操作系统鼠标点击可见“发送消息”控件；
 5. 绑定点击后产生的准确 outer run id、child run 和 trace；
-6. 保存提交前、handoff 后和终态截图；
+6. 保存提交前、首次视觉调用所见桌面和终态截图；
 7. runtime 没有超时、漂移、未配对输入或 unverified done；
 8. 独立 oracle 证明用户目标实际成立；
 9. 测试结束后只清理本次启动且已核验属于工作区的进程。
@@ -207,15 +207,15 @@ RawDevice 证据和目标应用收到的可信操作系统事件；命令行辅�
 
 `status=done` 只表示候选完成。没有第 8 条时，报告必须是 `ungrounded`，不能是 `passed`。
 
-## 聊天与桌面租约生命周期
+## 聊天与统一视觉生命周期
 
 前端聊天不是 GUI task 的宽松变体。真实聊天 E2E 必须用同样的操作系统键盘和真实
 鼠标发送，但通过条件是：
 
-- 从点击发送到 direct reply 可见，Electron 始终 `visible && !iconic`；
-- 没有 desktop lease、外部 GUI observation、`physical_attempt` 或伪造的 mission
-  completion evidence；
-- 前端显示模型原始 reply，而不是把 `claim_obligation_done` 包装成“已回复”。
+- 从点击发送到回复可见，Electron 始终 `visible && !iconic`；
+- 第一次 provider 请求包含完整真实桌面 JPEG、原始 goal 和预期的有界 Thread history；
+- 没有 `physical_attempt`，也不伪造任何外部应用状态；
+- 前端显示同一 Actor 通过 `reply_to_user` 返回的用户结果。
 
 会话重启还必须使用正常标题栏关闭，并证明新 Electron、托管服务 PID/HWND 与旧进程不同，
 旧消息重新可见、下一条消息仍绑定同一 `thread_id`，且模型实际收到的恢复历史与有界
@@ -230,17 +230,13 @@ checkpoint 精确一致。失败基线
 “新建对话”必须清除。可见 Electron 证据为
 `output/playwright/client-draft-restart-e2e/20260801-170711-draft-restart/report.json`。
 
-需要桌面操作的同一入口则必须记录 run-bound lease：只有同一个 Actor 调用通用
-`observe_desktop` 后才允许隐藏；capture 必须晚于 Electron yield ACK，首帧和任何
-物理动作必须晚于 lease bind。matching success/fail/cancel 后，产品必须自行
-`restore/show`；旧 run、旧 lease 和重复 terminal 都不得改变当前窗口。
+需要桌面操作的同一入口不再经过客户端交接。服务端必须在第一次模型调用前建立桌面
+workspace 并捕获权威 `full_desktop` JPEG；任何空间动作都必须引用该帧，动作回执后再
+捕获新帧。Electron 不得为 run 隐藏、最小化或在终态抢回前台。
 
-`scripts/client_e2e_run.py` 必须先把 terminal 时的 `IsWindowVisible`、`IsIconic`、
-foreground HWND 和窗口矩形写入 `client_terminal_before_harness_restore`，之后才可
-为了截图调用 `restore_and_focus()`；正式生命周期 oracle 必须读取前者，不能让
-harness 恢复掩盖产品缺陷。若产品未恢复，case 当场失败，不能先恢复再继续
-`chat → GUI → chat`。`status=reply` 作为独立成功终态处理，不能映射为普通 failed
-或视觉 verified done。
+`scripts/client_e2e_run.py` 必须记录提交后与 terminal 时的 `IsWindowVisible`、`IsIconic`、
+foreground HWND 和窗口矩形；harness 的聚焦或截图动作不能掩盖产品自行隐藏、最小化或
+抢前台。纯聊天与 GUI 任务都走同一视觉 run 状态机，差别只是前者没有物理输入。
 最后一轮还必须只凭该 thread 的有界上一轮交换回答 GUI 轮产生的随机值，防止把三个
 互不知情的 run 误报为 Codex 式连续对话。
 
@@ -248,9 +244,8 @@ harness 恢复掩盖产品缺陷。若产品未恢复，case 当场失败，不�
 
 Connector 的组件测试至少覆盖：仅加载显式 MCP 配置、remote HTTP 与 stdio 两种
 transport、环境变量替换、目录/参数/结果大小上限、取消和总 deadline，以及 stale
-ref、descriptor 变化、未知 annotations、destructive annotations 全部 fail closed。
-read-only descriptor 必须在同一物理 `call_tool` 前再次核对；不能只 mock Gateway 后
-声称远端调用安全。正式报告还应持久化不含 credential/正文的 run-scoped physical
+ref、descriptor 变化和调用前完整 descriptor 重检。不能只 mock Gateway 后
+声称远端调用成立。正式报告还应持久化不含 credential/正文的 run-scoped physical
 receipt（connector、tool fingerprint、arguments hash、result hash、status）；当前官方
 GitHub E2E 报告尚缺这一项，因此 direct Gateway smoke 是补强证据，不是替代品。
 
@@ -272,7 +267,7 @@ trace 应显示 connector 与 reply/GUI 同轮可选，没有关键词 router；
   `?`，必须记为测试输入干扰，不能用其输出归因模型；
 - ASCII 可见复验 `arp-20260731-220327-1ed4e4` 的提交文本完整，官方 remote 有真实
   会话/POST；五次模型响应后终态为 `state_rejected`，detail 是
-  `Actor initial turn returned an unapproved tool`，回复为空、零 GUI 动作。这个干净
+  `Actor returned an unapproved tool`（当时的错误文案），回复为空、零 GUI 动作。这个干净
   task failed 的 usage 为 `8126` prompt、`539` completion、`4160` hit、`3966` miss；
   首个分歧是模型工具选择/停止，不是 connector transport。报告：
   `output/playwright/github-connector-e2e-ascii/20260731-220236/report.json`。
@@ -284,8 +279,8 @@ History-depth 对照必须额外满足：
 - fresh target 实际 provider history 为 0；history target 的 message count/chars/roles/hash
   必须从 Actor 随后真正放进 provider request 的 message list 旁路观测，不能用
   “20 个前端 Turn 约等于 6 轮模型历史”推算；
-- 每个 history chat 都必须证明 raw connector call、Gateway call、desktop lease、GUI
-  observation/action 和 Runtime tool attempt 全为 0；否则它预热了被测通路，整臂无效；
+- 每个 history chat 都必须证明 raw connector call、Gateway call、GUI action 和 Runtime
+  physical attempt 全为 0；首个全桌面 JPEG 属统一调用合同，不算预热其他执行通路；
 - arm 顺序按 seed 随机，并在多个 seed 中做 AB/BA 对消；单对只叫 pilot，不能报告
   history 因果效果；
 - target 必须等 Agent 自主 terminal，文件内容严格相等，产品窗口须在 harness 恢复前
@@ -300,9 +295,9 @@ Thread 不同，因此不得写成 history regression。fresh 诊断
 Runtime 参数或输入交付分歧。测试侧实际 history/零副作用 probe 的可见 Electron 预检
 `arp-20260731-235249-105256` 已通过。两轮负向预检的第二轮
 `arp-20260731-235909-f4d259` 实际观测到 2 条/48 字符的 `user,assistant` history，但模型
-为纯文本回忆申请 desktop lease 和一次 GUI observation，因此 text-only gate 必须失败；
-这证明 gate 不能用最终回复 passed 替代。反查旧正式 B 的 20 个 prefill run，其 raw/
-Gateway connector、lease、observation、tool attempt 和 GUI action 均为 0。聚焦回归
+为纯文本回忆进入了当时独立的 GUI 路径，因此旧 text-only gate 必须失败；这项历史
+判据已被“首调固定全桌面 JPEG、聊天零物理输入”的统一合同取代。反查旧正式 B 的 20 个
+prefill run，其 raw/Gateway connector、tool attempt 和 GUI action 均为 0。聚焦回归
 `34 passed`。下一次正式矩阵应改用预先存在且已打开的文档，避免 Save As 噪声，并至少
 运行四个随机 seed 的 counterbalanced pairs。
 当前发布前全量回归为 Python `3462 passed, 13 skipped, 1 warning`、renderer
@@ -313,8 +308,8 @@ Gateway connector、lease、observation、tool attempt 和 GUI action 均为 0�
 
 OpenAI Responses、Anthropic Messages 与 Gemini `generateContent` 首先做 canonical
 message/tool/image 的双向 fixture 测试，再分别用真实 credential 做 provider smoke；
-最后仍需由可见 Electron 触发至少一个 direct reply，声称支持视觉的模型还需一个
-需要截图的简单任务。配置必须显式选择 wire，测试也要证明只改变 `api.provider`、
+最后仍需由可见 Electron 触发至少一个零物理输入的 `reply_to_user`，并核对第一次请求已
+携带 JPEG；声称支持 GUI 的模型还需一个实际产生物理输入的简单任务。配置必须显式选择 wire，测试也要证明只改变 `api.provider`、
 模型名或 base URL 不会触发协议猜测，并验证 canonical `strict=true` 在 Anthropic
 tool schema 中不丢失。当前三条原生线路没有真实-provider 证据，只能报告“provisional 协议
 实现存在，外部兼容未验证”。审计后的相关 5 个测试文件为 `214 passed`，已覆盖

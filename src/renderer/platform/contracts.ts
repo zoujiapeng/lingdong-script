@@ -11,16 +11,6 @@ export interface GoalAdmissionAudit {
   no_legacy_fallback: true;
 }
 
-export interface DesktopLeaseSnapshot {
-  format: 'desktop-lease/1';
-  run_id: string;
-  thread_id: string;
-  turn_id: string;
-  lease_id: string;
-  status: 'idle' | 'waiting' | 'validating' | 'delivered' | 'closed';
-  error: string;
-}
-
 export interface GoalRunStart {
   ok: boolean;
   run_id: string;
@@ -234,7 +224,6 @@ export interface ArpExecutionSnapshot {
   goal_admission?: GoalAdmissionAudit | Record<string, unknown>;
   thread_id?: string;
   turn_id?: string;
-  desktop_lease?: DesktopLeaseSnapshot | Record<string, unknown>;
   status: string;
   manual_paused?: boolean;
   current_node_id?: string | null;
@@ -658,36 +647,6 @@ export interface CurrentRunResponse {
   arp: ArpExecutionSnapshot | null;
 }
 
-export interface DesktopTargetContext {
-  format: 'desktop-target/1';
-  hwnd: number;
-  title: string;
-  process_id: number;
-  class_name: string;
-  rect: number[];
-  captured_at: number;
-  foreground_verified: boolean;
-  usable: boolean;
-  failure_type: string;
-  reason: string;
-  binding_mode?: 'window' | 'desktop_shell';
-}
-
-export interface ClientExecutionContext {
-  format: 'execution-context/1';
-  entrypoint: 'native_agent_cockpit' | 'web_workbench';
-  submitted_at: number;
-  desktop_handoff: {
-    required: true;
-    strategy: 'foreground_after_control_surface_yield';
-    yielded: boolean;
-    control_surface_pid: number;
-    prepared_at: number;
-    reason: string;
-  };
-  target_window: DesktopTargetContext | null;
-}
-
 export interface RuntimeSourceIdentity {
   loaded_stamp: string;
   current_stamp: string;
@@ -779,7 +738,6 @@ export interface PlatformStatus {
   vlm_reason?: string | null;
   enabled_dimensions?: string[];
   is_admin?: boolean;
-  shell_enabled?: boolean;
   runtime?: RuntimeIdentity;
   model_profile?: RuntimeModelProfile;
   desktop_action_queue?: DesktopActionQueueStatus;

@@ -4,24 +4,18 @@ The agent's ``launch`` tool is fire-and-forget (Popen) and returns no output —
 useless for "list files / read result / query system" work. ``run`` here uses
 subprocess.run with full stdout/stderr/exit-code capture, a hard timeout, and
 UTF-8 decoding so the agent can actually see what a command produced.
-
-Gated by ``config.agent.shell_enabled``: turning it off forces pure-GUI mode
-(for validating that GUI-only paths work without any shell shortcuts).
 """
 from __future__ import annotations
 
-import os
 import re
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
 from pathlib import Path
 
-from ..config import CONFIG, SCRIPTS_DIR
+from ..config import SCRIPTS_DIR
 from ..utils.log import BUS, logger
-from . import safety
 
 _DEFAULT_TIMEOUT_S = 30
 _MAX_OUTPUT_CHARS = 6000  # legacy subprocess result budget
@@ -69,40 +63,6 @@ def _unwrap_redundant_shell_command(command: str, shell: str) -> str:
     if len(body) >= 2 and body[0] == body[-1] and body[0] in {'"', "'"}:
         body = body[1:-1]
     return body
-
-
-def _runtime_host_termination_guard(command: str) -> dict | None:
-    """Reject only process kills that would terminate this active runtime."""
-
-    executable = os.path.basename(sys.executable)
-    process_name = os.path.splitext(executable)[0]
-    name = re.escape(process_name)
-    pid = re.escape(str(os.getpid()))
-    patterns = (
-        rf"\bStop-Process\b[^;\r\n]*-Name\s+['\"]?\*?{name}(?:\.exe)?\*?['\"]?(?:\s|,|$)",
-        rf"\bStop-Process\b\s+['\"]?{name}(?:\.exe)?['\"]?(?:\s|,|$)",
-        rf"\bGet-Process\b[^;\r\n]*\b{name}(?:\.exe)?\b[^;\r\n]*\|\s*Stop-Process\b",
-        rf"\btaskkill\b[^;\r\n]*/IM\s+['\"]?{name}(?:\.exe)?['\"]?(?:\s|$)",
-        rf"\bStop-Process\b[^;\r\n]*-Id\s+{pid}(?:\D|$)",
-        rf"\btaskkill\b[^;\r\n]*/PID\s+{pid}(?:\D|$)",
-    )
-    if not any(re.search(pattern, command, re.IGNORECASE) for pattern in patterns):
-        return None
-    return {
-        "ok": False,
-        "blocked": True,
-        "error": (
-            "command would terminate the active task runtime; list matching "
-            "processes and stop only the intended child PID"
-        ),
-        "next_step": (
-            "select the intended process by PID and leave the runtime host running"
-        ),
-    }
-
-
-def shell_enabled() -> bool:
-    return bool(CONFIG.get("agent", "shell_enabled", default=True))
 
 
 def _truncate(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
@@ -301,22 +261,8 @@ def _run_legacy_subprocess(command: str, shell: str = "powershell",
 
     shell: "powershell" (default) or "cmd".
     """
-    if not shell_enabled():
-        return {"ok": False, "error": "shell 已被禁用（强制 GUI 模式）。请改用界面操作工具。"}
     if not command or not command.strip():
         return {"ok": False, "error": "命令为空"}
-    blocked = _runtime_host_termination_guard(command)
-    if blocked is not None:
-        BUS.publish(
-            "action", action="shell_blocked", command=command[:200],
-            reason=blocked["error"],
-        )
-        return blocked
-    blocked = safety.guard(command)
-    if blocked is not None:
-        BUS.publish("action", action="shell_blocked", command=command[:200],
-                    reason=blocked.get("error") or blocked.get("note"))
-        return blocked
 
     if shell == "cmd":
         argv = ["cmd", "/c", command]
@@ -366,31 +312,12 @@ def run(command: str, shell: str = "powershell",
     """Run a command, capture output, and kill the whole process tree on timeout."""
     operation_id = uuid.uuid4().hex
     command = _unwrap_redundant_shell_command(command, shell)
-    if not shell_enabled():
-        BUS.publish(
-            "action", action="shell_blocked", command=command[:200],
-            reason="shell is disabled", operation_id=operation_id,
-        )
-        return {"ok": False, "error": "shell is disabled"}
     if not command or not command.strip():
         BUS.publish(
             "action", action="shell_blocked", command="",
             reason="empty command", operation_id=operation_id,
         )
         return {"ok": False, "error": "empty command"}
-    blocked = _runtime_host_termination_guard(command)
-    if blocked is not None:
-        BUS.publish(
-            "action", action="shell_blocked", command=command[:200],
-            reason=blocked["error"], operation_id=operation_id,
-        )
-        return blocked
-    blocked = safety.guard(command)
-    if blocked is not None:
-        BUS.publish("action", action="shell_blocked", command=command[:200],
-                    reason=blocked.get("error") or blocked.get("note"),
-                    operation_id=operation_id)
-        return blocked
 
     if shell == "cmd":
         argv = ["cmd", "/c", command]
@@ -605,16 +532,8 @@ def run_detached(script: str, name: str = "task") -> dict:
     the child and writes a status JSON plus stdout/stderr logs, so callers can
     distinguish process creation from the eventual child exit.
     """
-    if not shell_enabled():
-        return {"ok": False, "error": "shell 已被禁用（强制 GUI 模式）"}
     if not script or not script.strip():
         return {"ok": False, "error": "脚本为空"}
-    blocked = _runtime_host_termination_guard(script)
-    if blocked is not None:
-        return blocked
-    blocked = safety.guard(script)
-    if blocked is not None:
-        return blocked
 
     safe = "".join(c for c in name if c.isalnum() or c in "-_")[:40] or "task"
     detached_dir = SCRIPTS_DIR / "detached"

@@ -83,11 +83,11 @@ provider E2E，不能据此声称“大部分模型 API 已端到端适配”。
 - 上游将来若为 Pro 正式开放图片输入，需要先做真实接口探测、补回归测试，
   再更新 `model_supports_vision()`，不能仅凭名称放开。
 
-原生视觉路径在初始回合和每笔视觉事务后注入新鲜画面。当前 live vNext 不向模型
-暴露 Legacy `observe(image_region=...)`；画面可能是经过验证的前台目标窗口，也
-可能是完整虚拟桌面，每帧都会声明范围和提交图片尺寸。
-`controller.target_window_capture_enabled=true` 只允许在前台、单窗口且范围可信时
-裁剪，含多窗口或全局语义的任务会退回全桌面。关闭该设置可强制全桌面截图。
+当前 live vNext 原生视觉路径从第一次模型调用起，并在每笔视觉事务后注入新鲜完整
+虚拟桌面画面；每帧都会声明范围和提交图片尺寸。它不向模型暴露 Legacy
+`observe(image_region=...)`。旧 controller 的
+`controller.target_window_capture_enabled=true` 可在前台、单窗口且范围可信时显式裁剪，
+但不改变 live vNext 的全桌面主路径。
 真实画面是权威观测，UIA/OCR/规则只是补充，不能覆盖相反的像素事实。
 
 text-only 路径不会收到不可见的截图字节。它必须依赖 UIA、Win32、OCR、CV、

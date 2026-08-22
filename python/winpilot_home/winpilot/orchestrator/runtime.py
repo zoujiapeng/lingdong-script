@@ -334,9 +334,6 @@ class ArpExecution:
                 "turn_id": str(
                     self.runtime_state.get("turn_id") or ""
                 ),
-                "desktop_lease": _json_preview(
-                    self.runtime_state.get("desktop_lease") or {},
-                ),
                 "runtime_lifecycle": _json_preview(
                     self.runtime_state.get("runtime_lifecycle") or {},
                 ),
@@ -417,7 +414,6 @@ class ArpExecution:
             "goal_admission",
             "thread_id",
             "turn_id",
-            "desktop_lease",
             "runtime_lifecycle",
             "trace_status",
             "trace_error",

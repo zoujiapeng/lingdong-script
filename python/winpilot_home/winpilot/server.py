@@ -57,13 +57,10 @@ from .orchestrator.contracts import (
     validate_graph,
 )
 from .orchestrator.goal_admission import (
-    DesktopLeaseFailureRequest,
-    DesktopLeaseRequest,
     GoalAdmissionError,
     GoalAdmissionUnavailable,
     GoalRunRequest,
     admit_goal,
-    bind_client_execution_context,
 )
 from .orchestrator.agent_threads import (
     AGENT_THREADS,
@@ -418,7 +415,6 @@ def status() -> dict[str, Any]:
         "vlm_reason": vlm.configuration_issue() or None,
         "enabled_dimensions": CONFIG.enabled_dimensions(),
         "is_admin": _is_admin(),
-        "shell_enabled": bool(CONFIG.get("agent", "shell_enabled", default=True)),
         "runtime": runtime_fingerprint(),
         "model_profile": {
             "provider": model_profile.provider,
@@ -478,17 +474,6 @@ def platform_jobs(limit: int = 50) -> dict[str, Any]:
             max(1, min(limit, 200)),
             include_result=False,
         ),
-    }
-
-
-@app.get("/api/v2/desktop-context")
-def desktop_context(exclude_process_id: int = 0) -> dict[str, Any]:
-    """Give the native Visual Actor a neutral full-desktop workspace."""
-    from .tasking.execution_context import capture_desktop_workspace_context
-
-    return {
-        "ok": True,
-        "target": capture_desktop_workspace_context(),
     }
 
 
@@ -1096,80 +1081,6 @@ def list_agent_threads(limit: int = 100) -> dict[str, Any]:
         "ok": True,
         "threads": AGENT_THREADS.snapshots(max(1, min(limit, 100))),
     }
-
-
-@app.post("/api/v2/goals/runs/{run_id}/desktop-lease")
-def bind_goal_desktop_lease(
-    run_id: str,
-    req: DesktopLeaseRequest,
-) -> dict[str, Any]:
-    execution = ARP_RUNS.get(run_id)
-    if execution is None:
-        raise HTTPException(404, "run not found")
-    if execution.status not in {
-        ArpRunStatus.QUEUED,
-        ArpRunStatus.RUNNING,
-        ArpRunStatus.PAUSED,
-    }:
-        raise HTTPException(409, "run is already terminal")
-    from .orchestrator.live_agent import (
-        DesktopLeaseError,
-        DesktopLeaseSlot,
-    )
-
-    lease = execution.runtime_state.get("_desktop_lease")
-    if not isinstance(lease, DesktopLeaseSlot):
-        raise HTTPException(409, "run has no desktop lease")
-    try:
-        inputs = bind_client_execution_context(
-            req.execution_context,
-            task_id=execution.graph.id,
-        )
-        target = lease.bind(
-            run_id=run_id,
-            lease_id=req.lease_id,
-            inputs=inputs,
-        )
-    except (DesktopLeaseError, GoalAdmissionError, ValueError) as exc:
-        execution.runtime_state["desktop_lease"] = lease.snapshot()
-        raise HTTPException(409, str(exc)) from exc
-    execution.inputs.update(inputs)
-    execution.runtime_state["desktop_lease"] = lease.snapshot()
-    execution.runtime_state["target_binding_id"] = target.binding_id
-    return {
-        "ok": True,
-        "run_id": run_id,
-        "lease": lease.snapshot(),
-        "target": target.trace_identity(),
-    }
-
-
-@app.post("/api/v2/goals/runs/{run_id}/desktop-lease/fail")
-def fail_goal_desktop_lease(
-    run_id: str,
-    req: DesktopLeaseFailureRequest,
-) -> dict[str, Any]:
-    execution = ARP_RUNS.get(run_id)
-    if execution is None:
-        raise HTTPException(404, "run not found")
-    from .orchestrator.live_agent import (
-        DesktopLeaseError,
-        DesktopLeaseSlot,
-    )
-
-    lease = execution.runtime_state.get("_desktop_lease")
-    if not isinstance(lease, DesktopLeaseSlot):
-        raise HTTPException(409, "run has no desktop lease")
-    try:
-        lease.fail(
-            run_id=run_id,
-            lease_id=req.lease_id,
-            reason=req.reason,
-        )
-    except DesktopLeaseError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    execution.runtime_state["desktop_lease"] = lease.snapshot()
-    return {"ok": True, "run_id": run_id, "lease": lease.snapshot()}
 
 
 @app.post("/api/v2/arp/runs")

@@ -65,7 +65,7 @@ def test_preopened_notepad_task_keeps_target_and_file_path_out_of_goal(tmp_path)
     assert all(term not in task for term in ("Ctrl", "全选", "另存为"))
 
 
-def test_real_stdio_fixture_advertises_and_executes_one_read_only_tool(
+def test_real_stdio_fixture_advertises_and_executes_one_tool(
     monkeypatch,
     tmp_path,
 ):
@@ -99,7 +99,6 @@ def test_real_stdio_fixture_advertises_and_executes_one_read_only_tool(
             fixture.server_name,
             "read_value",
             {"key": "verification"},
-            require_read_only=True,
             timeout_s=20,
         )
         assert called["ok"] is True

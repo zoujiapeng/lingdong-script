@@ -60,7 +60,6 @@ from winpilot.vnext.runtime import (
 NOW_MS = 1_900_000_000_000
 HWND = 81234
 PID = 731
-CONTROL_PID = 999
 RECT = [100, 200, 740, 680]
 REGION = (100, 200, 640, 480)
 GOAL = "Make the requested visible state exist"
@@ -223,19 +222,7 @@ def _graph() -> ArpGraph:
 def _inputs(*, captured_at: int = NOW_MS - 500) -> dict[str, Any]:
     return {
         "execution_context": {
-            "format": "execution-context/1",
-            "entrypoint": "native_agent_cockpit",
             "task_id": _graph().id,
-            "submitted_at": NOW_MS - 1_000,
-            "desktop_handoff": {
-                "required": True,
-                "strategy": "foreground_after_control_surface_yield",
-                "yielded": True,
-                "control_surface_pid": CONTROL_PID,
-                # Renderer and Electron main-process clocks can differ by 1 ms.
-                "prepared_at": NOW_MS - 1_001,
-                "reason": "",
-            },
             "target_window": {
                 "format": "desktop-target/1",
                 "hwnd": HWND,
@@ -290,37 +277,25 @@ def test_budget_freezes_configured_long_task_limits_without_derived_caps() -> No
     }
 
 
-def _observe_desktop_response(content: str = "") -> dict[str, Any]:
-    return {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": content,
-                    "tool_calls": [
-                        {
-                            "id": "call-observe-desktop",
-                            "type": "function",
-                            "function": {
-                                "name": "observe_desktop",
-                                "arguments": "{}",
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-
-
 def _direct_reply_response(reply: str) -> dict[str, Any]:
     return {
         "choices": [
             {
                 "message": {
                     "role": "assistant",
-                    "content": reply,
-                    "tool_calls": [],
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "reply-to-user",
+                            "type": "function",
+                            "function": {
+                                "name": "reply_to_user",
+                                "arguments": json.dumps(
+                                    {"concise_claim": reply}
+                                ),
+                            },
+                        }
+                    ],
                 }
             }
         ]
@@ -348,52 +323,8 @@ def _prepare(
     )
 
 
-def _run_with_desktop_lease(
-    execution: Any,
-    action: Any,
-    *,
-    inputs: dict[str, Any] | None = None,
-) -> Any:
-    """Deliver the exact target only after the Actor requests one lease."""
-
-    lease = execution.runtime_state["_desktop_lease"]
-    stop = threading.Event()
-    errors: list[BaseException] = []
-
-    def deliver() -> None:
-        while not stop.wait(0.001):
-            snapshot = lease.snapshot()
-            if snapshot["status"] == "waiting":
-                try:
-                    lease.bind(
-                        run_id=snapshot["run_id"],
-                        lease_id=snapshot["lease_id"],
-                        inputs=deepcopy(inputs or _inputs()),
-                    )
-                except BaseException as exc:  # surfaced in the test thread
-                    errors.append(exc)
-                return
-            if snapshot["status"] in {"closed", "delivered"}:
-                return
-
-    worker = threading.Thread(target=deliver, daemon=True)
-    worker.start()
-    try:
-        result = action()
-    finally:
-        stop.set()
-        worker.join(timeout=2.0)
-    assert not worker.is_alive()
-    if errors:
-        raise errors[0]
-    return result
-
-
 def _run_prepared(manager: ArpRunManager, execution: Any) -> dict[str, Any]:
-    return _run_with_desktop_lease(
-        execution,
-        lambda: manager.run_prepared(execution),
-    )
+    return manager.run_prepared(execution)
 
 
 def _facts(
@@ -465,14 +396,10 @@ class _FakeSession:
         self.closed = True
 
 
-def test_budgeted_actor_uses_remaining_task_budget_before_and_after_desktop() -> None:
+def test_budgeted_actor_exposes_the_remaining_task_budget_to_visual_work() -> None:
     limits: list[int] = []
 
     class Role:
-        def begin_turn(self, *_args: Any, **kwargs: Any) -> str:
-            limits.append(kwargs["_model_call_limit"])
-            return "initial"
-
         def propose(self, *_args: Any, **kwargs: Any) -> str:
             limits.append(kwargs["_model_call_limit"])
             return "visual"
@@ -482,9 +409,8 @@ def test_budgeted_actor_uses_remaining_task_budget_before_and_after_desktop() ->
         live_agent._ModelCallCounter(12),
     )
 
-    assert actor.begin_turn("goal") == "initial"
     assert actor.propose("turn") == "visual"
-    assert limits == [12, 12]
+    assert limits == [12]
 
 
 class _StubActorBundle:
@@ -520,7 +446,7 @@ def _dependencies(
         return session
 
     def default_client_factory(**_kwargs: Any) -> Any:
-        return _RawClient(_observe_desktop_response())
+        return _RawClient(_direct_reply_response("done"))
 
     return live_agent._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
@@ -750,6 +676,18 @@ def test_server_owned_graph_builder_emits_the_exact_live_contract() -> None:
     }
 
 
+@pytest.fixture(autouse=True)
+def _neutral_desktop_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    target = deepcopy(_inputs()["execution_context"]["target_window"])
+    target["binding_mode"] = "desktop_shell"
+    target["foreground_verified"] = False
+    monkeypatch.setattr(
+        live_agent,
+        "capture_desktop_workspace_context",
+        lambda: deepcopy(target),
+    )
+
+
 def test_prepare_registers_only_exact_agent_goal_and_emits_no_live_trace() -> None:
     session = _FakeSession(
         [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
@@ -770,7 +708,6 @@ def test_prepare_registers_only_exact_agent_goal_and_emits_no_live_trace() -> No
 
     assert execution.handlers.keys() == {ArpNodeKind.AGENT_GOAL}
     assert execution.inputs == {}
-    lease = execution.runtime_state["_desktop_lease"]
     assert execution.runtime_state == {
         "runtime_version": "vnext",
         "runtime_budget": {
@@ -782,11 +719,7 @@ def test_prepare_registers_only_exact_agent_goal_and_emits_no_live_trace() -> No
         "experience_policy": "disabled",
         "thread_id": THREAD_ID,
         "turn_id": TURN_ID,
-        "desktop_lease": lease.snapshot(),
-        "_desktop_lease": lease,
     }
-    assert lease.snapshot()["status"] == "idle"
-    assert lease.snapshot()["run_id"] == ""
     assert not [event for event in events if event["type"].startswith("vnext_")]
 
 
@@ -802,223 +735,49 @@ def test_prepare_rejects_any_initial_desktop_binding() -> None:
             run_manager=ArpRunManager(),
             _dependencies=_dependencies(),
         )
-def test_direct_reply_is_terminal_without_desktop_session_or_evidence(
-    tmp_path: Path,
+def test_first_visual_frame_can_reply_with_thread_history(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    reply = "The answer is available without using the desktop."
-    clients: list[_RawClient] = []
-    session_builds: list[Any] = []
-
-    def client_factory(**_kwargs: Any) -> _RawClient:
-        client = _RawClient(_direct_reply_response(reply))
-        clients.append(client)
-        return client
-
-    def forbidden_session(build: Any) -> Any:
-        session_builds.append(build)
-        raise AssertionError("direct reply must not compose a desktop session")
-
-    def forbidden_target(_hwnd: int) -> Any:
-        raise AssertionError("direct reply must not inspect a desktop target")
-
-    dependencies = live_agent._CompositionDependencies(
-        wall_clock=lambda: NOW_MS / 1000.0,
-        monotonic=lambda: 10.0,
-        target_reader=forbidden_target,
-        hit_test_root=lambda _x, _y: pytest.fail(
-            "direct reply must not hit-test the desktop"
-        ),
-        client_factory=client_factory,
-        session_builder=forbidden_session,
-    )
+    reply = "The answer is available."
     history = (
         {"role": "user", "content": "Remember the token amber."},
         {"role": "assistant", "content": "I will remember amber."},
     )
-    manager = ArpRunManager()
-    execution = _prepare(
-        _graph(),
-        {},
-        _config(),
-        run_manager=manager,
+    client = _RawClient(_direct_reply_response(reply))
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[_jpeg(640, 480)],
+        client=client,
         history=history,
-        _dependencies=dependencies,
+        shell_factory=lambda: SimpleNamespace(
+            run=lambda **_kwargs: {"ok": True}
+        ),
     )
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        snapshot = _run_prepared(manager, execution)
-    finally:
-        BUS.remove_sink(events.append)
 
-    assert snapshot["status"] == ArpRunStatus.REPLY.value
-    assert snapshot["result"] == {
-        "runtime_version": "vnext",
-        "runtime_budget": {
-            "max_turns": 30,
-            "max_runtime_s": 300,
-            "max_model_calls": 60,
-        },
-        "no_legacy_fallback": True,
-        "status": "reply",
-        "turns_used": 1,
-        "model_calls": 1,
-    }
-    assert snapshot["evidence"] == []
-    assert execution.runtime_state["user_result"] == reply
-    assert execution.runtime_state["_desktop_lease"].snapshot()["status"] == "idle"
-    assert session_builds == []
-    assert len(clients) == 1
-    assert clients[0].closed is True
-    assert len(clients[0].requests) == 1
-    assert clients[0].requests[0]["messages"] == [
-        {"role": "system", "content": live_agent.INITIAL_ACTOR_SYSTEM_CONTRACT},
+    result = session.run_one_turn(
+        turn_index=0,
+        stop_event=threading.Event(),
+    )
+    completion = session.completion_snapshot()
+    session.close()
+
+    assert result.status is RuntimeStatus.MISSION_VERIFIED
+    assert completion["result"] == reply
+    assert session.model_calls == 1
+    assert raw_calls == []
+    assert len(client.requests) == 1
+    messages = client.requests[0]["messages"]
+    assert messages[1:4] == [
         *history,
         {"role": "user", "content": GOAL},
     ]
-    event_types = [event["type"] for event in events]
-    assert not any(
-        event_type.startswith("desktop_lease_")
-        for event_type in event_types
+    assert messages[4]["content"][0]["type"] == "image_url"
+    assert messages[4]["content"][0]["image_url"]["url"].startswith(
+        "data:image/jpeg;base64,"
     )
-    assert "live_agent_turn" not in event_types
-    assert "runtime_evidence_sealed" not in event_types
-    done = [event for event in events if event["type"] == "arp_run_done"]
-    assert len(done) == 1
-    assert done[0]["status"] == ArpRunStatus.REPLY.value
-    assert done[0]["user_result"] == reply
-    assert list(tmp_path.iterdir()) == []
-
-
-@pytest.mark.parametrize(
-    ("provider", "model_name", "payload", "expected_url"),
-    (
-        (
-            "responses",
-            "gpt-4o-mini",
-            {
-                "id": "resp-native",
-                "status": "completed",
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [
-                            {"type": "output_text", "text": "native reply"}
-                        ],
-                    }
-                ],
-                "usage": {"input_tokens": 10, "output_tokens": 2},
-            },
-            "https://api.openai.com/v1/responses",
-        ),
-        (
-            "anthropic",
-            "claude-sonnet-4-20250514",
-            {
-                "id": "msg-native",
-                "model": "claude-sonnet-4-20250514",
-                "stop_reason": "end_turn",
-                "content": [{"type": "text", "text": "native reply"}],
-                "usage": {"input_tokens": 10, "output_tokens": 2},
-            },
-            "https://api.anthropic.com/v1/messages",
-        ),
-        (
-            "gemini",
-            "gemini-2.5-pro",
-            {
-                "responseId": "gem-native",
-                "modelVersion": "gemini-2.5-pro",
-                "candidates": [
-                        {
-                            "finishReason": "STOP",
-                            "content": {
-                                "role": "model",
-                                "parts": [{"text": "native reply"}],
-                            },
-                        }
-                ],
-                "usageMetadata": {
-                    "promptTokenCount": 10,
-                    "candidatesTokenCount": 2,
-                    "totalTokenCount": 12,
-                },
-            },
-            (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                "gemini-2.5-pro:generateContent"
-            ),
-        ),
-    ),
-)
-def test_native_provider_protocols_cross_deadline_boundary_and_report_usage(
-    provider: str,
-    model_name: str,
-    payload: dict[str, Any],
-    expected_url: str,
-) -> None:
-    config = _config()
-    config["api"] = {
-        **config["api"],
-        "provider": provider,
-        "protocol": provider,
-        "base_url": "",
-        "model": model_name,
-    }
-    budget = live_agent._freeze_budget(config)
-    model = live_agent._freeze_model(config, budget)
-    transport = _NativeTransport(payload)
-    dependencies = live_agent._CompositionDependencies(
-        monotonic=lambda: 10.0,
-        client_factory=lambda **_kwargs: pytest.fail(
-            "native protocols must not construct the OpenAI SDK client"
-        ),
-        provider_transport_factory=lambda: transport,
-    )
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    bundle = None
-    try:
-        bundle = live_agent._build_actor_resources(
-            run_id=f"run-native-{provider}",
-            mission_id=f"mission-native-{provider}",
-            budget=budget,
-            model=model,
-            dependencies=dependencies,
-            deadline=lambda: 200.0,
-        )
-        admission = bundle.actor.begin_turn(
-            "Reply directly.",
-            stop_event=threading.Event(),
-        )
-    finally:
-        if bundle is not None:
-            bundle.close()
-        BUS.remove_sink(events.append)
-
-    assert admission.kind == "reply"
-    assert admission.reply == "native reply"
-    assert transport.closed is True
-    assert len(transport.calls) == 1
-    assert transport.calls[0]["url"] == expected_url
-    assert transport.calls[0]["timeout"] == 75.0
-    assert bundle is not None
-    assert bundle.usage_total["prompt_tokens"] == 10
-    assert bundle.usage_total["completion_tokens"] == 2
-    usage_events = [event for event in events if event["type"] == "agent_usage"]
-    assert len(usage_events) == 1
-    assert usage_events[0]["total"]["prompt_tokens"] == 10
-    assert usage_events[0]["model_role"] == "vnext_visual_actor"
-    reasoning_events = [
-        event
-        for event in events
-        if event["type"] == "vnext_model_reasoning"
-    ]
-    assert len(reasoning_events) == 1
-    assert reasoning_events[0]["response_index"] == 1
-    assert reasoning_events[0]["available"] is False
-    assert reasoning_events[0]["content"] == ""
+    assert {
+        tool["function"]["name"] for tool in client.requests[0]["tools"]
+    } >= {"reply_to_user", "run_shell"}
 
 
 def test_model_tool_shape_diagnostics_keep_types_but_not_argument_content() -> None:
@@ -1173,7 +932,8 @@ def test_vnext_usage_and_cache_tokens_reach_runtime_and_terminal_event(
         "provider": "openai",
         "model": "gpt-4o-mini",
     }
-    assert snapshot["status"] == ArpRunStatus.REPLY.value
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"]["status"] == RuntimeStatus.MISSION_VERIFIED.value
     assert snapshot["result"]["model_usage"] == expected
     assert execution.runtime_state["model_usage"] == expected
     usage = [event for event in events if event["type"] == "agent_usage"]
@@ -1184,7 +944,7 @@ def test_vnext_usage_and_cache_tokens_reach_runtime_and_terminal_event(
     assert done[0]["model_usage"] == expected
 
 
-def test_cancel_before_initial_actor_turn_closes_model_without_desktop_io(
+def test_cancel_before_first_visual_turn_closes_model_without_desktop_io(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1198,7 +958,7 @@ def test_cancel_before_initial_actor_turn_closes_model_without_desktop_io(
 
     def client_factory(**kwargs: Any) -> Any:
         client_calls.append(kwargs)
-        client = _RawClient(_observe_desktop_response())
+        client = _RawClient(_direct_reply_response("done"))
         clients.append(client)
         return client
 
@@ -1242,7 +1002,7 @@ def test_cancel_before_initial_actor_turn_closes_model_without_desktop_io(
     assert result.branch == "canceled"
     assert result.output is not None
     assert result.output["failure_stage"] == "canceled"
-    assert "canceled before the initial Actor turn" in result.error
+    assert "canceled before vNext session composition" in result.error
     assert raw_constructions == []
     assert len(client_calls) == len(clients) == 1
     assert clients[0].closed is True
@@ -1296,30 +1056,6 @@ def test_exact_graph_rejects_every_expansion(mutate: Any) -> None:
                 )
             ),
         )
-
-
-def test_desktop_context_telemetry_is_advisory() -> None:
-    inputs = _inputs()
-    inputs["runtime_version"] = "future"
-    inputs["execution_context"]["entrypoint"] = "another_surface"
-    inputs["execution_context"]["submitted_at"] = NOW_MS - 600_000
-    inputs["execution_context"]["desktop_handoff"]["yielded"] = False
-    inputs["execution_context"]["target_window"].update({
-        "captured_at": NOW_MS - 500_000,
-        "foreground_verified": False,
-        "usable": False,
-        "failure_type": "frontend_guess",
-        "reason": "advisory only",
-    })
-
-    target = live_agent._freeze_prebound_target(
-        _graph(),
-        inputs,
-        dependencies=_dependencies(),
-    )
-
-    assert target.hwnd == HWND
-    assert target.captured_at_ms == NOW_MS - 500_000
 
 
 def test_desktop_context_must_belong_to_requested_task() -> None:
@@ -1663,14 +1399,7 @@ def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
         {},
         _config(),
         run_manager=manager,
-        _dependencies=_dependencies(
-            session=session,
-            client_factory=lambda **_kwargs: _RawClient(
-                _observe_desktop_response(
-                    "好的，我先查看当前桌面，再继续完成任务。"
-                )
-            ),
-        ),
+        _dependencies=_dependencies(session=session),
     )
     BUS.add_sink(events.append)
     try:
@@ -1682,7 +1411,7 @@ def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
     assert snapshot["runtime_version"] == "vnext"
     assert snapshot["result"]["status"] == "mission_verified"
     assert snapshot["result"]["turns_used"] == 4
-    assert snapshot["result"]["model_calls"] == 5
+    assert snapshot["result"]["model_calls"] == 4
     assert snapshot["result"]["no_legacy_fallback"] is True
     assert not {
         "accepted_event_ids",
@@ -1693,7 +1422,7 @@ def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
         "verified_evidence_refs",
     }.intersection(snapshot["result"])
     assert session.calls == 4
-    assert session.model_calls == 5
+    assert session.model_calls == 4
     assert session.closed is True
     assert snapshot["evidence"] == []
     starts = [item for item in events if item["type"] == "live_agent_start"]
@@ -1706,18 +1435,8 @@ def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
         item for item in events if item["type"] == "live_agent_activity"
     ]
     assert len(starts) == len(done) == 1
-    assert [item["narration"] for item in messages] == [
-        "好的，我先查看当前桌面，再继续完成任务。"
-    ]
-    assert messages[0]["phase"] == "starting"
-    assert [item["kind"] for item in activities[:2]] == [
-        "message",
-        "tool_start",
-    ]
-    assert activities[0]["content"] == (
-        "好的，我先查看当前桌面，再继续完成任务。"
-    )
-    assert activities[1]["tool"] == "observe_desktop"
+    assert messages == []
+    assert activities == []
     assert len(turns) == 4
     assert turns[1]["status"] == "observation_requested"
     assert starts[0]["runtime_budget"] == {
@@ -1735,20 +1454,11 @@ def test_handler_runs_bounded_redecisions_to_completion_and_closes() -> None:
     }.intersection(done[0])
     assert all("accepted_event_ids" not in turn for turn in turns)
     event_types = [item["type"] for item in events]
-    assert event_types.index("vnext_model_call") < event_types.index(
-        "live_agent_activity"
-    )
-    assert event_types.index("live_agent_activity") < event_types.index(
-        "live_agent_message"
-    )
-    assert event_types.index("live_agent_message") < event_types.index(
-        "desktop_lease_requested"
-    )
-    assert event_types.index("desktop_lease_requested") < event_types.index(
-        "desktop_lease_bound"
-    )
-    assert event_types.index("desktop_lease_bound") < event_types.index(
+    assert event_types.index("live_agent_start") < event_types.index(
         "live_agent_turn"
+    )
+    assert event_types.index("live_agent_turn") < event_types.index(
+        "live_agent_done"
     )
 
 
@@ -2530,6 +2240,32 @@ class _RawClient:
             raise RuntimeError(self.close_error)
 
 
+def test_production_shell_factory_is_injected_into_the_visual_actor() -> None:
+    from winpilot.action import shell
+
+    budget = live_agent._freeze_budget(_config())
+    model = live_agent._freeze_model(_config(), budget)
+    raw_client = _RawClient()
+    dependencies = live_agent._CompositionDependencies(
+        monotonic=lambda: 10.0,
+        client_factory=lambda **_kwargs: raw_client,
+        shell_factory=live_agent._shell_runner_factory,
+    )
+
+    bundle = live_agent._build_actor_resources(
+        run_id="run-shell-capability",
+        mission_id="mission-shell-capability",
+        budget=budget,
+        model=model,
+        dependencies=dependencies,
+        deadline=lambda: 100.0,
+    )
+    try:
+        assert bundle.actor._role._shell_runner is shell
+    finally:
+        bundle.close()
+
+
 class _NativeTransport:
     def __init__(self, response: dict[str, Any]) -> None:
         self.response = response
@@ -2710,6 +2446,8 @@ def _real_session_with_captures(
     capture_regions: list[Region] | None = None,
     on_capture: Any = None,
     screen_first: bool = True,
+    history: tuple[dict[str, str], ...] = (),
+    shell_factory: Any = None,
 ) -> tuple[Any, list[str], list[dict[str, Any]]]:
     clock = clock or [10.0]
     capture_values = list(images)
@@ -2780,6 +2518,7 @@ def _real_session_with_captures(
             else hit_test_root
         ),
         client_factory=factory,
+        shell_factory=shell_factory,
     )
     graph = _graph()
     budget = live_agent._freeze_budget(_config())
@@ -2791,6 +2530,7 @@ def _real_session_with_captures(
         model=model,
         dependencies=deps,
         deadline=lambda: deadline,
+        history=history,
     )
     build = live_agent._SessionBuild(
         graph=graph,
@@ -3669,7 +3409,7 @@ def test_post_capture_failure_defers_to_fresh_observation_without_replay(
         "scroll",
         "type_text",
         "press_key",
-        "claim_obligation_done",
+        "reply_to_user",
         "blocked",
     } <= set(tools)
     for name in {
@@ -3726,80 +3466,6 @@ def test_each_model_call_is_clamped_to_one_second_remaining_deadline(
 
 
 
-
-
-
-
-
-
-def test_run_bound_lease_accepts_current_window_after_actor_request() -> None:
-    current_target = [_facts()]
-    session = _FakeSession(
-        [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
-    )
-    dependencies = _dependencies(
-        session=session,
-        reader=lambda _hwnd: current_target[0],
-    )
-    graph = _graph()
-    execution = _prepare(
-        graph,
-        {},
-        _config(),
-        run_manager=ArpRunManager(),
-        _dependencies=dependencies,
-    )
-    current_target[0] = _facts(process_id=PID + 1)
-    run_id = "arp-test-changed-target-after-start"
-    lease = execution.runtime_state["_desktop_lease"]
-    results: list[Any] = []
-    events: list[dict[str, Any]] = []
-
-    def invoke_handler() -> None:
-        results.append(
-            execution.handlers[ArpNodeKind.AGENT_GOAL](
-                next(node for node in graph.nodes if node.id == "full-goal"),
-                {"run_id": run_id, "runtime_state": {}},
-                threading.Event(),
-            )
-        )
-
-    BUS.add_sink(events.append)
-    worker = threading.Thread(target=invoke_handler, daemon=True)
-    try:
-        worker.start()
-        for _ in range(2_000):
-            lease_snapshot = lease.snapshot()
-            if lease_snapshot["status"] == "waiting":
-                break
-            threading.Event().wait(0.001)
-        else:
-            pytest.fail("Actor did not request the desktop lease")
-        target = lease.bind(
-            run_id=run_id,
-            lease_id=lease_snapshot["lease_id"],
-            inputs=_inputs(),
-        )
-        worker.join(timeout=2.0)
-    finally:
-        BUS.remove_sink(events.append)
-
-    assert not worker.is_alive()
-    assert len(results) == 1
-    result = results[0]
-    assert target.process_id == PID + 1
-    assert result.ok is True
-    assert result.branch == "next"
-    assert session.closed is True
-    event_types = [event["type"] for event in events]
-    assert [
-        event_type
-        for event_type in event_types
-        if event_type.startswith("desktop_lease_")
-    ] == [
-        "desktop_lease_requested",
-        "desktop_lease_bound",
-    ]
 
 
 
@@ -3930,165 +3596,42 @@ def test_flow_fragment_resources_keep_local_budget_without_run_telemetry() -> No
     } & {"vnext_model_call", "agent_usage"}
 
 
-def test_status_query_reply_uses_real_runtime_facts_without_desktop_lease(
-    tmp_path: Path,
-) -> None:
-    status_reply = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "memory is disabled",
-                    "tool_calls": [],
-                }
-            }
-        ]
-    }
-    clients: list[_RawClient] = []
-
-    def client_factory(**_kwargs: Any) -> _RawClient:
-        client = _RawClient(
-            [
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": None,
-                                "tool_calls": [
-                                    {
-                                        "id": "status-1",
-                                        "type": "function",
-                                        "function": {
-                                            "name": "get_memory_status",
-                                            "arguments": "{}",
-                                        },
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                },
-                status_reply,
-            ]
-        )
-        clients.append(client)
-        return client
-
-    def forbidden_session(build: Any) -> Any:
-        raise AssertionError("status query must not compose a desktop session")
-
-    dependencies = live_agent._CompositionDependencies(
-        wall_clock=lambda: NOW_MS / 1000.0,
-        monotonic=lambda: 10.0,
-        target_reader=lambda _hwnd: pytest.fail(
-            "status query must not inspect a desktop target"
-        ),
-        hit_test_root=lambda _x, _y: pytest.fail(
-            "status query must not hit-test the desktop"
-        ),
-        client_factory=client_factory,
-        session_builder=forbidden_session,
-        config_snapshot=lambda: {
-            **_config(),
-            "agent": {"experience_memory": True},
-        },
-    )
-    manager = ArpRunManager()
-    execution = _prepare(
-        _graph(),
-        {},
-        _config(),
-        run_manager=manager,
-        _dependencies=dependencies,
-    )
-    snapshot = _run_prepared(manager, execution)
-
-    assert snapshot["status"] == ArpRunStatus.REPLY.value
-    assert execution.runtime_state["user_result"] == "memory is disabled"
-    assert (
-        execution.runtime_state["_desktop_lease"].snapshot()["status"]
-        == "idle"
-    )
-    assert len(clients) == 1
-    assert len(clients[0].requests) == 2
-    status_tool = json.loads(clients[0].requests[1]["messages"][3]["content"])
-    assert status_tool["format"] == "memory-status/1"
-    assert status_tool["long_term_experience_memory"] == "disabled"
-    assert status_tool["enabled"] is False
-    assert status_tool["experience_policy"] == "disabled"
-    assert status_tool["config_agent_experience_memory"] is True
-
-
 def test_failure_stage_classification_is_explicit() -> None:
     from winpilot.orchestrator.live_agent import (
         classify_live_agent_failure_stage,
     )
-    from winpilot.vnext.runtime import RuntimeStatus
 
     cases = (
-        (RuntimeStatus.INVALID_PROPOSAL, "bad", {}, "tool_format"),
-        (RuntimeStatus.ACTOR_ERROR, "provider timeout", {}, "model_routing"),
-        # blocked is the Actor's own semantic stop verdict, not a system
-        # physical-input failure.
-        (RuntimeStatus.BLOCKED, "outcome unknown", {}, "model_routing"),
-        # unrecognized state_rejected is a system precondition failure, not an
-        # automatic model verdict.
+        (RuntimeStatus.INVALID_PROPOSAL, "bad", "tool_format"),
+        (RuntimeStatus.ACTOR_ERROR, "provider timeout", "model_routing"),
+        (RuntimeStatus.BLOCKED, "outcome unknown", "model_routing"),
         (
             RuntimeStatus.STATE_REJECTED,
             "controller rejected unknown precondition",
-            {},
             "physical_input",
         ),
         (
             RuntimeStatus.STATE_REJECTED,
-            "desktop lease timed out",
-            {},
-            "desktop_handoff",
-        ),
-        (
-            RuntimeStatus.STATE_REJECTED,
-            "current Electron target mismatch: process_id",
-            {},
+            "current target binding mismatch: process_id",
             "target_binding",
         ),
         (
             RuntimeStatus.STATE_REJECTED,
             "fresh target-window JPEG capture failed closed",
-            {},
             "screenshot",
         ),
         (
             RuntimeStatus.STATE_REJECTED,
             "vNext verified completion result failed closed",
-            {},
             "result_verification",
         ),
         (
             RuntimeStatus.STATE_REJECTED,
             "vNext model-call budget exhausted",
-            {},
             "model_routing",
         ),
-        (
-            RuntimeStatus.CANCELED,
-            "run canceled",
-            {},
-            "canceled",
-        ),
-        (
-            RuntimeStatus.MISSION_VERIFIED,
-            "",
-            {},
-            "",
-        ),
+        (RuntimeStatus.CANCELED, "run canceled", "canceled"),
+        (RuntimeStatus.MISSION_VERIFIED, "", ""),
     )
-    for status, detail, lease, expected in cases:
-        assert (
-            classify_live_agent_failure_stage(
-                status,
-                detail,
-                lease_state=lease,
-            )
-            == expected
-        ), (status, detail)
+    for status, detail, expected in cases:
+        assert classify_live_agent_failure_stage(status, detail) == expected

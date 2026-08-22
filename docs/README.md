@@ -26,7 +26,7 @@
 | [memory-graph.md](memory-graph.md) | Memory Graph、Skill、session context 和反馈 |
 | [replay-recording.md](replay-recording.md) | Trace、Artifact、Automation IR、Replay 与 WPS 兼容 |
 | [flow-editor.md](flow-editor.md) | Legacy FlowScript/DSL 编辑兼容面，不是 GUI Agent 主线 |
-| [chatgpt-desktop.md](chatgpt-desktop.md) | ChatGPT/Codex 本地 MCP 桥接和安全边界 |
+| [chatgpt-desktop.md](chatgpt-desktop.md) | 已移除的 ChatGPT/Codex 本地 MCP 桥接边界 |
 | [项目导览-面试版.md](项目导览-面试版.md) | 面向讲解的简化导览；事实冲突时以前三份核心文档为准 |
 
 ## 项目规范

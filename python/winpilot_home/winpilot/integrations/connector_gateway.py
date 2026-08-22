@@ -49,14 +49,6 @@ def _name(value: Any, field: str) -> str:
     return value
 
 
-def _read_only(annotations: Mapping[str, Any]) -> bool:
-    read = annotations.get("readOnlyHint", annotations.get("read_only_hint"))
-    destructive = annotations.get(
-        "destructiveHint", annotations.get("destructive_hint")
-    )
-    return read is True and destructive is not True
-
-
 def _descriptor(raw: Mapping[str, Any]) -> dict[str, Any]:
     connector, tool = _name(raw.get("server"), "connector"), _name(raw.get("name"), "tool")
     description = str(raw.get("description") or "")
@@ -77,7 +69,6 @@ def _descriptor(raw: Mapping[str, Any]) -> dict[str, Any]:
     ref = base64.urlsafe_b64encode(ref_wire).decode("ascii").rstrip("=")
     return {
         **identity, "fingerprint": fingerprint, "ref": TOOL_REF_PREFIX + ref,
-        "side_effect": "read_only" if _read_only(annotations) else "unknown_or_external",
     }
 
 
@@ -257,17 +248,6 @@ class ConnectorGateway:
                 arguments_hash=arguments_hash, status="blocked",
             )
 
-        read_only = _read_only(current["annotations"])
-        if not read_only:
-            return _response(
-                {
-                    "ok": False,
-                    "blocked": True,
-                    "error": "only explicitly read-only connector tools are available",
-                },
-                connector=connector, tool=tool, fingerprint=fingerprint,
-                arguments_hash=arguments_hash, status="blocked",
-            )
         try:
             remaining = float(timeout_s) - (time.monotonic() - started)
             if remaining <= 0 or (
@@ -279,8 +259,6 @@ class ConnectorGateway:
                 connector,
                 tool,
                 arguments,
-                allow_destructive=False,
-                require_read_only=True,
                 timeout_s=remaining,
                 stop_event=stop_event,
             )

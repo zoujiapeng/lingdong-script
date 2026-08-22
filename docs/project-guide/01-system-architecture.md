@@ -7,9 +7,9 @@
 当前产品主链可以复杂，但复杂度只能用于保证机械事实正确，不能产生第二份语义意图。源码强制或文档约束的核心不变量如下：
 
 1. 一个原始 goal：产品入口只接收 `goal` 和可选 `thread_id`；客户端不能替用户提交图、runtime、stage 或执行媒介。
-2. 一个语义 Actor：同一个 `LiveVisualActor` 决定直接回复、只读 connector 或桌面观察；进入桌面后仍是它选择下一笔动作。
+2. 一个语义 Actor：同一个 `LiveVisualActor` 决定直接回复或选择 connector、shell、GUI；局部结果与新桌面帧都回到它继续判断。
 3. 一条视觉执行线：默认把当前完整真实屏幕交给模型；一笔动作后重新观察，窗口裁剪只作显式 opt-in。
-4. 小而通用的工具面：当前 Runtime 只有 `click`、`double_click`、`move_mouse`、`drag`、`scroll`、`type_text`、`hotkey`、`input_sequence`、`launch_application`、`observe`、`claim_obligation_done`、`blocked`。
+4. 小而通用的工具面：模型侧只有通用 reply、connector、shell 与 GUI/control；Runtime 只承接对应的 typed outcome、观察和物理动作。
 5. 物理层无应用语义：Actor 直接持有固定通用工具面；Adapter 只做一次坐标映射，队列和 RawDevice 只负责单写入与释放清理，不知道“保存”“答题”“播放”等任务。
 6. 完成由模型自验：生产 Runtime 接受同一个 Actor 基于当前真实屏幕作出的 claim。trace、运行详情和 memory 只诊断首分歧，不是 task-pass 门，也不作第二次语义裁决。
 7. 无静默 Legacy fallback：`vnext.live_agent_enabled` 未开启或主链不可用时失败；不会退回 `/api/chat`、AgentRunner、FlowScript 或旧 planner。
@@ -124,15 +124,12 @@ flowchart TD
   Graph --> Thread["AgentThreadStore.begin_turn"]
   Thread --> Prepare["prepare_live_vnext_execution"]
   Prepare --> Handler["_PreparedHandler\ncall-once"]
-  Handler --> Bundle["PreparedLiveActor\nmodel client + counter + gateway"]
-  Bundle --> Initial["LiveVisualActor.begin_turn"]
-  Initial -->|reply| Reply["user_result + reply terminal"]
-  Initial -->|observe_desktop| Lease["DesktopLeaseSlot"]
-  Lease --> Session["_build_live_session"]
-  Session --> Mission["MissionDefinition + one obligation"]
-  Session --> Frame["FrameAuthority + _LiveRuntimeState"]
-  Session --> Adapter["AtomicDesktopAdapter"]
-  Session --> Runtime["MissionRuntime"]
+  Handler --> Target["capture_desktop_workspace_context\n中性桌面锚点"]
+  Target --> Session["_build_live_session"]
+  Session --> State["MissionState + FrameAuthority + AtomicDesktopAdapter"]
+  State --> Runtime["MissionRuntime"]
+  Runtime --> Actor["LiveVisualActor.propose\n原始 goal + history + 当前全桌面 JPEG"]
+  Actor -->|reply / connector / shell / GUI| Runtime
 ```
 
 `build_exact_live_vnext_graph` 并不是自然语言 planner。它生成严格的三节点、两边壳：`start → full-goal → end`；其中只有 `full-goal` 是规范 `AGENT_GOAL` 语义节点。它冻结“单目标、单 owner、无 fallback”入口合同，客户端无法把另一个图伪装成产品 goal。
@@ -141,15 +138,15 @@ flowchart TD
 
 | 事实或动作 | 唯一权威 owner | 其他层可以做什么 | 其他层不得做什么 |
 | --- | --- | --- | --- |
-| 原始用户目标 | admission 后由 `AGENT_GOAL` 与 `AgentThreadStore` 持有；桌面 lease 成功并组合 session 后再进入 `MissionDefinition` | Actor 始终读取原文；直接 reply 分支无需构造 Mission | 改写成关键词剧本或应用步骤 |
+| 原始用户目标 | admission 后由 `AGENT_GOAL`、`AgentThreadStore` 与 `MissionState` 持有 | Actor 每次调用始终读取原文 | 改写成关键词剧本或应用步骤 |
 | 对话历史 | `AgentThreadStore` | Actor获得有界成功文本历史 | 把失败 Turn、执行内部状态当用户历史 |
-| 初始 reply/connector/desktop 选择 | `LiveVisualActor.begin_turn` | Gateway执行已选只读工具 | 前端 task classifier 预选执行媒介 |
-| 当前桌面目标 | `DesktopLeaseSlot` + 冻结 `TargetBinding` | Electron提供让出后的目标事实 | 模型或旧 router 偷换 HWND/PID |
+| reply/connector/shell/GUI 选择 | `LiveVisualActor.propose` | 普通工具 owner 执行模型所选调用 | 前端 task classifier 预选执行媒介 |
+| 当前桌面锚点 | 服务端捕获的 desktop workspace + `TargetBinding` | workspace跟踪通用窗口生命周期 | 把锚点当成点击所有权窗口 |
 | 当前权威帧 | `FrameAuthority` | `_LiveRuntimeState` 投影为 RuntimeFrame | 从旧截图继续执行空间动作 |
 | 当前可用工具 | `LiveVisualActor` 的固定通用 schema | Runtime只校验本次调用参数与当前机械状态 | 根据任务关键词加/删工具 |
 | 一笔语义动作 | `LiveVisualActor.propose` + `MissionRuntime` | Actor 解码 provider call；Runtime入口只做一次 typed parse；Envelope只绑定当前身份 | Controller修改目标点、重复跑 schema 或替模型重试 |
 | 物理参数与输入 | `AtomicDesktopAdapter` + `RawDeviceExecutor` | trace旁路记录参数和 receipt | snap、offset、目标吸附、应用宏、前台/hit-test veto |
-| Mission 状态 | `MissionReducer` | Runtime提交事件 | UI根据文字猜状态 |
+| Mission 状态 | `MissionState` | Runtime顺序记录最后机械结果与终态 | UI根据文字猜状态 |
 | 用户任务完成 | 当前屏幕上的 `LiveVisualActor` 自验与 claim | trace/memory解释首分歧；E2E报告观察真实终态 | 独立 verifier、trace或memory反判模型 |
 
 ## 5. 数据权威关系
@@ -163,13 +160,13 @@ flowchart LR
   Capture --> State["FrameState\nframe_id/hash/time/region"]
   State --> Authority["FrameAuthority.current"]
   Authority --> RuntimeFrame["RuntimeFrame + EvidenceRef"]
-  RuntimeFrame --> ActorInput["ActorTurnInput + JPEG"]
+  RuntimeFrame --> ActorInput["ActorTurnInput + JPEG + Thread history"]
   ActorInput --> Envelope["ActorDecisionEnvelope\nframe identity + submitted size"]
   Envelope --> Adapter["AtomicDesktopAdapter"]
   Adapter --> Physical["physical_attempt"]
   Physical --> Receipt["RawActionReceipt"]
-  Receipt --> Post["post-action frame/effect"]
-  Post --> Reducer["Mission event"]
+  Receipt --> Post["post-action frame"]
+  Post --> Mission["MissionState.last_transition"]
 ```
 
 关键约束：
@@ -184,72 +181,44 @@ flowchart LR
 
 ## 6. Mission 的最小语义结构
 
-当前 live composition 在桌面 lease 成功后构造 Mission，并强制一项 obligation。下面列出本路径显式值及 `ObligationSpec` 实际生效的默认值：
+当前 live composition 只构造一个可变的 `MissionState`：
 
 ```text
-mission.original_goal = 用户原始 goal
-mission.source = "vnext-live-agent"
-mission.experience_policy = "disabled"
-obligations = [
-  {
-    id: "full-goal",
-    desired_state: original_goal,
-    acceptance_criteria: [original_goal],
-    depends_on: [],
-    forbidden_effects: [],
-    required: true,
-    required_capabilities: ["visual.interact"],
-    input_artifact_refs: [],
-    output_binding_names: [],
-    evidence_policy: {
-      required_evidence_kinds: [],
-      preferred_evidence_kinds: [],
-      allow_independent_visual_verifier: false,
-      max_verification_attempts: 1,
-      uncertain_policy: "blocked"
-    },
-    source_span: null
-  }
-]
+mission_id / run_id
+original_goal
+target_binding
+revision / status
+last_transition
+failure_summary / last_error
 ```
 
-`MissionRuntime._validate_minimal_scope` 还要求：
-
-- 只有一个 obligation；
-- planner、obligation verifier、mission verifier、visual inspector、deep reasoning 均关闭；
-- 工具名属于批准的固定 Visual Actor 面；
-- GUI mutation、无输入 observation 与 outcome/control 工具类型严格对应；
-- observation workspace 必须预先建立 binding；full-desktop 输入不因此限制在该窗口；
-- Runtime、Reducer、Actor、FrameAuthority 与 Adapter 的共享 owner 只在 session 构造时核对一次。
-
-这些 session 级核对不在每个 Actor proposal 上重放；每轮 binder 只附加当前 mission/frame/pointer 身份。
+`MissionRuntime` 的 turn lock 是它的唯一写 owner。给模型的 `MissionCard` 只投影原始目标、
+当前 target、最后一次机械结果和失败事实；没有 `MissionDefinition`、obligation DAG、事件
+reducer/replay 或 evidence registry。每轮 binder 只附加当前 mission/frame/pointer 身份，
+不重放一套语义验证。
 
 ## 7. 模型层
 
-### 7.1 初始文本轮
+### 7.1 统一视觉轮
 
-`LiveVisualActor.begin_turn` 接收原始 goal 和最多 12 条、有总字符上限的成功 Thread 文本。模型可以：
+`LiveVisualActor.propose` 的第一次调用就接收原始 goal、最多 12 条且有总字符上限的成功
+Thread 文本，以及当前完整真实桌面 JPEG。回复、显式 connector、shell 与 GUI 工具同时
+可选；局部工具结果回到同一个 Actor，GUI 或终态工具结束本轮。
 
-- 直接返回文本 reply；
-- 调用 `observe_desktop`；
-- 若显式 Gateway 可用，调用 `search_connector_tools` 或 `call_connector_tool`，得到结果后仍由同一 Actor 继续。
-
-初始轮没有权威 JPEG，所以不能直接产生桌面坐标动作。只有 `observe_desktop` 才会申请租约并让出前台。
-
-### 7.2 视觉轮
+### 7.2 后续回合与上下文
 
 每个视觉轮的 system contract 很短：使用原始 goal、当前权威 JPEG、task state、上一动作和供应工具；局部只读/开发工具链之后最终产生一个 GUI、observation 或 outcome proposal，坐标使用 submitted-image pixels；可见完成时 claim，pointer held 时继续或结束 drag。
 
-局部 shell/status/connector 依赖链可以由同一 Actor 连续完成，不再每帧强迫它切到 GUI。
+局部 shell/connector 依赖链可以由同一 Actor 连续完成，不再每帧强迫它切到 GUI。
 当结果开始重复或模型需要重新看真实环境时，它可调用模型侧 `refresh_desktop`（Runtime
 中的 `observe`）：该选择不产生物理输入或验证事件，只让外层在下一轮提供新的全桌面帧。
 
 Actor 只保留：
 
-- 初始 `observe_desktop` 的 provider 原生交换，供第一张图衔接；
+- 服务端注入的有界成功 Thread 文本；
 - 最近一笔确实完成输入、且动作名匹配的视觉工具交换；
 - 有界非权威 `task_state`；
-- Runtime提供的安全 completed action summaries。
+- Runtime提供的单条 `previous_action`。
 
 它不会无限堆完整截图历史，也不会增加总结模型或 verifier 角色。
 
@@ -281,8 +250,7 @@ ConnectorGateway 不是新 Agent。它只给同一个 Actor两项通用工具：
 调用:
   用 ref 找到 descriptor
   在真正 call_tool 前重新读取并比较完整 descriptor
-  只允许 readOnlyHint=true
-  destructive 或未知 annotation -> fail closed
+  不按 readOnly/destructive annotation 拒绝模型选择
   参数、结果、deadline、cancel 均有界
   结果作为普通 tool result 回到同一个 Actor
 ```

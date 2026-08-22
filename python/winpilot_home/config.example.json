@@ -39,8 +39,7 @@
   },
   "agent": {
     "dry_run": false,
-    "experience_memory": true,
-    "shell_enabled": true
+    "experience_memory": true
   },
   "controller": {
     "native_visual_thinking": true,
