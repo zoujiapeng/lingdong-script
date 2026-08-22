@@ -1,4 +1,4 @@
-"""One-turn, event-sourced minimal Mission Runtime.
+"""One-turn minimal Mission Runtime.
 
 The Runtime coordinates injected owners.  It does not call a model SDK,
 capture Windows pixels, perform desktop input, discover targets, or own a
@@ -22,7 +22,7 @@ from ..actor import (
 )
 from ..mission import (
     MissionError,
-    MissionReducer,
+    MissionState,
     MissionStatus,
 )
 from .contracts import (
@@ -63,15 +63,15 @@ class MissionRuntime:
     def __init__(
         self,
         *,
-        reducer: MissionReducer,
+        mission: MissionState,
         tools: tuple[ActorToolView, ...],
         actor: ActorPort,
         state: RuntimeStatePort,
         controller: ControllerPort,
         budget_facts_provider: Callable[[int], Mapping[str, Any]] | None = None,
     ) -> None:
-        if type(reducer) is not MissionReducer:
-            raise TypeError("reducer must be MissionReducer")
+        if type(mission) is not MissionState:
+            raise TypeError("mission must be MissionState")
         for value, method, name in (
             (actor, "propose", "actor"),
             (state, "observe", "state"),
@@ -80,10 +80,10 @@ class MissionRuntime:
             if not callable(getattr(value, method, None)):
                 raise TypeError(f"{name} must provide {method}()")
         self._validate_minimal_scope(
-            reducer=reducer,
+            mission=mission,
             tools=tools,
         )
-        self._reducer = reducer
+        self._mission = mission
         self._tools = tuple(tools)
         self._tool_names = frozenset(tool.name for tool in self._tools)
         self._actor = actor
@@ -103,29 +103,9 @@ class MissionRuntime:
     @staticmethod
     def _validate_minimal_scope(
         *,
-        reducer: MissionReducer,
+        mission: MissionState,
         tools: tuple[ActorToolView, ...],
     ) -> None:
-        definition = reducer.definition
-        if len(definition.obligations) != 1:
-            raise MissionRuntimeConfigurationError(
-                "minimal Runtime requires one full-goal obligation"
-            )
-        obligation = definition.obligations[0]
-        if (
-            not obligation.required
-            or obligation.desired_state != definition.original_goal
-            or obligation.depends_on
-            or obligation.input_artifact_refs
-            or obligation.output_binding_names
-        ):
-            raise MissionRuntimeConfigurationError(
-                "obligation is not the single visual full-goal contract"
-            )
-        if obligation.evidence_policy.allow_independent_visual_verifier:
-            raise MissionRuntimeConfigurationError(
-                "live Actor claim must not enable a second visual verifier"
-            )
         if not isinstance(tools, tuple) or any(
             type(tool) is not ActorToolView for tool in tools
         ):
@@ -147,7 +127,7 @@ class MissionRuntime:
                 raise MissionRuntimeConfigurationError(
                     f"invalid local-intent contract for {tool.name!r}"
                 )
-        binding = reducer.projection.target_binding
+        binding = mission.target_binding
         if binding is None:
             raise MissionRuntimeConfigurationError(
                 "minimal Runtime requires a pre-bound target"
@@ -155,8 +135,8 @@ class MissionRuntime:
         RuntimeTargetIdentity.from_binding(binding)
 
     @property
-    def reducer(self) -> MissionReducer:
-        return self._reducer
+    def mission(self) -> MissionState:
+        return self._mission
 
     @property
     def verified_completion_result(self) -> str | None:
@@ -195,42 +175,24 @@ class MissionRuntime:
             detail=detail,
         )
 
-    def _accept(
-        self,
-        kind: str,
-        *,
-        payload: Mapping[str, Any],
-        base_revision: int,
-    ) -> None:
-        event = self._reducer.event(
-            kind,
-            payload=dict(payload),
-            base_revision=base_revision,
-        )
-        self._reducer.apply(event)
-
     def _cancel(
         self,
         *,
         detail: str = "run cancellation was requested",
     ) -> MissionRuntimeResult:
-        projection = self._reducer.projection
-        if projection.status is MissionStatus.CANCELED:
+        mission = self._mission
+        if mission.status is MissionStatus.CANCELED:
             return self._result(
                 RuntimeStatus.CANCELED,
                 detail=detail,
             )
-        if projection.status is MissionStatus.VERIFIED:
+        if mission.status is MissionStatus.VERIFIED:
             return self._result(
                 RuntimeStatus.STATE_REJECTED,
-                detail=f"cannot cancel terminal mission: {projection.status.value}",
+                detail=f"cannot cancel terminal mission: {mission.status.value}",
             )
         try:
-            self._accept(
-                "mission_canceled",
-                payload={"reason": detail},
-                base_revision=projection.revision,
-            )
+            mission.cancel(detail)
         except MissionError as exc:
             return self._result(
                 RuntimeStatus.STATE_REJECTED,
@@ -244,33 +206,21 @@ class MissionRuntime:
     def _block_unknown(
         self,
         *,
-        obligation_id: str,
         proposal_kind: str,
         decision_id: str,
         detail: str,
     ) -> MissionRuntimeResult:
         block_error: MissionError | None = None
-        for _ in range(3):
-            projection = self._reducer.projection
-            if projection.active_obligation_id != obligation_id:
-                break
-            try:
-                self._accept(
-                    "obligation_blocked",
-                    payload={
-                        "obligation_id": obligation_id,
-                        "blocker_kind": "controller_outcome_unknown",
-                        "reason": (
-                            "desktop mutation outcome is unknown; "
-                            "the action was not replayed"
-                        ),
-                    },
-                    base_revision=projection.revision,
-                )
-                block_error = None
-                break
-            except MissionError as exc:
-                block_error = exc
+        try:
+            self._mission.block(
+                kind="controller_outcome_unknown",
+                message=(
+                    "desktop mutation outcome is unknown; "
+                    "the action was not replayed"
+                ),
+            )
+        except MissionError as exc:
+            block_error = exc
         if block_error is not None:
             detail = (
                 f"{detail}; mutation authority is closed; "
@@ -321,17 +271,12 @@ class MissionRuntime:
         # nor a cancel that arrived while the model was deciding may turn an
         # already-made claim into a failure. Cache the claim and narration
         # before any auxiliary bookkeeping so later failures cannot lose them.
-        obligation_id = envelope.obligation_id
         proposal_kind = "claim_obligation_done"
         self._verified_completion_result = proposal.concise_claim
         self._latest_narration = proposal.concise_claim
         diagnostics: list[str] = []
         try:
-            self._accept(
-                "actor_completed",
-                payload={"obligation_id": obligation_id},
-                base_revision=envelope.mission_revision,
-            )
+            self._mission.complete()
         except Exception as exc:
             diagnostics.append(f"completion history unavailable: {exc}")
         return self._result(
@@ -348,7 +293,7 @@ class MissionRuntime:
         *,
         error_kind: str | None,
     ) -> None:
-        """Record a proven-not-executed rejection into the mission event stream.
+        """Record a proven-not-executed rejection for the next Actor turn.
 
         The rejected action is fed back to the same Actor on the next turn as
         ``previous_action`` with its mechanical ``error_kind``, so the model
@@ -356,21 +301,13 @@ class MissionRuntime:
         started.  No physical replay is ever performed; the transition records
         ``input_completed=False`` only.
         """
-        try:
-            self._accept(
-                "transition_recorded",
-                payload={
-                    "obligation_id": envelope.obligation_id,
-                    "action_id": envelope.decision_id,
-                    "action": proposal_tool_name(envelope.proposal),
-                    "input_completed": False,
-                    "visible_effect": transition.visible_effect or "",
-                    "error_kind": error_kind or "",
-                },
-                base_revision=envelope.mission_revision,
-            )
-        except MissionError:
-            raise
+        self._mission.record_transition(
+            action=proposal_tool_name(envelope.proposal),
+            input_completed=False,
+            visible_effect=transition.visible_effect or "",
+            action_id=envelope.decision_id,
+            error_kind=error_kind or "",
+        )
 
     def _run_action(
         self,
@@ -380,7 +317,6 @@ class MissionRuntime:
         stop_event: threading.Event | None,
     ) -> MissionRuntimeResult:
         proposal_kind = proposal.kind
-        obligation_id = envelope.obligation_id
         if self._stopped(stop_event):
             return self._cancel(detail="run was canceled before input executed")
         try:
@@ -439,7 +375,6 @@ class MissionRuntime:
         if transition.outcome is ControllerOutcome.UNKNOWN:
             if transition.error_kind == "release_cleanup_incomplete":
                 return self._block_unknown(
-                    obligation_id=obligation_id,
                     proposal_kind=proposal_kind,
                     decision_id=envelope.decision_id,
                     detail=(
@@ -461,16 +396,10 @@ class MissionRuntime:
                 )
             diagnostics: list[str] = []
             try:
-                self._accept(
-                    "transition_recorded",
-                    payload={
-                        "obligation_id": obligation_id,
-                        "action_id": envelope.decision_id,
-                        "action": proposal.action,
-                        "action_summary": proposal.action,
-                        "input_completed": True,
-                    },
-                    base_revision=envelope.mission_revision,
+                self._mission.record_transition(
+                    action=proposal.action,
+                    action_id=envelope.decision_id,
+                    input_completed=True,
                 )
             except Exception as exc:
                 # The controller already knows SendInput completed.  A local
@@ -531,18 +460,12 @@ class MissionRuntime:
             )
         diagnostics: list[str] = []
         try:
-            self._accept(
-                "transition_recorded",
-                payload={
-                    "obligation_id": obligation_id,
-                    "action_id": envelope.decision_id,
-                    "action": proposal.action,
-                    "action_summary": proposal.action,
-                    "input_completed": True,
-                    "visible_effect": transition.visible_effect,
-                    "frame_id": transition.post_frame_id,
-                },
-                base_revision=envelope.mission_revision,
+            self._mission.record_transition(
+                action=proposal.action,
+                action_id=envelope.decision_id,
+                input_completed=True,
+                visible_effect=transition.visible_effect,
+                frame_id=transition.post_frame_id,
             )
         except Exception as exc:
             # Bookkeeping is advisory once the OS accepted the input.  The next
@@ -594,21 +517,21 @@ class MissionRuntime:
         stop_event: threading.Event | None,
         rejection_feedback: str | None = None,
     ) -> MissionRuntimeResult:
-        projection = self._reducer.projection
-        if projection.status is MissionStatus.VERIFIED:
+        mission = self._mission
+        if mission.status is MissionStatus.VERIFIED:
             return self._result(
                 RuntimeStatus.MISSION_VERIFIED,
                 detail="mission was already verified",
             )
-        if projection.status is MissionStatus.CANCELED:
+        if mission.status is MissionStatus.CANCELED:
             return self._result(
                 RuntimeStatus.CANCELED,
                 detail="mission was already canceled",
             )
-        if projection.status is MissionStatus.BLOCKED:
+        if mission.status is MissionStatus.BLOCKED:
             return self._result(
                 RuntimeStatus.BLOCKED,
-                detail=f"mission is not actionable: {projection.status.value}",
+                detail=f"mission is not actionable: {mission.status.value}",
             )
         if self._stopped(stop_event):
             return self._cancel()
@@ -647,7 +570,7 @@ class MissionRuntime:
         try:
             budget = self._project_budget(turn_index)
             turn = project_actor_turn_input(
-                self._reducer.card,
+                self._mission.card,
                 initial,
                 self._tools,
                 task_state=self._task_state,
@@ -725,7 +648,7 @@ class MissionRuntime:
                         detail="desktop action is not approved",
                     )
             envelope = bind_actor_decision(
-                mission_reducer=self._reducer,
+                mission=self._mission,
                 proposal=proposal,
                 turn_index=turn_index,
                 frame_id=initial.frame.frame_id,
@@ -783,14 +706,9 @@ class MissionRuntime:
         if type(proposal) is BlockedReport:
             reason = "; ".join(proposal.observed_facts)
             try:
-                self._accept(
-                    "obligation_blocked",
-                    payload={
-                        "obligation_id": envelope.obligation_id,
-                        "blocker_kind": proposal.blocker_kind,
-                        "reason": reason or proposal.blocker_kind,
-                    },
-                    base_revision=envelope.mission_revision,
+                self._mission.block(
+                    kind=proposal.blocker_kind,
+                    message=reason or proposal.blocker_kind,
                 )
             except MissionError as exc:
                 return self._result(

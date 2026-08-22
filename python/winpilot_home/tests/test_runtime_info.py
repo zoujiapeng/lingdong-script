@@ -31,7 +31,7 @@ def test_runtime_fingerprint_exposes_non_secret_service_identity(runtime_info_mo
     assert info["source"]["current_stamp"]
     assert isinstance(info["source"]["drifted"], bool)
     assert "capabilities" in info
-    assert info["capabilities"]["runtime_profile"] is True
+    assert "runtime_profile" not in info["capabilities"]
     assert info["capabilities"]["automation_ir"] is True
     assert info["capabilities"]["replay_jobs"] is True
     assert info["capabilities"]["scheduler"] is False

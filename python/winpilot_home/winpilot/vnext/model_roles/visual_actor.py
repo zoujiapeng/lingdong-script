@@ -2428,7 +2428,11 @@ class LiveVisualActor:
             raise LiveModelRoleError("max_attempts must be in [1, 5]")
         self._max_attempts = max_attempts
         self._previous_visual_exchange: _VisualExchange | None = None
-        self._completed_visual_history: list[dict[str, Any]] = []
+        # A new frame is the visual truth.  Keep only the immediately
+        # preceding completed tool exchange so the model gets the result of
+        # its last action without accumulating a second, stale transcript of
+        # the task.
+        self._completed_visual_exchange: tuple[dict[str, Any], ...] = ()
         self._initial_exchange: _InitialExchange | None = None
         self._initial_turn_started = False
         self._initial_turn_terminal = False
@@ -2694,7 +2698,7 @@ class LiveVisualActor:
             except LiveModelRoleError as exc:
                 raise InvalidActorProposal(str(exc)) from exc
             # The model may emit several tool calls in one response (status,
-            # shell, connector, then observe_desktop).  Execute every
+            # connector, then observe_desktop).  Execute every
             # non-terminal call and keep observe_desktop as the terminal
             # admission.  A bare text reply ends the initial turn.
             if not calls:
@@ -3101,22 +3105,20 @@ class LiveVisualActor:
             previous_exchange.result_content = {
                 "previous_action": turn.previous_action.to_dict()
             }
-            self._completed_visual_history.extend(
-                deepcopy(previous_exchange.messages)
-            )
-            self._completed_visual_history.append(
+            self._completed_visual_exchange = (
+                *_text_only_tool_transcript(previous_exchange.messages),
                 {
                     "role": "tool",
                     "tool_call_id": previous_exchange.tool_call_id,
                     "content": _canonical_json(
                         previous_exchange.result_content
                     ),
-                }
+                },
             )
             self._previous_visual_exchange = None
         else:
             self._previous_visual_exchange = None
-        native_context.extend(deepcopy(self._completed_visual_history))
+        native_context.extend(deepcopy(self._completed_visual_exchange))
         if rejection_feedback:
             native_context.append(
                 {

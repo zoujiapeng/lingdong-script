@@ -38,7 +38,6 @@ from winpilot.vnext.runtime import (
     ActorTurnDecision,
     ActorFrameView,
     ActorMissionView,
-    ActorObligationView,
     ActorPreviousActionView,
     ActorToolView,
     ActorTurnInput,
@@ -180,12 +179,6 @@ def _actor_turn() -> ActorTurnInput:
     return ActorTurnInput(
         mission=ActorMissionView(
             original_goal="Type the requested greeting",
-            active_obligation=ActorObligationView(
-                desired_state="The greeting is visible",
-                acceptance_criteria=("The field contains hello",),
-                forbidden_effects=("No duplicate text",),
-                required_capabilities=("visual.interact",),
-            ),
         ),
         frame=ActorFrameView(
             image_available=True,
@@ -1332,7 +1325,7 @@ def test_failed_physical_action_gets_one_actionable_model_hint() -> None:
     ]["next_step"]
 
 
-def test_consecutive_visual_calls_keep_the_run_tool_history_text_only() -> None:
+def test_consecutive_visual_calls_keep_only_the_latest_tool_exchange_text_only() -> None:
     _, clients = _build_clients([
         _tool_response(call_id="first"),
         _tool_response(call_id="second"),
@@ -1397,7 +1390,7 @@ def test_consecutive_visual_calls_keep_the_run_tool_history_text_only() -> None:
     third_messages = clients[0].requests[2]["messages"]
     encoded = json.dumps(third_messages)
     assert "second-0" in encoded
-    assert "first-0" in encoded
+    assert "first-0" not in encoded
     assert encoded.count(_JPEG_B64) == 1
 
 

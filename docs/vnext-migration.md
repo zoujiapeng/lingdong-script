@@ -52,9 +52,10 @@ renderer selector
 
 用户口头强调 GUI 时，只提交原始 `goal`。显式配置 MCP 后，同一个 Actor 当前会同时
 看到两个通用 connector 工具与 reply/GUI 决策；没有配置时工具不出现。它们不读取
-任务关键词，当前只准入 read-only 远端调用。shell 与 external mutation 尚未加入；
-后续仍必须让同一个 Agent 直接看到工具，不能增加 profiler、关键词路由、前端开关
-或第二套 planner。
+任务关键词，远端 connector 当前仍只准入 read-only 调用。首轮不提供 shell；进入视觉线后，
+若 shell 已启用，通用 `run_shell`、`run_detached`、`write_file` 与 GUI 一起交给同一个
+Agent。它们的进程或文件回执不替代物理输入回执，也不决定任务完成；不能因此增加
+profiler、关键词路由、前端开关或第二套 planner。
 
 `ToolSpec.execution_medium` 暂时保留为执行事实和审计字段，不再参与用户意图的二次编码。Broker 只做工具 schema、runtime 可写性、目标/画面新鲜度和指针所有权等机械准入。真实 E2E 报告记录实际 OS 输入、shell 或 provider 回执，而不是验证某个策略选项。
 
@@ -117,8 +118,8 @@ Pi 只有在能整体替换并删除 Python 模型循环 owner、且跨任务 E2
    Node↔Python RPC、Android runtime、第二 planner 或应用策略；
 2. 候选必须先在至少两个不同任务族用外部 oracle 提高完整成功率，并在同一提交删除被替代
    owner，才允许进入主线；
-3. connector 已按同一 Actor 的通用工具落位；未来加入 shell 或外部 mutation 时也
-   必须复用同一选择面，仍不增加 profiler、关键词 router、前端开关或第二 planner。
+3. connector 与视觉线内的 shell/文件工具已经共用同一 Actor 选择面；未来新增工具也
+   必须复用这一选择面，仍不增加 profiler、关键词 router、前端开关或第二 planner。
 
 ## 暂留兼容面
 
@@ -165,7 +166,8 @@ Pi 只有在能整体替换并删除 Python 模型循环 owner、且跨任务 E2
 - 从可见 Electron 客户端提交，不以直接 HTTP 调用代替；
 - 覆盖普通自然语言目标和口头强调“必须使用 GUI”的目标；
 - 用 OS 输入、窗口/进程、文件或目标应用状态等外部 oracle 验证结果；
-- trace 证明没有 Legacy、shell 或 provider fallback；
+- trace 证明没有 Legacy fallback，并如实记录 shell 或 provider 是否由模型选择，而不是把它们
+  当成隐式 fallback；
 - 覆盖冷启动、失败恢复和至少一个不同于实现样例的任务族。
 
 退出门：当前版本的验收报告和 trace 满足 [测试规范](testing.md)。历史 run、工具 `ok`、像素变化或模型总结不能代替本轮验证。
@@ -351,8 +353,8 @@ stale/non-current run 和未启动 terminal 都有机械合同。服务端有界
 任务族的随机交错矩阵验证长时收益。Thread 跨服务重启的最小有界 checkpoint 已在 13.26
 用聊天连续性与 connector→Notepad 两族通过，不再是未实现边界。当前剩余迁移边界是
 pause 与 waiting lease 的真实 E2E、长历史下 connector/GUI 选择压力、provisional native
-model protocol 的真实凭据验收，以及未来把 shell/外部 mutation 与 GUI 同时交给同一
-模型；它们都不得通过预分类器实现。
+model protocol 的真实凭据验收，以及视觉线内 shell/文件工具与 GUI 的长时联合 E2E；
+它们都不得通过预分类器实现。
 
 13.26 的当前源码受控矩阵为 `6/10`：随机试卷 `6/6`，precise/ordered click、drag、slider、
 dynamic hold 通过，四个 corridor 失败。模型原始折线、canonical 参数和 physical attempt

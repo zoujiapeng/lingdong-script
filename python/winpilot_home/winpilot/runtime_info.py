@@ -90,12 +90,7 @@ _source_drift_observed = False
 _git_cache_state: tuple[str, str, bool | None] | None = None
 _git_cache_expires_at = 0.0
 
-# File-existence probe instead of ``find_spec``: importing the legacy agent
-# package (or even resolving it) must never happen at service startup.
-_AGENT_RUNTIME_PROFILE_FILE = ROOT_DIR / "winpilot" / "agent" / "runtime_profile.py"
-
 _CAPABILITIES = {
-    "runtime_profile": _AGENT_RUNTIME_PROFILE_FILE.is_file(),
     "automation_ir": _has_module("winpilot.automation_ir"),
     "replay_jobs": True,
     "scheduler": False,

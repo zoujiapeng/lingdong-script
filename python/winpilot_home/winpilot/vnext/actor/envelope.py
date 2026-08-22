@@ -15,7 +15,7 @@ from pydantic import (
 )
 
 from ..mission import (
-    MissionReducer,
+    MissionState,
     MissionStatus,
 )
 from ..json_contract import (
@@ -187,7 +187,6 @@ class ActorDecisionEnvelope(BaseModel):
     mission_id: str
     run_id: str
     mission_revision: _NONNEGATIVE_INT
-    obligation_id: str
     turn_index: _NONNEGATIVE_INT
     frame_id: _POSITIVE_INT
     frame_epoch: _NONNEGATIVE_INT
@@ -210,7 +209,6 @@ class ActorDecisionEnvelope(BaseModel):
         "decision_id",
         "mission_id",
         "run_id",
-        "obligation_id",
         "target_binding_id",
     )
     @classmethod
@@ -342,7 +340,7 @@ class ActorDecisionEnvelope(BaseModel):
 
 def bind_actor_decision(
     *,
-    mission_reducer: MissionReducer,
+    mission: MissionState,
     proposal: ActorProposal,
     turn_index: int,
     frame_id: int,
@@ -364,12 +362,11 @@ def bind_actor_decision(
     fake failures).
     """
 
-    if type(mission_reducer) is not MissionReducer:
+    if type(mission) is not MissionState:
         raise InvalidActorAdmission(
-            "Actor admission requires canonical MissionReducer"
+            "Actor admission requires canonical MissionState"
         )
     try:
-        mission = mission_reducer.projection
         canonical_proposal = proposal
         proposal_tool_name(canonical_proposal)
         region = _frame_region(frame_region)
@@ -377,8 +374,7 @@ def bind_actor_decision(
         image_sha = _sha256(
             frame_image_sha256, "frame_image_sha256"
         )
-        active_id = mission.active_obligation_id
-        if mission.status is not MissionStatus.RUNNING or active_id is None:
+        if mission.status is not MissionStatus.RUNNING:
             raise ValueError("Mission is not actionable")
         target = mission.target_binding
         if target is None:
@@ -388,7 +384,6 @@ def bind_actor_decision(
             "mission_id": mission.mission_id,
             "run_id": mission.run_id,
             "mission_revision": mission.revision,
-            "obligation_id": active_id,
             "turn_index": turn_index,
             "frame_id": frame_id,
             "frame_epoch": frame_epoch,

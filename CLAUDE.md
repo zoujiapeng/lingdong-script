@@ -1,11 +1,32 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-19。唯一长期产品分支是 `master`；2026-08-14/08-15 内容与
+> 最后核对：2026-08-20。唯一长期产品分支是 `master`；2026-08-14/08-15 内容与
 > 2026-08-17 旧架构删除批次均已提交并合入 `master`。本文件不再把某个提交写成“当前 HEAD”；
 > 接手时必须现场运行
 > `git rev-parse HEAD`、`git rev-parse origin/master` 并查询该精确 SHA 的 Actions。
 > 13.20–13.28 已进入或正在进入主线；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、
 > 通用 connector、history-depth 证据或 provisional native-provider 边界。
+
+## 2026-08-20 单一目标状态收敛（当前工作树）
+
+live vNext 已从通用任务图/事件账本收敛为一个可变但很小的 `MissionState`：只保存原始
+goal、初始 target、最后一次机械结果和终态。`MissionDefinition`、obligation DAG、事件
+reducer/replay、evidence/artifact registry 以及仅为它们服务的 wire 测试均已删除；模型仍是
+唯一语义 owner，`MissionRuntime` 只是同一条模型→动作→新帧执行线的顺序协调器。
+
+- `LiveVisualActor` 视觉上下文只保留紧邻的一笔已完成原生 tool exchange；新 exchange
+  覆盖旧 exchange，不积累无界视觉历史。
+- 首轮只提供回复、观察、状态和只读 connector；进入视觉线后，若启用 shell，通用
+  `run_shell`、`run_detached`、`write_file` 与 GUI 工具同轮可见。它们的回执不替代
+  RawDevice 物理回执，也不构成任务完成。
+- 根 `pytest.ini` 现在同时收集根 `tests/` 与 `python/winpilot_home/tests/`，避免后者被
+  静默漏跑；陈旧 `runtime_profile`、根 `_e2e_harness.py` 和零消费者 frame/commit 哈希字段
+  已删除。
+
+本轮验证：统一 Python 回归 `3996 passed, 13 skipped`；Renderer `327 passed`；TypeScript
+typecheck、`npm run build` 与 `npm run build:all` 全部通过。重启为当前工作树的新 Electron/
+Python 进程后，可见受控桌面套件 `18/18`，五类安全真实应用探针 `5/5`（临时 Notepad
+保存、Calculator、聊天后任务、缺失文件、Paint 笔画）均由独立外部状态判定通过。
 
 ## 2026-08-19 当前单分支收敛与回归
 
@@ -24,6 +45,9 @@
   completion-only 的 best-effort 诊断帧，不进入物理输入热路径，也不冒充独立结果证明。
 - 仍保留且不得削弱的机械边界只有：物理输入单写入、按键/指针释放清理、凭据不泄漏和
   不可逆外部动作同意。
+- live 任务状态已经收敛为一个 `MissionState`：原始 goal、初始 target、最后机械结果和
+  终态；不再有 obligation 图、Mission event/reducer、evidence/artifact registry 或 replay。
+  Visual Actor 只保留最近一笔已完成的原生视觉 tool exchange，避免无界历史。
 
 当前源码的回归结果：Python `2508 passed`，Renderer `327 passed`，TypeScript typecheck、
 `npm run build`、`npm run build:all` 和项目索引检查均通过；可见 Electron 受控桌面套件
@@ -432,9 +456,10 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 - `claim_obligation_done`
 - `blocked`
 
-显式只读 connector 的两个通用入口、三个状态工具、`run_shell` 与视觉线内的
-`read_window_text` 在文本/视觉回合仍可见；它们没有变成 GUI 动作、应用 adapter 或
-第二执行线。生产 Actor 的依赖工具链不再有按工具族或按视觉帧的强制截断；只保留
+显式只读 connector 的两个通用入口和三个状态工具在文本/视觉回合可见；`run_shell`、
+`run_detached`、`write_file` 与 `read_window_text` 只在视觉线内可见。它们没有变成 GUI
+动作、应用 adapter 或第二执行线。生产 Actor 的依赖工具链不再有按工具族或按视觉帧的
+强制截断；只保留
 `max_turns`、`max_runtime_s`、`max_model_calls` 三项机械预算。若当前局部工具结果开始重复，模型可自行调用
 `refresh_desktop` 换取新整屏，而不是被 runtime 强迫执行一笔无关 GUI 动作。
 

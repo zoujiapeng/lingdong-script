@@ -118,12 +118,13 @@ runtime 不再用独立 verifier/evidence 链复判语义。工具 `ok` 和物�
 主 Agent 不再有前端“执行约束”选择器，也没有对应的请求字段或 Goal Admission 状态。用户口头强调“必须使用 GUI”时，这句话只存在于原始 `goal`，由同一个语义 Agent 理解；系统不再要求用户把同一意图重复编码到系统开关，也不增加关键词路由器或第二个 Task Profiler。
 
 当前 live vNext 在存在显式 MCP 配置时，把 `search_connector_tools` 和
-`call_connector_tool` 与首轮 `observe_desktop` 同时交给同一个 Actor；进入视觉线后，
-它们也与 GUI/control 工具同轮可见。因此当前已经能在直接聊天、只读 connector 和
-GUI 间自主组合，但尚无 shell，也不准入外部 mutation。后续能力仍必须作为同一
-Agent 的普通工具加入同一轮选择；`execution_medium` 只描述实际执行，不承载用户
-策略。Runtime 只保留 schema、可信画面、窗口/指针所有权与不可逆动作边界等机械
-约束，不解释任务类型。
+`call_connector_tool` 与首轮 `observe_desktop` 同时交给同一个 Actor。首轮不提供
+shell；进入视觉线后，若 shell 已启用，`run_shell`、`run_detached` 和 `write_file` 会与
+GUI/control、connector 同轮可见。因此同一个 Actor 自主选择直接回复、只读 connector、
+本地通用工具或 GUI；shell 的进程/文件回执不替代 RawDevice 的物理输入回执，也不决定
+任务完成。后续能力仍必须作为同一 Agent 的普通工具加入同一轮选择；`execution_medium`
+只描述实际执行，不承载用户策略。Runtime 只保留 schema、可信画面、窗口/指针所有权与
+不可逆动作边界等机械约束，不解释任务类型。
 
 桌面交接上下文只存在于一次性 lease bind。服务端在生成规范图之后绑定 `task_id`，
 因此客户端上下文不能借机注入图身份或选择 runtime。真实验收检查“Agent 实际用了
@@ -165,7 +166,7 @@ Task Contract、TASK_STAGE、StageRuntime 和 InteractionStageEngine 已删除�
 | `LiveVisualActor` | 理解完整目标和当前 JPEG，选择一笔工具调用 | 物理输入、应用脚本、第二角色委派 |
 | `ConnectorGateway` | 有界发现显式 MCP，并把只读调用结果及 receipt 返回同一 Actor | 服务专属 adapter、任务路由、外部写入授权 |
 | `DesktopLeaseSlot` + Electron handoff | 精确配对桌面让出、target 交付和窗口恢复 | 按任务词预租约、替模型决定是否用 GUI |
-| `MissionRuntime` | 顺序驱动模型、动作、新帧与 obligation | 关键词规划、纠正模型答案 |
+| `MissionRuntime` | 顺序驱动模型、动作、新帧与一个 goal 的最小状态 | 关键词规划、纠正模型答案 |
 | `FrameAuthority` / workspace | 发布当前 frame、epoch、hwnd、region、图像身份 | 理解画面或选择目标 |
 | `AtomicDesktopAdapter` / `RawDevice` | 唯一坐标映射、真实输入和机械回执 | snap、offset、语义成功 |
 
@@ -182,7 +183,7 @@ Task Contract、TASK_STAGE、StageRuntime 和 InteractionStageEngine 已删除�
 `assistant observe_desktop → tool result`，再附加当前权威 JPEG、完整原始目标和
 有界 task state。后续 GUI 回合只保留紧邻的一笔 provider 原生
 `user image → assistant tool call → tool result`，新动作替换上一笔；同一回合内的
-本地只读工具链（status/shell/connector/window_text）只受剩余模型调用预算约束。
+模型选择的本地/connector 工具链（status/shell/connector/window_text）只受剩余模型调用预算约束。
 模型从画面理解语义并提出一笔
 typed transaction；动作后重新捕获权威帧，下一回合以新 exchange 替换上一笔。
 这里没有无界聊天历史、第二 planner 或独立 Grounder/Verifier。

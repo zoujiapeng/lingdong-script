@@ -62,10 +62,8 @@ from ..vnext.desktop_adapter import (
     WorkspaceSurface,
 )
 from ..vnext.mission import (
-    MissionDefinition,
-    MissionReducer,
+    MissionState,
     MissionStatus,
-    ObligationSpec,
     TargetBinding,
 )
 from ..vnext.model_roles import (
@@ -1560,7 +1558,7 @@ class _LiveRuntimeState:
     def __init__(
         self,
         *,
-        reducer: MissionReducer,
+        mission: MissionState,
         workspace: DesktopWorkspace | None = None,
         binding: TargetBinding | None = None,
         target_probe: _BoundTargetProbe | None = None,
@@ -1610,7 +1608,7 @@ class _LiveRuntimeState:
                 foreground_reader=legacy_foreground_reader,
                 hit_test_root=target_probe.hit_test_root,
             )
-        self._reducer = reducer
+        self._mission = mission
         self._workspace = workspace
         self._authority = authority
         self._observer = observer
@@ -1670,9 +1668,8 @@ class _LiveRuntimeState:
             "vnext_gui_observation",
             runtime_version=_RUNTIME_VERSION,
             no_legacy_fallback=True,
-            run_id=self._reducer.definition.run_id,
-            mission_id=self._reducer.definition.mission_id,
-            obligation_id=_OBLIGATION_ID,
+            run_id=self._mission.run_id,
+            mission_id=self._mission.mission_id,
             execution_medium="control",
             observation_kind="fresh_authoritative_desktop_frame",
             target_binding_id=binding.binding_id,
@@ -2032,7 +2029,7 @@ class _LiveAgentSession:
         self,
         *,
         runtime: MissionRuntime,
-        reducer: MissionReducer,
+        mission: MissionState,
         authority: FrameAuthority,
         binding: TargetBinding,
         counter: _ModelCallCounter,
@@ -2040,7 +2037,7 @@ class _LiveAgentSession:
         controller: AtomicDesktopAdapter | None = None,
     ) -> None:
         self._runtime = runtime
-        self._reducer = reducer
+        self._mission = mission
         self._authority = authority
         self._binding = binding
         self._counter = counter
@@ -2076,26 +2073,26 @@ class _LiveAgentSession:
         )
 
     def completion_snapshot(self) -> Mapping[str, Any]:
-        projection = self._reducer.projection
+        mission = self._mission
         frame = self._authority.current
         return {
-            "mission_id": projection.mission_id,
-            "run_id": projection.run_id,
-            "mission_revision": projection.revision,
-            "mission_status": projection.status.value,
+            "mission_id": mission.mission_id,
+            "run_id": mission.run_id,
+            "mission_revision": mission.revision,
+            "mission_status": mission.status.value,
             "target_binding_id": (
-                projection.target_binding.binding_id
-                if projection.target_binding is not None
+                mission.target_binding.binding_id
+                if mission.target_binding is not None
                 else None
             ),
             "target_hwnd": (
-                projection.target_binding.hwnd
-                if projection.target_binding is not None
+                mission.target_binding.hwnd
+                if mission.target_binding is not None
                 else None
             ),
             "target_epoch": (
-                projection.target_binding.epoch
-                if projection.target_binding is not None
+                mission.target_binding.epoch
+                if mission.target_binding is not None
                 else None
             ),
             "frame_id": frame.frame_id if frame is not None else None,
@@ -2105,19 +2102,19 @@ class _LiveAgentSession:
         }
 
     def turn_snapshot(self) -> Mapping[str, Any]:
-        projection = self._reducer.projection
+        mission = self._mission
         frame = self._authority.current
         return {
-            "mission_revision": projection.revision,
-            "mission_status": projection.status.value,
+            "mission_revision": mission.revision,
+            "mission_status": mission.status.value,
             "target_binding_id": (
-                projection.target_binding.binding_id
-                if projection.target_binding is not None
+                mission.target_binding.binding_id
+                if mission.target_binding is not None
                 else None
             ),
             "target_hwnd": (
-                projection.target_binding.hwnd
-                if projection.target_binding is not None
+                mission.target_binding.hwnd
+                if mission.target_binding is not None
                 else None
             ),
             "frame_id": frame.frame_id if frame is not None else None,
@@ -2616,28 +2613,12 @@ def _target_binding(build: _SessionBuild) -> TargetBinding:
 
 
 def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
-    definition = MissionDefinition(
+    binding = _target_binding(build)
+    mission = MissionState(
         mission_id=build.mission_id,
         run_id=build.run_id,
         original_goal=build.goal,
-        obligations=(
-            ObligationSpec(
-                id=_OBLIGATION_ID,
-                desired_state=build.goal,
-                acceptance_criteria=(build.goal,),
-                required_capabilities=(),
-            ),
-        ),
-        source="vnext-live-agent",
-        experience_policy="disabled",
-    )
-    reducer = MissionReducer(definition)
-    binding = _target_binding(build)
-    reducer.apply(
-        reducer.event(
-            "target_bound",
-            payload={"target_binding": binding.to_dict()},
-        )
+        target_binding=binding,
     )
     initial_surface = WorkspaceSurface(
         hwnd=binding.hwnd,
@@ -2664,7 +2645,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
         max_submitted_side=_MAX_SUBMITTED_SIDE,
     )
     state = _LiveRuntimeState(
-        reducer=reducer,
+        mission=mission,
         workspace=workspace,
         authority=authority,
         observer=observer,
@@ -2719,7 +2700,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             }
 
         runtime = MissionRuntime(
-            reducer=reducer,
+            mission=mission,
             tools=tools,
             actor=actor_bundle.actor,
             state=state,
@@ -2728,7 +2709,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
         )
         return _LiveAgentSession(
             runtime=runtime,
-            reducer=reducer,
+            mission=mission,
             authority=authority,
             binding=binding,
             counter=counter,

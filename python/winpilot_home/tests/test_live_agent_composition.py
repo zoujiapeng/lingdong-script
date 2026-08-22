@@ -46,14 +46,11 @@ from winpilot.visual_runtime.keyboard_contracts import HotkeyChord
 from winpilot.visual_runtime.frame_observer import FrameObserver
 from winpilot.vnext.actor import InvalidActorProposal, parse_actor_proposal
 from winpilot.vnext.mission import (
-    MissionDefinition,
-    MissionReducer,
+    MissionState,
     MissionStatus,
-    ObligationSpec,
     TargetBinding,
     is_safe_action_summary,
 )
-from winpilot.vnext.mission import contracts as mission_contracts
 from winpilot.vnext.runtime import (
     MissionRuntimeResult,
     RuntimeStatus,
@@ -2437,20 +2434,6 @@ def test_completion_snapshot_metadata_cannot_overturn_runtime_completion(
 def test_pause_state_is_independent_of_frame_updates() -> None:
     mission_id = "vnext-mission-pause-test"
     run_id = "arp-pause-test"
-    definition = MissionDefinition(
-        mission_id=mission_id,
-        run_id=run_id,
-        original_goal=GOAL,
-        obligations=(
-            ObligationSpec(
-                id="full-goal",
-                desired_state=GOAL,
-                acceptance_criteria=(GOAL,),
-                required_capabilities=("visual.interact",),
-            ),
-        ),
-    )
-    reducer = MissionReducer(definition)
     binding = TargetBinding(
         binding_id="binding-pause",
         hwnd=HWND,
@@ -2459,11 +2442,11 @@ def test_pause_state_is_independent_of_frame_updates() -> None:
         title_snapshot="Canary Target",
         epoch=7,
     )
-    reducer.apply(
-        reducer.event(
-            "target_bound",
-            payload={"target_binding": binding.to_dict()},
-        )
+    mission = MissionState(
+        mission_id=mission_id,
+        run_id=run_id,
+        original_goal=GOAL,
+        target_binding=binding,
     )
     authority = FrameAuthority()
     first = authority.commit(
@@ -2480,7 +2463,7 @@ def test_pause_state_is_independent_of_frame_updates() -> None:
 
     pause = type("_Pause", (), {"paused": True})()
     state = live_agent._LiveRuntimeState(
-        reducer=reducer,
+        mission=mission,
         binding=binding,
         target_probe=live_agent._BoundTargetProbe(
             _facts(),
@@ -2891,7 +2874,6 @@ def test_fresh_observation_is_auditable_without_pixel_data(
         "no_legacy_fallback",
         "run_id",
         "mission_id",
-        "obligation_id",
         "execution_medium",
         "observation_kind",
         "target_binding_id",
@@ -2988,10 +2970,10 @@ def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
             stop_event=threading.Event(),
         )
         assert first.status is RuntimeStatus.ACTION_RECORDED
-        assert session._reducer.projection.target_binding.hwnd == HWND
+        assert session._mission.target_binding.hwnd == HWND
 
         observed = session._runtime._state.observe()
-        anchor = session._reducer.projection.target_binding
+        anchor = session._mission.target_binding
         assert anchor is not None
         assert anchor.hwnd == HWND
         assert observed.frame.hwnd == HWND
@@ -3069,7 +3051,7 @@ def test_screen_first_frame_shows_desktop_without_rebinding_visible_window(
             stop_event=threading.Event(),
         )
         assert first.status is RuntimeStatus.ACTION_RECORDED
-        assert session._reducer.projection.target_binding.hwnd == HWND
+        assert session._mission.target_binding.hwnd == HWND
 
         observation = next(
             item
@@ -3080,7 +3062,7 @@ def test_screen_first_frame_shows_desktop_without_rebinding_visible_window(
         assert observation["target_hwnd"] == HWND
 
         observed = session._runtime._state.observe()
-        anchor = session._reducer.projection.target_binding
+        anchor = session._mission.target_binding
         assert anchor is not None
         assert anchor.hwnd == HWND
         assert observed.frame.hwnd == HWND
@@ -3204,7 +3186,7 @@ def test_real_composition_launches_a_generic_application_and_arms_successor(
     assert result.status is RuntimeStatus.ACTION_RECORDED
     assert launched == [("Notepad", "")]
     assert raw_calls == []
-    transition = session._reducer.projection.last_transition
+    transition = session._mission.last_transition
     assert transition is not None
     assert transition.action == "launch_application"
     assert transition.input_completed is True
@@ -3405,7 +3387,7 @@ def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
         assert turn_payload["budget"]["elapsed_s"] >= 0
 
         observed = session._runtime._state.observe()
-        anchor = session._reducer.projection.target_binding
+        anchor = session._mission.target_binding
         assert anchor is not None
         assert anchor.hwnd == shell_hwnd
         assert observed.frame.hwnd == shell_hwnd
@@ -3501,7 +3483,7 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
             return
         session = session_holder[0]
         before = authoritative_before_transition[0]
-        projection_binding = session._reducer.projection.target_binding
+        projection_binding = session._mission.target_binding
         assert projection_binding is not None
         assert projection_binding.hwnd == HWND
         assert session._runtime._state._workspace.binding.hwnd == HWND
@@ -3548,7 +3530,7 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
             stop_event=threading.Event(),
         )
         assert second.status is RuntimeStatus.ACTION_RECORDED
-        anchor = session._reducer.projection.target_binding
+        anchor = session._mission.target_binding
         assert anchor is not None
         assert anchor.hwnd == HWND
         assert session._runtime._state._workspace.binding == anchor
@@ -3840,7 +3822,7 @@ def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
     actor_client = _RawClient(close_error="actor close unavailable")
     session = live_agent._LiveAgentSession(
         runtime=object(),
-        reducer=object(),
+        mission=object(),
         authority=FrameAuthority(),
         binding=object(),
         counter=object(),

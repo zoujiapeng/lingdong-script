@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-import hashlib
 import json
 import re
 from types import MappingProxyType
@@ -255,13 +254,6 @@ class RuntimeFrameIdentity:
             "media_type": self.media_type,
         }
 
-    @property
-    def payload_hash(self) -> str:
-        return hashlib.sha256(
-            _canonical_json(self.to_dict()).encode("utf-8")
-        ).hexdigest()
-
-
 @dataclass(frozen=True, slots=True)
 class RuntimeTargetIdentity:
     binding_id: str
@@ -341,13 +333,6 @@ class RuntimeCommitIdentity:
             "frame": self.frame.to_dict(),
             "target": self.target.to_dict(),
         }
-
-    @property
-    def fingerprint(self) -> str:
-        return hashlib.sha256(
-            _canonical_json(self.to_dict()).encode("utf-8")
-        ).hexdigest()
-
 
 @dataclass(frozen=True, slots=True)
 class RuntimeFrame:
@@ -490,39 +475,6 @@ class RuntimeSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class ActorObligationView:
-    desired_state: str
-    acceptance_criteria: tuple[str, ...]
-    forbidden_effects: tuple[str, ...]
-    required_capabilities: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "desired_state",
-            _text(self.desired_state, "desired_state"),
-        )
-        for name in (
-            "acceptance_criteria",
-            "forbidden_effects",
-            "required_capabilities",
-        ):
-            object.__setattr__(
-                self,
-                name,
-                _strings(getattr(self, name), name),
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "desired_state": self.desired_state,
-            "acceptance_criteria": list(self.acceptance_criteria),
-            "forbidden_effects": list(self.forbidden_effects),
-            "required_capabilities": list(self.required_capabilities),
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class ActorPreviousActionView:
     """One bounded prior-action fact, never a second history ledger."""
 
@@ -648,7 +600,6 @@ class ActorBudgetView:
 @dataclass(frozen=True, slots=True)
 class ActorMissionView:
     original_goal: str
-    active_obligation: ActorObligationView
     failure_kind: str | None = None
     failure_message: str | None = None
 
@@ -658,10 +609,6 @@ class ActorMissionView:
             "original_goal",
             _text(self.original_goal, "original_goal"),
         )
-        if type(self.active_obligation) is not ActorObligationView:
-            raise RuntimeContractError(
-                "active_obligation must be ActorObligationView"
-            )
         if (self.failure_kind is None) != (self.failure_message is None):
             raise RuntimeContractError(
                 "failure kind and message must be present together"
@@ -684,7 +631,6 @@ class ActorMissionView:
     def to_dict(self) -> dict[str, Any]:
         return {
             "original_goal": self.original_goal,
-            "active_obligation": self.active_obligation.to_dict(),
             "failure": (
                 None
                 if self.failure_kind is None
@@ -835,9 +781,9 @@ def project_actor_turn_input(
 ) -> ActorTurnInput:
     """Project one identity-free bounded view from canonical Runtime facts."""
 
-    if type(card) is not MissionCard or card.active_obligation is None:
+    if type(card) is not MissionCard:
         raise RuntimeContractError(
-            "Visual Actor requires one active MissionCard obligation"
+            "Visual Actor requires a canonical MissionCard"
         )
     if budget is not None and type(budget) is not ActorBudgetView:
         raise RuntimeContractError(
@@ -856,15 +802,8 @@ def project_actor_turn_input(
             raise RuntimeContractError(
                 "Target-window projection requires its current binding"
             )
-    obligation = card.active_obligation
     mission = ActorMissionView(
         original_goal=card.original_goal,
-        active_obligation=ActorObligationView(
-            desired_state=obligation.desired_state,
-            acceptance_criteria=obligation.acceptance_criteria,
-            forbidden_effects=obligation.forbidden_effects,
-            required_capabilities=obligation.required_capabilities,
-        ),
         failure_kind=(
             None if card.failure_summary is None else card.failure_summary.kind
         ),
@@ -1052,14 +991,6 @@ class MissionRuntimeResult:
         )
 
 
-def frame_identity_payload_hash(frame: RuntimeFrameIdentity) -> str:
-    if type(frame) is not RuntimeFrameIdentity:
-        raise RuntimeContractError(
-            "frame payload hash requires RuntimeFrameIdentity"
-        )
-    return frame.payload_hash
-
-
 __all__ = [
     "RUNTIME_FRAME_FORMAT",
     "RUNTIME_SNAPSHOT_FORMAT",
@@ -1078,7 +1009,6 @@ __all__ = [
     "RuntimeCommitIdentity",
     "RuntimeFrame",
     "RuntimeSnapshot",
-    "ActorObligationView",
     "ActorPreviousActionView",
     "ActorMissionView",
     "ActorFrameView",
@@ -1095,5 +1025,4 @@ __all__ = [
     "ControllerTransition",
     "RuntimeStatus",
     "MissionRuntimeResult",
-    "frame_identity_payload_hash",
 ]

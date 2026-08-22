@@ -455,10 +455,8 @@ def platform_overview() -> dict[str, Any]:
         "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
         "contracts": {
             "arp": "arp/1",
-            "task_contract": "task-contract/1",
             "automation_ir": "automation-ir/1",
             "event_stream": "/ws/events",
-            "mcp": "/mcp",
         },
     }
 

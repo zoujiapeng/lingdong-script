@@ -71,7 +71,6 @@ from winpilot.vnext.runtime import (
 
 MISSION_ID = "mission-atomic"
 RUN_ID = "run-atomic"
-OBLIGATION_ID = "full-goal"
 HWND = 901
 PROCESS_ID = 77
 EPOCH = 4
@@ -555,46 +554,12 @@ def _proposal(action: str) -> dict[str, Any]:
     }
 
 
-def _projection_id(state, binding: TargetBinding, action: str) -> str:
-    material = {
-        "format": "broker-projection/1",
-        "mission_id": MISSION_ID,
-        "run_id": RUN_ID,
-        "catalog_fingerprint": "2" * 64,
-        "profile_id": "fixed-standard",
-        "state_fingerprint": "3" * 64,
-        "mission_revision": 0,
-        "obligation_id": OBLIGATION_ID,
-        "turn_index": 0,
-        "execution_route": "visual_actor",
-        "executor_id": None,
-        "target_binding_id": binding.binding_id,
-        "frame_id": state.frame_id,
-        "frame_scope": state.scope,
-        "pointer_lease_id": None,
-        "tool_names": [action],
-        "active_grant_ids": [],
-        "missing_capabilities": [],
-        "projection_reasons": [],
-    }
-    canonical = json.dumps(
-        material,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return "projection-" + hashlib.sha256(
-        canonical.encode("utf-8")
-    ).hexdigest()[:24]
-
-
 def _envelope(state, binding: TargetBinding, action: str):
     material = {
         "format": ACTOR_ENVELOPE_FORMAT,
         "mission_id": MISSION_ID,
         "run_id": RUN_ID,
         "mission_revision": 0,
-        "obligation_id": OBLIGATION_ID,
         "turn_index": 0,
         "frame_id": state.frame_id,
         "frame_epoch": state.epoch,
@@ -635,33 +600,6 @@ def _replace_action_args(
     material.pop("decision_id")
     raw["decision_id"] = _decision_id(material)
     return ActorDecisionEnvelope.from_dict(raw)
-
-
-def _broker_projection(
-    envelope: ActorDecisionEnvelope,
-) -> dict[str, Any]:
-    return {
-        "format": "broker-projection/1",
-        "projection_id": "projection-adapter-test",
-        "mission_id": envelope.mission_id,
-        "run_id": envelope.run_id,
-        "catalog_fingerprint": "2" * 64,
-        "profile_id": "fixed-standard",
-        "state_fingerprint": "3" * 64,
-        "mission_revision": envelope.mission_revision,
-        "obligation_id": envelope.obligation_id,
-        "turn_index": envelope.turn_index,
-        "execution_route": "visual_actor",
-        "executor_id": None,
-        "target_binding_id": envelope.target_binding_id,
-        "frame_id": envelope.frame_id,
-        "frame_scope": envelope.frame_scope,
-        "pointer_lease_id": envelope.pointer_lease_id,
-        "tool_names": [envelope.proposal.action],
-        "active_grants": [],
-        "missing_capabilities": [],
-        "projection_reasons": [],
-    }
 
 
 def _harness(
@@ -1499,7 +1437,6 @@ def test_exact_type_text_is_absent_from_ordinary_trace(
             "decision_id",
             "mission_id",
             "run_id",
-            "obligation_id",
             "frame_id",
             "frame_epoch",
             "target_hwnd",
@@ -1713,7 +1650,6 @@ def test_queue_receives_exact_run_and_frame_metadata(monkeypatch) -> None:
         "owner": "vnext_atomic_desktop_adapter",
         "mission_id": MISSION_ID,
         "run_id": RUN_ID,
-        "obligation_id": OBLIGATION_ID,
         "decision_id": harness.envelope.decision_id,
         "frame_id": 1,
         "frame_epoch": EPOCH,

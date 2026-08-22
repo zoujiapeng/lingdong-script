@@ -10,12 +10,8 @@ import pytest
 
 from winpilot.vnext.actor import ACTOR_PROPOSAL_FORMAT, ActorDecisionEnvelope
 from winpilot.vnext.mission import (
-    EvidencePolicy,
-    MissionDefinition,
-    MissionReducer,
+    MissionState,
     MissionStatus,
-    ObligationSpec,
-    ObligationStatus,
     TargetBinding,
 )
 from winpilot.vnext.runtime import (
@@ -44,7 +40,6 @@ from winpilot.vnext.runtime import (
 
 MISSION_ID = "mission-runtime"
 RUN_ID = "run-runtime"
-OBLIGATION_ID = "full-goal"
 GOAL = "Make the requested visible state exist"
 HWND = 9123
 PROCESS_ID = 44
@@ -500,7 +495,7 @@ class FakeController:
 
 @dataclass
 class Harness:
-    reducer: MissionReducer
+    reducer: MissionState
     actor: FakeActor
     state: FakeState
     controller: FakeController
@@ -534,36 +529,13 @@ class Harness:
         )
 
 
-def _definition(
-    *,
-    obligations: tuple[ObligationSpec, ...] | None = None,
-) -> MissionDefinition:
-    return MissionDefinition(
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        original_goal=GOAL,
-        obligations=obligations
-        or (
-            ObligationSpec(
-                id=OBLIGATION_ID,
-                desired_state=GOAL,
-                acceptance_criteria=("the visible result is confirmed",),
-                required_capabilities=("visual.interact",),
-                evidence_policy=EvidencePolicy(),
-            ),
-        ),
-    )
-
-
 def _harness(
     *proposals: ActorTurnDecision | Mapping[str, Any],
-    definition: MissionDefinition | None = None,
+    mission: MissionState | None = None,
     catalog: tuple[ActorToolView, ...] | None = None,
     bind_target: bool = True,
     budget_provider: Callable[[int], Mapping[str, Any]] | None = None,
 ) -> Harness:
-    definition = definition or _definition()
-    reducer = MissionReducer(definition)
     actor = FakeActor(*(proposals or (_action(),)))
     catalog = catalog or _catalog()
 
@@ -586,13 +558,12 @@ def _harness(
         title_snapshot="",
         epoch=EPOCH,
     )
-    if bind_target:
-        reducer.apply(
-            reducer.event(
-                "target_bound",
-                payload={"target_binding": binding.to_dict()},
-            )
-        )
+    reducer = mission or MissionState(
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        original_goal=GOAL,
+        target_binding=binding if bind_target else None,
+    )
     frame = RuntimeFrame(
         frame_id=1,
         epoch=EPOCH,
@@ -624,7 +595,7 @@ def _harness(
         make_post_frame=make_post_frame,
     )
     runtime = MissionRuntime(
-        reducer=reducer,
+        mission=reducer,
         tools=catalog,
         actor=actor,
         state=state,
@@ -657,10 +628,7 @@ def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None
 
     assert result.status is RuntimeStatus.ACTION_RECORDED
     assert harness.controller.calls == 1
-    assert [event.kind for event in harness.reducer.events] == [
-        "target_bound",
-        "transition_recorded",
-    ]
+    assert harness.reducer.revision == 1
     assert harness.reducer.card.last_transition.action == action
 
 
@@ -674,7 +642,7 @@ def test_observe_requests_a_fresh_turn_without_physical_input() -> None:
     assert result.detail == _observe()["question"]
     assert harness.state.observe_calls == 1
     assert harness.controller.calls == 0
-    assert [event.kind for event in harness.reducer.events] == ["target_bound"]
+    assert harness.reducer.revision == 0
 
 
 def test_cross_frame_held_drag_preserves_then_releases_one_lease() -> None:
@@ -761,13 +729,9 @@ def test_actor_can_verify_already_satisfied_goal_without_mutation() -> None:
     assert harness.controller.calls == 0
     assert harness.actor.turns[0].frame.authoritative is True
     assert harness.actor.turns[0].frame.fresh is True
-    assert [event.kind for event in harness.reducer.events] == [
-        "target_bound",
-        "actor_completed",
-    ]
-    assert harness.reducer.events[-1].evidence_refs == ()
+    assert harness.reducer.status is MissionStatus.VERIFIED
     assert "the requested state is visibly present" not in json.dumps(
-        [event.to_dict() for event in harness.reducer.events]
+        harness.reducer.to_dict()
     )
 
 
@@ -816,8 +780,7 @@ def test_visible_claim_supersedes_stale_actor_remaining_items() -> None:
         "send playback image",
         "build and play game",
     )
-    assert harness.reducer.projection.status is MissionStatus.VERIFIED
-    assert harness.reducer.events[-1].kind == "actor_completed"
+    assert harness.reducer.status is MissionStatus.VERIFIED
 
 
 def test_type_text_is_absent_from_mission_bus_and_reducer_state() -> None:
@@ -833,13 +796,7 @@ def test_type_text_is_absent_from_mission_bus_and_reducer_state() -> None:
         harness.controller.envelopes[0].proposal.args["text"]
         == sentinel
     )
-    reducer_wire = {
-        "events": [
-            event.to_dict()
-            for event in harness.reducer.events
-        ],
-        "projection": harness.reducer.projection.to_dict(),
-    }
+    reducer_wire = harness.reducer.to_dict()
     assert sentinel not in json.dumps(
         reducer_wire,
         ensure_ascii=False,
@@ -875,10 +832,7 @@ def test_ephemeral_task_state_crosses_turns_but_not_mission_history() -> None:
     assert state.scratchpad == (
         f"All visible groups including {sentinel} summarized."
     )
-    durable_wire = {
-        "events": [event.to_dict() for event in harness.reducer.events],
-        "projection": harness.reducer.projection.to_dict(),
-    }
+    durable_wire = harness.reducer.to_dict()
     assert sentinel not in json.dumps(durable_wire, ensure_ascii=False)
     assert "task_state_update" not in json.dumps(
         durable_wire,
@@ -1200,18 +1154,9 @@ def test_previous_action_keeps_safe_direction_and_chord() -> None:
         harness.actor.turns[3].previous_action.semantic_summary
         == "hotkey: perform one hotkey"
     )
-    transition_summaries = tuple(
-        event.payload["action_summary"]
-        for event in harness.reducer.events
-        if event.kind == "transition_recorded"
-    )
-    assert transition_summaries == (
-        "scroll",
-        "scroll",
-        "hotkey",
-        "type_text",
-    )
-    history_wire = json.dumps(transition_summaries)
+    assert harness.reducer.last_transition is not None
+    assert harness.reducer.last_transition.action == "type_text"
+    history_wire = json.dumps(harness.reducer.to_dict())
     assert "image_x" not in history_wire
     assert "image_y" not in history_wire
     assert "hello" not in history_wire
@@ -1229,13 +1174,9 @@ def test_completed_action_intent_is_bounded_without_copying_action_args() -> Non
 
     assert recorded.status is RuntimeStatus.ACTION_RECORDED
     assert verified.status is RuntimeStatus.MISSION_VERIFIED
-    transition_summaries = tuple(
-        event.payload["action_summary"]
-        for event in harness.reducer.events
-        if event.kind == "transition_recorded"
-    )
-    assert transition_summaries == ("type_text",)
-    assert "credential-value" not in json.dumps(transition_summaries)
+    assert harness.reducer.last_transition is not None
+    assert harness.reducer.last_transition.action == "type_text"
+    assert "credential-value" not in json.dumps(harness.reducer.to_dict())
 
 
 def test_repeated_actions_are_executed_without_task_level_suppression() -> None:
@@ -1324,8 +1265,7 @@ def test_unknown_controller_outcome_returns_to_actor_without_replay() -> None:
     assert harness.actor.rejection_feedbacks == [None, first.detail]
     assert "click" in first.detail
     assert "perform one click" in first.detail
-    assert harness.reducer.projection.status is MissionStatus.BLOCKED
-    assert harness.reducer.events[-1].kind == "obligation_blocked"
+    assert harness.reducer.status is MissionStatus.BLOCKED
 
 
 def test_controller_exception_feeds_back_and_never_replays() -> None:
@@ -1343,11 +1283,7 @@ def test_controller_exception_feeds_back_and_never_replays() -> None:
     assert "synthetic controller failure" in first.detail
     assert second.status is RuntimeStatus.ACTION_RECORDED
     assert harness.controller.calls == 2
-    assert harness.reducer.projection.status is MissionStatus.RUNNING
-    assert not any(
-        event.kind == "obligation_blocked"
-        for event in harness.reducer.events
-    )
+    assert harness.reducer.status is MissionStatus.RUNNING
 
 
 def test_release_cleanup_unknown_is_blocked_and_never_replayed() -> None:
@@ -1361,8 +1297,7 @@ def test_release_cleanup_unknown_is_blocked_and_never_replayed() -> None:
     assert first.status is RuntimeStatus.BLOCKED
     assert second.status is RuntimeStatus.BLOCKED
     assert harness.controller.calls == 1
-    assert harness.reducer.projection.status is MissionStatus.BLOCKED
-    assert harness.reducer.events[-1].kind == "obligation_blocked"
+    assert harness.reducer.status is MissionStatus.BLOCKED
 
 
 def test_applied_input_without_post_frame_continues_with_fresh_observation() -> None:
@@ -1375,19 +1310,16 @@ def test_applied_input_without_post_frame_continues_with_fresh_observation() -> 
     assert first.status is RuntimeStatus.ACTION_RECORDED
     assert second.status is RuntimeStatus.BLOCKED
     assert harness.controller.calls == 1
-    transition = next(
-        event
-        for event in harness.reducer.events
-        if event.kind == "transition_recorded"
-    )
-    assert transition.payload == {
-        "obligation_id": OBLIGATION_ID,
+    transition = harness.reducer.last_transition
+    assert transition is not None
+    assert transition.to_dict() == {
         "action_id": first.decision_id,
         "action": "click",
-        "action_summary": "click",
         "input_completed": True,
+        "visible_effect": "",
+        "frame_id": None,
+        "error_kind": None,
     }
-    assert transition.evidence_refs == ()
     previous = harness.actor.turns[1].previous_action
     assert previous is not None
     assert previous.action == "click"
@@ -1408,11 +1340,9 @@ def test_rejected_controller_proves_no_input_and_is_not_replayed() -> None:
     # The rejected action is recorded as a proven-not-executed transition so
     # the same Actor receives it as previous_action on the next turn instead
     # of silently retrying the same dead target.
-    assert [event.kind for event in harness.reducer.events] == [
-        "target_bound",
-        "transition_recorded",
-        "obligation_blocked",
-    ]
+    assert harness.reducer.status is MissionStatus.BLOCKED
+    assert harness.reducer.last_transition is not None
+    assert harness.reducer.last_transition.input_completed is False
 
 
 def test_duplicate_post_action_state_probe_is_not_an_input_gate() -> None:
@@ -1436,33 +1366,16 @@ def test_claim_binds_current_frame_and_completes_deterministically() -> None:
 
     assert result.status is RuntimeStatus.MISSION_VERIFIED
     assert harness.controller.calls == 0
-    assert [event.kind for event in harness.reducer.events] == [
-        "target_bound",
-        "actor_completed",
-    ]
-    completion = harness.reducer.events[-1]
-    assert completion.evidence_refs == ()
-    obligation = harness.reducer.projection.obligation_state(OBLIGATION_ID)
-    assert obligation.status is ObligationStatus.VERIFIED
-    assert harness.reducer.projection.status is MissionStatus.VERIFIED
+    assert harness.reducer.status is MissionStatus.VERIFIED
 
 
-def test_actor_completion_survives_auxiliary_history_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_actor_completion_is_not_gated_by_auxiliary_history() -> None:
     harness = _harness(_claim())
-    monkeypatch.setattr(
-        harness.runtime,
-        "_accept",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("history unavailable")
-        ),
-    )
 
     result = harness.runtime.run_one_turn(turn_index=0)
 
     assert result.status is RuntimeStatus.MISSION_VERIFIED
-    assert "completion history unavailable" in result.detail
+    assert result.detail == ""
     assert harness.runtime.verified_completion_result == (
         "the requested state is visibly present"
     )
@@ -1471,31 +1384,13 @@ def test_actor_completion_survives_auxiliary_history_failure(
     )
 
 
-def test_evidence_policy_does_not_override_actor_completion() -> None:
-    definition = MissionDefinition(
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        original_goal=GOAL,
-        obligations=(
-            ObligationSpec(
-                id=OBLIGATION_ID,
-                desired_state=GOAL,
-                acceptance_criteria=("the visible result is confirmed",),
-                required_capabilities=("visual.interact",),
-                evidence_policy=EvidencePolicy(
-                    required_evidence_kinds=("current_frame",),
-                ),
-            ),
-        ),
-    )
-    harness = _harness(_claim(), definition=definition)
+def test_actor_completion_has_no_evidence_gate() -> None:
+    harness = _harness(_claim())
 
     result = harness.runtime.run_one_turn(turn_index=0)
 
     assert result.status is RuntimeStatus.MISSION_VERIFIED
-    completion = harness.reducer.events[-1]
-    assert completion.kind == "actor_completed"
-    assert completion.evidence_refs == ()
+    assert harness.reducer.status is MissionStatus.VERIFIED
 
 
 def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
@@ -1511,7 +1406,7 @@ def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
     assert before_result.status is RuntimeStatus.CANCELED
     assert before.actor.calls == 0
     assert before.controller.calls == 0
-    assert before.reducer.events[-1].kind == "mission_canceled"
+    assert before.reducer.status is MissionStatus.CANCELED
 
     admission = _harness(
         _action(),
@@ -1525,12 +1420,8 @@ def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
 
     assert admission_result.status is RuntimeStatus.CANCELED
     assert admission.controller.calls == 1
-    assert admission.reducer.events[-1].kind == "mission_canceled"
-    assert [event.kind for event in admission.reducer.events] == [
-        "target_bound",
-        "transition_recorded",
-        "mission_canceled",
-    ]
+    assert admission.reducer.status is MissionStatus.CANCELED
+    assert admission.reducer.last_transition is not None
 
     after = _harness(_action())
     after_stop = threading.Event()
@@ -1542,11 +1433,8 @@ def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
 
     assert after_result.status is RuntimeStatus.CANCELED
     assert after.controller.calls == 1
-    assert [event.kind for event in after.reducer.events] == [
-        "target_bound",
-        "transition_recorded",
-        "mission_canceled",
-    ]
+    assert after.reducer.status is MissionStatus.CANCELED
+    assert after.reducer.last_transition is not None
 
 
 def test_actor_exception_after_stop_is_cancellation() -> None:
@@ -1562,7 +1450,7 @@ def test_actor_exception_after_stop_is_cancellation() -> None:
 
     assert actor_result.status is RuntimeStatus.CANCELED
     assert actor_harness.controller.calls == 0
-    assert actor_harness.reducer.events[-1].kind == "mission_canceled"
+    assert actor_harness.reducer.status is MissionStatus.CANCELED
 
 
 def test_claim_completes_when_stop_fires_while_actor_decides() -> None:
@@ -1576,7 +1464,7 @@ def test_claim_completes_when_stop_fires_while_actor_decides() -> None:
     # deadline or cancel that landed while the model was deciding must not
     # turn an already-made claim into a failure.
     assert result.status is RuntimeStatus.MISSION_VERIFIED
-    assert harness.reducer.events[-1].kind == "actor_completed"
+    assert harness.reducer.status is MissionStatus.VERIFIED
     assert harness.runtime.verified_completion_result == (
         "the requested state is visibly present"
     )
@@ -1593,7 +1481,7 @@ def test_action_still_canceled_when_stop_fires_while_actor_decides() -> None:
     # the run is stopped.
     assert result.status is RuntimeStatus.CANCELED
     assert harness.controller.calls == 0
-    assert harness.reducer.events[-1].kind == "mission_canceled"
+    assert harness.reducer.status is MissionStatus.CANCELED
 
 
 def test_identical_fake_run_replays_deterministically() -> None:
@@ -1604,8 +1492,7 @@ def test_identical_fake_run_replays_deterministically() -> None:
         return (
             first,
             second,
-            tuple(event.to_dict() for event in harness.reducer.events),
-            harness.reducer.projection.to_dict(),
+            harness.reducer.to_dict(),
             tuple(turn.to_dict() for turn in harness.actor.turns),
         )
 
@@ -1618,25 +1505,6 @@ def test_minimal_runtime_rejects_scope_expansion_at_construction() -> None:
         match="pre-bound target",
     ):
         _harness(_action(), bind_target=False)
-
-    with pytest.raises(
-        MissionRuntimeConfigurationError,
-        match="one full-goal obligation",
-    ):
-        _harness(
-            _action(),
-            definition=_definition(
-                obligations=(
-                    ObligationSpec(
-                        id="first",
-                        desired_state=GOAL,
-                        required_capabilities=("visual.interact",),
-                        evidence_policy=EvidencePolicy(),
-                    ),
-                    ObligationSpec(id="second", desired_state="second"),
-                )
-            ),
-        )
 
     with pytest.raises(
         MissionRuntimeConfigurationError,

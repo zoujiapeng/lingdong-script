@@ -693,7 +693,6 @@ class AtomicDesktopAdapter:
                     "owner": "vnext_atomic_desktop_adapter",
                     "mission_id": envelope.mission_id,
                     "run_id": envelope.run_id,
-                    "obligation_id": envelope.obligation_id,
                     "decision_id": envelope.decision_id,
                     "frame_id": envelope.frame_id,
                     "frame_epoch": envelope.frame_epoch,
@@ -1940,7 +1939,6 @@ class AtomicDesktopAdapter:
                 "decision_id": envelope.decision_id,
                 "mission_id": envelope.mission_id,
                 "run_id": envelope.run_id,
-                "obligation_id": envelope.obligation_id,
                 "frame_id": envelope.frame_id,
                 "frame_epoch": envelope.frame_epoch,
                 "target_hwnd": (

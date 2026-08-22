@@ -42,9 +42,7 @@ from winpilot.vnext.json_contract import (
     MIN_SIGNED_64,
 )
 from winpilot.vnext.mission import (
-    MissionDefinition,
-    MissionReducer,
-    ObligationSpec,
+    MissionState,
     TargetBinding,
 )
 from winpilot.vnext.runtime import PointerDisposition, PointerLeaseState
@@ -144,38 +142,26 @@ def _mission_reducer(
     capability: str = "visual.interact",
     *,
     bound: bool = True,
-) -> MissionReducer:
-    definition = MissionDefinition(
+) -> MissionState:
+    del capability
+    target = (
+        TargetBinding(
+            binding_id="binding-current",
+            hwnd=9123,
+            process_id=44,
+            executable_identity="opaque-process",
+            title_snapshot="",
+            epoch=7,
+        )
+        if bound
+        else None
+    )
+    return MissionState(
         mission_id="mission-actor",
         run_id="run-actor",
         original_goal="Complete the visible task",
-        obligations=(
-            ObligationSpec(
-                id="obligation-current",
-                desired_state="the requested visible state exists",
-                acceptance_criteria=("the visible result is confirmed",),
-                required_capabilities=(capability,),
-            ),
-        ),
+        target_binding=target,
     )
-    reducer = MissionReducer(definition)
-    if bound:
-        reducer.apply(
-            reducer.event(
-                "target_bound",
-                payload={
-                    "target_binding": TargetBinding(
-                        binding_id="binding-current",
-                        hwnd=9123,
-                        process_id=44,
-                        executable_identity="opaque-process",
-                        title_snapshot="",
-                        epoch=7,
-                    ).to_dict(),
-                },
-            )
-        )
-    return reducer
 
 
 def _mission(
@@ -186,7 +172,7 @@ def _mission(
     return _mission_reducer(
         capability,
         bound=bound,
-    ).projection
+    )
 
 
 @dataclass(frozen=True)
@@ -219,7 +205,7 @@ def _runtime(
     pointer: PointerLeaseState | None = None,
 ):
     reducer = _mission_reducer()
-    mission = reducer.projection
+    mission = reducer
     state = _state(
         **({} if pointer is None else {"pointer": pointer})
     )
@@ -242,7 +228,7 @@ def _bind(**overrides) -> ActorDecisionEnvelope:
     reducer, mission, profile, state, catalog, projection = _runtime()
     del profile, catalog, projection
     values = {
-        "mission_reducer": reducer,
+        "mission": reducer,
         "proposal": _action(),
         "turn_index": state.turn_index,
         "frame_id": state.frame.frame_id,
@@ -717,7 +703,6 @@ def test_runtime_binder_derives_all_authority_and_round_trips() -> None:
     assert raw["format"] == ACTOR_ENVELOPE_FORMAT
     assert raw["mission_id"] == "mission-actor"
     assert raw["run_id"] == "run-actor"
-    assert raw["obligation_id"] == "obligation-current"
     assert raw["turn_index"] == 5
     assert raw["frame_id"] == 82
     assert raw["frame_scope"] == "target_window"
@@ -740,7 +725,7 @@ def test_full_desktop_binder_keeps_frame_facts_without_window_admission() -> Non
     )
 
     envelope = bind_actor_decision(
-        mission_reducer=reducer,
+        mission=reducer,
         proposal=_action(),
         turn_index=state.turn_index,
         frame_id=state.frame.frame_id,
@@ -763,7 +748,7 @@ def test_full_desktop_binder_keeps_frame_facts_without_window_admission() -> Non
 def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
     reducer, _mission, _unused, state, _unused2, _unused3 = _held_runtime()
     envelope = bind_actor_decision(
-        mission_reducer=reducer,
+        mission=reducer,
         proposal=_held_drag(),
         turn_index=state.turn_index,
         frame_id=state.frame.frame_id,
@@ -785,7 +770,7 @@ def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
 def test_held_envelope_accepts_mouse_keyboard_actions_and_tracks_lease() -> None:
     reducer, _mission, _unused, state, _unused2, _unused3 = _held_runtime()
     common = {
-        "mission_reducer": reducer,
+        "mission": reducer,
         "turn_index": state.turn_index,
         "frame_id": state.frame.frame_id,
         "frame_epoch": state.frame.epoch,
@@ -1117,7 +1102,7 @@ def test_envelope_structurally_pins_the_real_frame_authority() -> None:
     )
     reducer = _mission_reducer()
     envelope = bind_actor_decision(
-        mission_reducer=reducer,
+        mission=reducer,
         proposal=_action(),
         turn_index=5,
         frame_id=frame.frame_id,
