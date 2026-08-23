@@ -16,6 +16,66 @@ class InputSequenceStep:
     button: str | None = None
     key: str | None = None
     amount: int | None = None
+    text: str | None = None
+
+
+def _commands(value: str) -> list[str]:
+    """Split the timeline without treating quoted text as punctuation."""
+
+    commands: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char in {"'", '"'}:
+            quote = char
+        elif char in ";\r\n":
+            command = value[start:index].strip()
+            if command:
+                commands.append(command)
+            start = index + 1
+    if quote is not None:
+        raise ValueError("input sequence contains an unterminated quoted string")
+    command = value[start:].strip()
+    if command:
+        commands.append(command)
+    return commands
+
+
+def _literal_text(command: str) -> str | None:
+    match = re.fullmatch(r"(?:type|type_text)\s+(.+)", command, flags=re.I | re.S)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    if value[:1] not in {"'", '"'}:
+        return value
+    quote = value[0]
+    if len(value) < 2 or value[-1] != quote:
+        raise ValueError("type_text requires one quoted string")
+    body = value[1:-1]
+    text: list[str] = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == quote:
+            raise ValueError("type_text requires one quoted string")
+        if (
+            char == "\\"
+            and index + 1 < len(body)
+            and body[index + 1] in {"\\", quote}
+        ):
+            index += 1
+            char = body[index]
+        text.append(char)
+        index += 1
+    return "".join(text)
 
 
 def _fields(command: str) -> list[str]:
@@ -49,10 +109,14 @@ def parse_input_sequence(value: str) -> tuple[InputSequenceStep, ...]:
 
     if type(value) is not str or not value.strip():
         raise ValueError("input sequence must be a non-empty string")
-    commands = [part.strip() for part in re.split(r"[;\r\n]+", value) if part.strip()]
+    commands = _commands(value)
     steps: list[InputSequenceStep] = []
     for index, command in enumerate(commands, start=1):
         try:
+            text = _literal_text(command)
+            if text is not None:
+                steps.append(InputSequenceStep("type_text", text=text))
+                continue
             fields = _fields(command)
             if len(fields) > 1 and fields[0].casefold() in {"key", "mouse"}:
                 name = f"{fields[0]}_{fields[1]}".casefold()

@@ -261,6 +261,34 @@ def test_vnext_physical_attempt_maps_to_plain_wps(payload, expected):
     assert trace_mod._physical_attempt_to_wps(payload) == expected
 
 
+def test_redacted_literal_sequence_is_not_exported_as_a_false_replay():
+    attempt = {
+        "action": "input_sequence",
+        "physical_arguments": {
+            "kind": "input_sequence",
+            "events": [
+                {"kind": "type_text", "codepoint_count": 16},
+                {"kind": "key_down", "key": "enter"},
+            ],
+        },
+    }
+
+    assert trace_mod._physical_attempt_to_wps(attempt) is None
+
+    attempt["physical_arguments"]["events"][0]["text"] = "deepseek harness"
+    assert trace_mod._physical_attempt_to_wps(attempt) == {
+        "tool": "input_sequence",
+        "events": [
+            {
+                "kind": "type_text",
+                "codepoint_count": 16,
+                "text": "deepseek harness",
+            },
+            {"kind": "key_down", "key": "enter"},
+        ],
+    }
+
+
 def test_vnext_trace_steps_keeps_visible_activity_as_note():
     decision_id = "decision-readable"
     events = [

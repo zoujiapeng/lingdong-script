@@ -1361,6 +1361,8 @@ class AtomicDesktopAdapter:
                     ))
                 elif kind in {InputEventKind.KEY_DOWN, InputEventKind.KEY_UP}:
                     physical_events.append(PhysicalInputEvent(kind, key=step.key))
+                elif kind is InputEventKind.TYPE_TEXT:
+                    physical_events.append(PhysicalInputEvent(kind, text=step.text))
                 elif kind in {InputEventKind.WHEEL, InputEventKind.HWHEEL}:
                     physical_events.append(PhysicalInputEvent(kind, amount=step.amount))
                 else:
@@ -1506,6 +1508,7 @@ class AtomicDesktopAdapter:
                     event.kind in {
                         InputEventKind.KEY_DOWN,
                         InputEventKind.KEY_UP,
+                        InputEventKind.TYPE_TEXT,
                     }
                     for event in prepared.events
                 ),
@@ -1550,6 +1553,9 @@ class AtomicDesktopAdapter:
                     })
                 elif event.kind in {InputEventKind.KEY_DOWN, InputEventKind.KEY_UP}:
                     serialized["key"] = event.key
+                elif event.kind is InputEventKind.TYPE_TEXT:
+                    assert event.text is not None
+                    serialized["codepoint_count"] = len(event.text)
                 else:
                     serialized["duration_ms"] = event.duration_ms
                 events.append(serialized)

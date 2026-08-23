@@ -65,6 +65,7 @@ class InputEventKind(str, Enum):
     WHEEL = "wheel"
     HWHEEL = "hwheel"
     WAIT = "wait"
+    TYPE_TEXT = "type_text"
 
 
 MAX_POINTER_DURATION_MS = 30_000
@@ -92,6 +93,7 @@ class PhysicalInputEvent:
     button: MouseButton | None = None
     key: str | None = None
     amount: int | None = None
+    text: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, InputEventKind):
@@ -106,13 +108,19 @@ class PhysicalInputEvent:
                 raise ValueError("move event requires integer x and y")
             if self.kind is InputEventKind.MOVE_RELATIVE and self.x == self.y == 0:
                 raise ValueError("relative move requires a non-zero delta")
-            if any(value is not None for value in (self.button, self.key, self.amount)):
+            if any(
+                value is not None
+                for value in (self.button, self.key, self.amount, self.text)
+            ):
                 raise ValueError("move event has incompatible fields")
             return
         if self.kind in {InputEventKind.MOUSE_DOWN, InputEventKind.MOUSE_UP}:
             if not isinstance(self.button, MouseButton):
                 raise ValueError("mouse event requires MouseButton")
-            if any(value is not None for value in (self.x, self.y, self.key, self.amount)):
+            if any(
+                value is not None
+                for value in (self.x, self.y, self.key, self.amount, self.text)
+            ):
                 raise ValueError("mouse event has incompatible fields")
             if self.duration_ms:
                 raise ValueError("mouse down/up event cannot carry duration")
@@ -120,7 +128,10 @@ class PhysicalInputEvent:
         if self.kind in {InputEventKind.KEY_DOWN, InputEventKind.KEY_UP}:
             if type(self.key) is not str or self.key not in CANONICAL_HOTKEY_KEYS:
                 raise ValueError("key event requires one canonical key")
-            if any(value is not None for value in (self.x, self.y, self.button, self.amount)):
+            if any(
+                value is not None
+                for value in (self.x, self.y, self.button, self.amount, self.text)
+            ):
                 raise ValueError("key event has incompatible fields")
             if self.duration_ms:
                 raise ValueError("key down/up event cannot carry duration")
@@ -134,7 +145,10 @@ class PhysicalInputEvent:
                 raise ValueError(
                     "wheel event requires a non-zero native delta in -1200..1200"
                 )
-            if any(value is not None for value in (self.x, self.y, self.button, self.key)):
+            if any(
+                value is not None
+                for value in (self.x, self.y, self.button, self.key, self.text)
+            ):
                 raise ValueError("wheel event has incompatible fields")
             if self.duration_ms:
                 raise ValueError("wheel event cannot carry duration")
@@ -142,9 +156,23 @@ class PhysicalInputEvent:
         if self.kind is InputEventKind.WAIT:
             if any(
                 value is not None
-                for value in (self.x, self.y, self.button, self.key, self.amount)
+                for value in (
+                    self.x, self.y, self.button, self.key, self.amount, self.text,
+                )
             ):
                 raise ValueError("wait event has incompatible fields")
+            return
+        if self.kind is InputEventKind.TYPE_TEXT:
+            if (
+                type(self.text) is not str
+                or not 1 <= len(self.text) <= MAX_TYPE_TEXT_CODEPOINTS
+            ):
+                raise ValueError("type_text event requires bounded literal text")
+            if any(
+                value is not None
+                for value in (self.x, self.y, self.button, self.key, self.amount)
+            ) or self.duration_ms:
+                raise ValueError("type_text event has incompatible fields")
             return
         raise ValueError("unsupported physical input event")
 

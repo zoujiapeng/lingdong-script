@@ -940,6 +940,15 @@ def _physical_attempt_to_wps(
         events = arguments.get("events")
         if not isinstance(events, list) or not events:
             return None
+        if any(
+            isinstance(event, Mapping)
+            and event.get("kind") == "type_text"
+            and type(event.get("text")) is not str
+            for event in events
+        ):
+            # Literal text is intentionally absent from the public physical
+            # attempt.  Do not turn a redacted sequence into a false replay.
+            return None
         return {"tool": "input_sequence", "events": events}
     if action == "launch_application" and arguments.get("kind") == "launch_application":
         return {
@@ -3307,6 +3316,7 @@ class Replayer:
                     button=MouseButton(str(button)) if button else None,
                     key=raw.get("key"),
                     amount=raw.get("amount"),
+                    text=raw.get("text"),
                 ))
             receipt = executor.execute_admitted_physical_sequence(
                 tuple(events), hwnd=self.hwnd, stop_event=self.stop_event,

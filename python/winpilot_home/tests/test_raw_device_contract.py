@@ -78,6 +78,20 @@ def test_raw_device_requires_an_explicit_typed_backend() -> None:
         RawDeviceBackends(admitted_physical_hotkey=object())
 
 
+def test_literal_text_event_has_the_same_strict_bound_as_type_text() -> None:
+    event = PhysicalInputEvent(
+        InputEventKind.TYPE_TEXT,
+        text="deepseek harness",
+    )
+
+    assert event.text == "deepseek harness"
+    for invalid in (None, "", 7, "x" * (MAX_TYPE_TEXT_CODEPOINTS + 1)):
+        with pytest.raises(ValueError, match="bounded literal text"):
+            PhysicalInputEvent(InputEventKind.TYPE_TEXT, text=invalid)
+    with pytest.raises(ValueError, match="incompatible fields"):
+        PhysicalInputEvent(InputEventKind.TYPE_TEXT, text="x", key="enter")
+
+
 @pytest.mark.parametrize(
     ("context", "args", "error"),
     [
@@ -2807,6 +2821,136 @@ def test_atomic_sequence_interleaves_shift_and_right_drag_then_releases(
         ),
     ]
     assert executor.agent_holds_mouse_button("right") is False
+
+
+def test_atomic_sequence_types_literal_text_through_the_existing_backend(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    calls: list[tuple[str, int | None, object, bool]] = []
+    sent: list[tuple[str, int, int]] = []
+    stop = type("Stop", (), {"is_set": lambda self: False})()
+
+    def type_text(text, hwnd=None, *, stop_event=None, publish_action_fact=True):
+        calls.append((text, hwnd, stop_event, publish_action_fact))
+        return RawBackendResult(True, {
+            "requested_codepoints": len(text),
+            "completed_codepoints": len(text),
+        })
+
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_execute_physical_type_text", type_text)
+    monkeypatch.setattr(executor, "_vk_of", lambda key: {"enter": 0x0D}[key])
+    monkeypatch.setattr(
+        executor,
+        "_hardware_key_input",
+        lambda vk, key_up=False: ("key", vk, int(key_up)),
+    )
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.extend(inputs))
+
+    result = executor.execute_admitted_physical_sequence(
+        (
+            PhysicalInputEvent(
+                InputEventKind.TYPE_TEXT,
+                text="deepseek harness",
+            ),
+            PhysicalInputEvent(InputEventKind.KEY_DOWN, key="enter"),
+            PhysicalInputEvent(InputEventKind.KEY_UP, key="enter"),
+        ),
+        hwnd=73,
+        stop_event=stop,
+    )
+
+    assert result.input_completed is True
+    assert result.facts["completed_events"] == 3
+    assert calls == [("deepseek harness", 73, stop, False)]
+    assert sent == [("key", 0x0D, 0), ("key", 0x0D, 1)]
+
+
+def test_literal_text_does_not_release_a_modifier_held_by_the_sequence(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    sent: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_vk_of", lambda key: {"shift": 0x10}[key])
+    monkeypatch.setattr(
+        executor,
+        "_hardware_key_input",
+        lambda vk, key_up=False: ("key", vk, int(key_up)),
+    )
+    monkeypatch.setattr(executor, "_english_layout_switch", lambda _hwnd: (None, True))
+    monkeypatch.setattr(
+        executor,
+        "_vk_character_inputs",
+        lambda _char: (
+            [("key", 0x10, 0), ("key", 0x41, 0)],
+            [("key", 0x41, 1), ("key", 0x10, 1)],
+            (0x10, 0x41),
+        ),
+    )
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.extend(inputs))
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    with executor._held_mouse_lock:
+        executor._held_keyboard_vks.clear()
+
+    result = executor.execute_admitted_physical_sequence((
+        PhysicalInputEvent(InputEventKind.KEY_DOWN, key="shift"),
+        PhysicalInputEvent(InputEventKind.TYPE_TEXT, text="A"),
+        PhysicalInputEvent(InputEventKind.KEY_UP, key="shift"),
+    ))
+
+    assert result.input_completed is True
+    assert sent == [
+        ("key", 0x10, 0),
+        ("key", 0x41, 0),
+        ("key", 0x41, 1),
+        ("key", 0x10, 1),
+    ]
+    with executor._held_mouse_lock:
+        assert executor._held_keyboard_vks == set()
+
+
+def test_partial_text_sequence_is_unknown_and_releases_an_owned_key(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    sent: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_vk_of", lambda key: {"shift": 0x10}[key])
+    monkeypatch.setattr(
+        executor,
+        "_hardware_key_input",
+        lambda vk, key_up=False: ("key", vk, int(key_up)),
+    )
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.extend(inputs))
+    monkeypatch.setattr(
+        executor,
+        "_execute_physical_type_text",
+        lambda *_args, **_kwargs: RawBackendResult(None, {
+            "completed_codepoints": 4,
+            "error_kind": "text_input_outcome_unknown",
+            "release_cleanup_attempted": True,
+            "release_cleanup_completed": True,
+        }),
+    )
+    with executor._held_mouse_lock:
+        executor._held_keyboard_vks.clear()
+
+    result = executor.execute_admitted_physical_sequence((
+        PhysicalInputEvent(InputEventKind.KEY_DOWN, key="shift"),
+        PhysicalInputEvent(InputEventKind.TYPE_TEXT, text="deepseek harness"),
+    ))
+
+    assert result.input_completed is None
+    assert result.facts["completed_events"] == 1
+    assert result.facts["error_kind"] == "text_input_outcome_unknown"
+    assert sent == [("key", 0x10, 0), ("key", 0x10, 1)]
+    with executor._held_mouse_lock:
+        assert executor._held_keyboard_vks == set()
 
 
 def test_sequence_failure_releases_only_inputs_owned_by_that_sequence(

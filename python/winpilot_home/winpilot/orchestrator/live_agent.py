@@ -118,6 +118,7 @@ _CONTINUE_STATUSES = frozenset(
         RuntimeStatus.STALE_DISCARDED,
     }
 )
+_MAX_CONSECUTIVE_RECOVERY_FAILURES = 15
 _PRIVATE_RUNTIME_EVIDENCE = "private_runtime_evidence"
 
 
@@ -2869,6 +2870,7 @@ class _PreparedHandler:
                 )
                 session = builder(session_build)
                 rejection_feedback = ""
+                consecutive_recovery_failures = 0
                 for turn_index in range(self._budget.max_turns):
                     if not self._wait_if_paused(
                         pause_controller,
@@ -2923,20 +2925,6 @@ class _PreparedHandler:
                         detail = raw_detail or _public_runtime_detail(
                             result.status
                         )
-                    redecision_budget_available = bool(
-                        turn_index + 1 < self._budget.max_turns
-                        and session.model_calls
-                        < self._budget.max_model_calls
-                        and not bounded_stop.is_set()
-                    )
-                    invalid_proposal_recovery_available = (
-                        result.status is RuntimeStatus.INVALID_PROPOSAL
-                        and redecision_budget_available
-                    )
-                    actor_error_recovery_available = (
-                        result.status is RuntimeStatus.ACTOR_ERROR
-                        and redecision_budget_available
-                    )
                     if (
                         result.status is RuntimeStatus.UNAVAILABLE
                         and bool(
@@ -2961,6 +2949,30 @@ class _PreparedHandler:
                     ):
                         terminal_status = RuntimeStatus.STATE_REJECTED
                         detail = "vNext runtime time budget exhausted"
+                    if terminal_status in {
+                        RuntimeStatus.ACTION_RECORDED,
+                        RuntimeStatus.OBSERVATION_REQUESTED,
+                        RuntimeStatus.MISSION_VERIFIED,
+                    }:
+                        consecutive_recovery_failures = 0
+                    else:
+                        consecutive_recovery_failures += 1
+                    redecision_budget_available = bool(
+                        turn_index + 1 < self._budget.max_turns
+                        and session.model_calls
+                        < self._budget.max_model_calls
+                        and not bounded_stop.is_set()
+                        and consecutive_recovery_failures
+                        < _MAX_CONSECUTIVE_RECOVERY_FAILURES
+                    )
+                    invalid_proposal_recovery_available = (
+                        result.status is RuntimeStatus.INVALID_PROPOSAL
+                        and redecision_budget_available
+                    )
+                    actor_error_recovery_available = (
+                        result.status is RuntimeStatus.ACTOR_ERROR
+                        and redecision_budget_available
+                    )
                     try:
                         raw_turn_snapshot = session.turn_snapshot()
                         turn_snapshot = _public_turn_snapshot(
@@ -3038,6 +3050,11 @@ class _PreparedHandler:
                             :_MAX_REJECTION_FEEDBACK_CHARS
                         ]
                         continue
+                    if (
+                        consecutive_recovery_failures
+                        >= _MAX_CONSECUTIVE_RECOVERY_FAILURES
+                    ):
+                        break
                     if terminal_status not in _CONTINUE_STATUSES:
                         break
                 else:

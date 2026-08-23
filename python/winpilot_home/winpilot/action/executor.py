@@ -2099,12 +2099,30 @@ def _send_text_codepoint(char: str, *, via_vk: bool) -> tuple[bool | None, bool,
         ) for unit in _unicode_units(char)]
 
     for downs, ups, split_release, owned_vks, owned_units in batches:
+        if owned_vks:
+            with _held_mouse_lock:
+                already_held = set(_held_keyboard_vks)
+            if already_held:
+                held_modifiers = already_held & {_VK_SHIFT, _VK_CTRL, _VK_ALT}
+                downs = [
+                    item
+                    for vk, item in zip(owned_vks, downs)
+                    if vk not in held_modifiers
+                ]
+                ups = [
+                    item
+                    for vk, item in zip(reversed(owned_vks), ups)
+                    if vk not in already_held
+                ]
+                owned_vks = tuple(
+                    vk for vk in owned_vks if vk not in already_held
+                )
         with _held_mouse_lock:
             _held_keyboard_vks.update(owned_vks)
             _held_unicode_units.update(owned_units)
         try:
             _send_inputs(downs if split_release else [*downs, *ups])
-            if split_release:
+            if split_release and ups:
                 _send_inputs(ups)
         except Exception:
             if owned_vks:
@@ -2620,6 +2638,48 @@ def execute_admitted_physical_sequence(
                     _held_keyboard_vks.discard(vk)
                 if vk in pressed_keys:
                     pressed_keys.remove(vk)
+            elif event.kind is InputEventKind.TYPE_TEXT:
+                assert event.text is not None
+                try:
+                    typed = _execute_physical_type_text(
+                        event.text,
+                        hwnd=hwnd,
+                        stop_event=stop_event,
+                        publish_action_fact=False,
+                    )
+                except Exception:
+                    # A backend exception cannot prove that no codepoint was
+                    # injected.  Preserve the sequence's unknown semantics.
+                    physical_attempted = True
+                    raise
+                typed_facts = typed.facts
+                typed_codepoints = typed_facts.get("completed_codepoints", 0)
+                if type(typed_codepoints) is not int:
+                    typed_codepoints = 0
+                if typed.input_completed is True:
+                    physical_attempted = True
+                elif typed.input_completed is None or typed_codepoints:
+                    physical_attempted = True
+                if typed.input_completed is not True:
+                    outcome = None if physical_attempted else False
+                    error = "input sequence text input did not complete"
+                    error_kind = str(
+                        typed_facts.get("error_kind")
+                        or "text_input_unavailable"
+                    )
+                    text_cleanup_attempted = typed_facts.get(
+                        "release_cleanup_attempted"
+                    )
+                    text_cleanup_completed = typed_facts.get(
+                        "release_cleanup_completed"
+                    )
+                    cleanup_attempted = (
+                        cleanup_attempted or text_cleanup_attempted is True
+                    )
+                    cleanup_completed = (
+                        cleanup_completed and text_cleanup_completed is not False
+                    )
+                    break
             elif event.kind in {InputEventKind.WHEEL, InputEventKind.HWHEEL}:
                 assert event.amount is not None
                 physical_attempted = True
@@ -2662,10 +2722,14 @@ def execute_admitted_physical_sequence(
         error = "input sequence outcome unknown after physical input began"
         error_kind = "physical_sequence_outcome_unknown"
     finally:
-        cleanup_attempted, cleanup_completed = _release_sequence_inputs(
-            pressed_buttons,
-            pressed_keys,
+        sequence_cleanup_attempted, sequence_cleanup_completed = (
+            _release_sequence_inputs(
+                pressed_buttons,
+                pressed_keys,
+            )
         )
+        cleanup_attempted = cleanup_attempted or sequence_cleanup_attempted
+        cleanup_completed = cleanup_completed and sequence_cleanup_completed
         if cleanup_attempted and not cleanup_completed:
             outcome = None
             error = "input sequence release cleanup was incomplete"

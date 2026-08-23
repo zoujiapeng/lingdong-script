@@ -149,24 +149,22 @@ def test_launch_application_waits_for_and_activates_new_window(monkeypatch):
         {
             "candidate_count": 1,
             "candidates": [{"hwnd": 41, "visible": True}],
-            "activated_hwnd": 41,
-            "note": "initial launch window activated",
         },
         {
             "candidate_count": 1,
             "candidates": [{"hwnd": 42, "visible": True}],
             "activated_hwnd": 42,
-            "note": "settled launch window activated",
+            "note": "application became foreground",
         },
     ])
     sleeps = []
-    visible_only_calls = []
+    window_calls = []
     monkeypatch.setattr(apps.time, "sleep", sleeps.append)
     monkeypatch.setattr(apps, "resolve", lambda *_args, **_kwargs: [entry])
 
-    def activate(_entry, *, visible_only=False):
-        visible_only_calls.append(visible_only)
-        if len(visible_only_calls) == 1:
+    def activate(_entry, *, visible_only=False, activate=True):
+        window_calls.append((visible_only, activate))
+        if len(window_calls) == 1:
             return None
         return next(probes)
 
@@ -193,35 +191,75 @@ def test_launch_application_waits_for_and_activates_new_window(monkeypatch):
     assert result["activated_hwnd"] == 42
     assert result["via"] == "lnk"
     assert result["note"] == "launched application and activated its window"
-    assert sleeps[0] == 0.1
-    assert 9.0 < sleeps[1] <= apps._LAUNCH_WINDOW_TIMEOUT_S
-    assert visible_only_calls == [False, True, True, False]
+    assert sleeps == [0.1, 0.1]
+    assert window_calls == [
+        (False, True),
+        (True, False),
+        (True, False),
+        (True, False),
+    ]
 
 
-def test_cold_launch_settle_stays_inside_window_deadline(monkeypatch):
+def test_cold_launch_activates_once_after_window_deadline(monkeypatch):
     from winpilot.perception import apps
 
     entry = {"name": "Nebula Desk"}
     visible = {
         "candidate_count": 1,
         "candidates": [{"hwnd": 41, "visible": True}],
-        "activated_hwnd": 41,
     }
-    probes = iter([visible, visible])
-    monotonic = iter([100.0, 109.75, 109.75])
+    activated = {**visible, "activated_hwnd": 41}
+    monotonic = iter([100.0, 100.0, 110.0])
     sleeps = []
+    calls = []
     monkeypatch.setattr(apps.time, "monotonic", lambda: next(monotonic))
     monkeypatch.setattr(apps.time, "sleep", sleeps.append)
+
+    def find(_entry, *, visible_only=False, activate=True):
+        calls.append((visible_only, activate))
+        return activated if activate else visible
+
     monkeypatch.setattr(
         apps,
         "_activate_resolved_entry",
-        lambda _entry, *, visible_only=False: next(probes),
+        find,
     )
 
     result = apps._wait_for_resolved_window(entry)
 
     assert result["activated_hwnd"] == 41
-    assert sleeps == [0.25]
+    assert sleeps == [0.1]
+    assert calls == [(True, False), (False, True)]
+
+
+def test_cold_launch_returns_immediately_when_app_is_foreground(monkeypatch):
+    from winpilot.perception import apps
+
+    entry = {"name": "Nebula Desk"}
+    foreground = {
+        "candidate_count": 1,
+        "candidates": [{"hwnd": 41, "visible": True}],
+        "activated_hwnd": 41,
+    }
+    monotonic = iter([100.0, 100.0])
+    calls = []
+    monkeypatch.setattr(apps.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(
+        apps.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("an already-foreground app was delayed")
+        ),
+    )
+
+    def find(_entry, *, visible_only=False, activate=True):
+        calls.append((visible_only, activate))
+        return foreground
+
+    monkeypatch.setattr(apps, "_activate_resolved_entry", find)
+
+    assert apps._wait_for_resolved_window(entry) == foreground
+    assert calls == [(True, False)]
 
 
 def test_existing_window_prefers_titled_main_window_over_visible_surface(
@@ -284,6 +322,105 @@ def test_existing_window_prefers_titled_main_window_over_visible_surface(
     assert result["candidates"][0]["hwnd"] == minimized_main
     assert restored == [(minimized_main, fake_win32con.SW_RESTORE)]
     assert activated == [minimized_main]
+
+
+def test_existing_window_preserves_any_same_app_foreground_peer(monkeypatch):
+    from winpilot.perception import apps
+
+    ranked_first = 11
+    actual_foreground = 22
+    fake_win32con = SimpleNamespace(
+        GWL_EXSTYLE=-20,
+        GW_OWNER=4,
+        SW_RESTORE=9,
+        WS_EX_APPWINDOW=0x40000,
+        WS_EX_TOOLWINDOW=0x80,
+        WS_EX_TOPMOST=0x8,
+    )
+    fake_win32gui = SimpleNamespace(
+        GetWindowLong=lambda _hwnd, _index: 0,
+        GetWindow=lambda _hwnd, _command: 0,
+        GetWindowRect=lambda _hwnd: (0, 0, 1600, 900),
+        GetWindowText=lambda hwnd: "Main" if hwnd == ranked_first else "",
+        IsWindowVisible=lambda _hwnd: True,
+        IsIconic=lambda _hwnd: False,
+        ShowWindow=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("an existing foreground peer was restored")
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "win32con", fake_win32con)
+    monkeypatch.setitem(sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setattr(
+        apps,
+        "_foreground_root_hwnd",
+        lambda: actual_foreground,
+    )
+    monkeypatch.setattr(apps, "_root_hwnd", lambda hwnd: hwnd)
+    monkeypatch.setattr(
+        apps,
+        "_activate_window",
+        lambda _hwnd: (_ for _ in ()).throw(
+            AssertionError("an existing foreground peer was reactivated")
+        ),
+    )
+
+    result = apps._existing_window_outcome(
+        [ranked_first, actual_foreground],
+        [],
+    )
+
+    assert result["activated_hwnd"] == actual_foreground
+    assert result["candidates"][0]["hwnd"] == actual_foreground
+
+
+def test_cold_launch_probe_never_restores_or_activates_a_helper(monkeypatch):
+    from winpilot.perception import apps
+
+    black_surface = 11
+    fake_win32con = SimpleNamespace(
+        GWL_EXSTYLE=-20,
+        GW_OWNER=4,
+        SW_RESTORE=9,
+        WS_EX_APPWINDOW=0x40000,
+        WS_EX_TOOLWINDOW=0x80,
+        WS_EX_TOPMOST=0x8,
+    )
+    fake_win32gui = SimpleNamespace(
+        GetWindowLong=lambda _hwnd, _index: 0,
+        GetWindow=lambda _hwnd, _command: 0,
+        GetWindowRect=lambda _hwnd: (0, 0, 1600, 900),
+        GetWindowText=lambda _hwnd: "",
+        IsWindowVisible=lambda _hwnd: True,
+        IsIconic=lambda _hwnd: False,
+        ShowWindow=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("passive launch probe restored a window")
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "win32con", fake_win32con)
+    monkeypatch.setitem(sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setattr(
+        apps,
+        "_activate_window",
+        lambda _hwnd: (_ for _ in ()).throw(
+            AssertionError("passive launch probe activated a window")
+        ),
+    )
+
+    result = apps._existing_window_outcome(
+        [black_surface],
+        [],
+        activate=False,
+    )
+
+    assert result == {
+        "candidate_count": 1,
+        "candidates": [{
+            "hwnd": black_surface,
+            "title": "",
+            "visible": True,
+            "minimized": False,
+        }],
+    }
 
 
 def test_resolve_refreshes_a_cached_multisource_index_once_on_miss(monkeypatch):

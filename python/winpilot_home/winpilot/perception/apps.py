@@ -497,6 +497,7 @@ def _activate_existing_instance(
     exe_path: str,
     *,
     visible_only: bool = False,
+    activate: bool = True,
 ) -> dict | None:
     """Find windows owned by ``exe_path`` without guessing among peers.
 
@@ -529,6 +530,7 @@ def _activate_existing_instance(
     return _existing_window_outcome(
         found_visible,
         [] if visible_only else found_hidden,
+        activate=activate,
     )
 
 
@@ -610,7 +612,6 @@ def _activate_window(hwnd: int) -> int | None:
                 attached = False
         try:
             win32gui.SetForegroundWindow(hwnd)
-            win32gui.BringWindowToTop(hwnd)
         except Exception:
             pass
         if attached:
@@ -684,8 +685,10 @@ def _window_candidate_facts(hwnds: list[int]) -> list[dict]:
 def _existing_window_outcome(
     visible: list[int],
     hidden: list[int],
+    *,
+    activate: bool = True,
 ) -> dict | None:
-    """Activate one existing application window without exposing its helpers."""
+    """Rank one app's windows and optionally activate its best candidate."""
     import win32con
     import win32gui
 
@@ -743,22 +746,35 @@ def _existing_window_outcome(
     # windows, then titled ones, before visibility. Stable sorting preserves
     # EnumWindows z-order inside each mechanical class.
     candidates.sort(key=rank)
+    foreground_root = _foreground_root_hwnd()
+    foreground_hwnd = next(
+        (
+            hwnd
+            for hwnd in candidates
+            if foreground_root and _root_hwnd(hwnd) == foreground_root
+        ),
+        0,
+    )
+    if foreground_hwnd:
+        candidates.remove(foreground_hwnd)
+        candidates.insert(0, foreground_hwnd)
     candidate_count = len(candidates)
     result = {
         "candidate_count": candidate_count,
         "candidates": _window_candidate_facts(candidates),
     }
-    hwnd = candidates[0]
-    foreground_root = _foreground_root_hwnd()
-    if foreground_root and _root_hwnd(hwnd) == foreground_root:
+    if foreground_hwnd:
         result.update({
-            "activated_hwnd": int(hwnd),
+            "activated_hwnd": int(foreground_hwnd),
             "note": (
-                f"{candidate_count} existing window candidate(s); current "
-                "foreground is the primary one; no new instance started"
+                f"{candidate_count} existing window candidate(s); app is "
+                "already foreground; no new instance started"
             ),
         })
         return result
+    if not activate:
+        return result
+    hwnd = candidates[0]
 
     # A process such as QQ may own several hidden top-level compositor/helper
     # windows. Restoring all of them can expose an internal black render target
@@ -802,6 +818,7 @@ def _activate_existing_by_process_name(
     process_name: str,
     *,
     visible_only: bool = False,
+    activate: bool = True,
 ) -> dict | None:
     """Activate a window owned by a running process file name.
 
@@ -838,6 +855,7 @@ def _activate_existing_by_process_name(
     return _existing_window_outcome(
         found_visible,
         [] if visible_only else found_hidden,
+        activate=activate,
     )
 
 
@@ -910,6 +928,7 @@ def _activate_resolved_entry(
     entry: dict,
     *,
     visible_only: bool = False,
+    activate: bool = True,
 ) -> dict | None:
     """Find an existing instance by executable identity, never window title."""
     kind = str(entry.get("kind") or "")
@@ -924,6 +943,7 @@ def _activate_resolved_entry(
             existing = _activate_existing_instance(
                 candidate,
                 visible_only=visible_only,
+                activate=activate,
             )
             if existing is not None:
                 return existing
@@ -936,6 +956,7 @@ def _activate_resolved_entry(
         existing = _activate_existing_by_process_name(
             process_name,
             visible_only=visible_only,
+            activate=activate,
         )
         if existing is not None:
             return existing
@@ -953,17 +974,15 @@ def _wait_for_resolved_window(entry: dict) -> dict | None:
         # successful while leaving the user on a blank surface.  Existing-app
         # activation may still restore a tray-hidden window; a new launch waits
         # for a genuinely visible top-level window.
-        latest = _activate_resolved_entry(entry, visible_only=True)
+        latest = _activate_resolved_entry(
+            entry,
+            visible_only=True,
+            activate=False,
+        )
         if latest is not None and latest.get("activated_hwnd"):
-            remaining = max(0.0, deadline - time.monotonic())
-            if remaining:
-                # A launcher splash can yield a real window before the final
-                # app finishes taking focus. Spend only the launch budget we
-                # already promised, then activate its best application window.
-                time.sleep(remaining)
-            return _activate_resolved_entry(entry, visible_only=False) or latest
+            return latest
         time.sleep(0.1)
-    return latest
+    return _activate_resolved_entry(entry, visible_only=False) or latest
 
 
 def _existing_launch_result(

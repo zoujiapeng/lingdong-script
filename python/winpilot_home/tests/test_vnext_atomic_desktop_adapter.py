@@ -783,6 +783,56 @@ def test_exact_atomic_surface_completes_once_with_model_visible_post_frame(
         )
 
 
+def test_atomic_sequence_maps_click_literal_text_and_enter_in_one_raw_call() -> None:
+    from winpilot.utils.log import BUS
+
+    literal = "deepseek harness"
+    harness = _harness(
+        "input_sequence",
+        action_args={
+            "sequence": f'click 50,40; type_text "{literal}"; press enter',
+        },
+    )
+    bus_events: list[dict[str, Any]] = []
+    BUS.add_sink(bus_events.append)
+    try:
+        attempt = harness.run()
+    finally:
+        BUS.remove_sink(bus_events.append)
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert len(harness.raw.calls) == 1
+    events, hwnd, stop_event = harness.raw.calls[0][1]
+    assert hwnd is None
+    assert stop_event is None
+    assert events == (
+        PhysicalInputEvent(InputEventKind.MOVE, x=60, y=60),
+        PhysicalInputEvent(InputEventKind.MOUSE_DOWN, button=MouseButton.LEFT),
+        PhysicalInputEvent(InputEventKind.WAIT, duration_ms=35),
+        PhysicalInputEvent(InputEventKind.MOUSE_UP, button=MouseButton.LEFT),
+        PhysicalInputEvent(InputEventKind.TYPE_TEXT, text=literal),
+        PhysicalInputEvent(InputEventKind.KEY_DOWN, key="enter"),
+        PhysicalInputEvent(InputEventKind.WAIT, duration_ms=35),
+        PhysicalInputEvent(InputEventKind.KEY_UP, key="enter"),
+    )
+
+    dispatch = next(
+        event
+        for event in bus_events
+        if event.get("type") == "vnext_physical_attempt"
+    )
+    assert literal not in json.dumps(dispatch, ensure_ascii=False)
+    physical = dispatch["physical_arguments"]
+    assert physical["event_count"] == 8
+    assert physical["keyboard_event_count"] == 3
+    assert physical["events"][4] == {
+        "kind": "type_text",
+        "codepoint_count": len(literal),
+    }
+
+
 def test_prepare_rejection_preserves_the_mechanical_reason_for_the_actor() -> None:
     harness = _harness(
         "input_sequence",

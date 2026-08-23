@@ -105,6 +105,30 @@ def test_parser_accepts_observed_click_and_two_word_variants() -> None:
     assert steps[-1].duration_ms == 2
 
 
+def test_parser_keeps_quoted_literal_text_inside_the_atomic_timeline() -> None:
+    steps = parse_input_sequence(
+        'click 550,255; type_text "deepseek harness"; '
+        "type 'quiet; focus'; type_text \"line one\nline two\"; press enter"
+    )
+
+    text_steps = [step for step in steps if step.kind == "type_text"]
+    assert [step.text for step in text_steps] == [
+        "deepseek harness",
+        "quiet; focus",
+        "line one\nline two",
+    ]
+    assert [step.kind for step in steps[-3:]] == [
+        "key_down",
+        "wait",
+        "key_up",
+    ]
+
+
+def test_parser_rejects_unterminated_literal_text() -> None:
+    with pytest.raises(ValueError, match="unterminated quoted string"):
+        parse_input_sequence('type_text "deepseek harness')
+
+
 @pytest.mark.parametrize(
     "sequence",
     (

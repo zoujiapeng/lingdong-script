@@ -1544,6 +1544,75 @@ def test_handler_keeps_redeciding_after_invalid_proposals_until_budget() -> None
     assert turns[-1]["recovery"] is None
 
 
+def test_handler_stops_after_fifteen_consecutive_recovery_failures() -> None:
+    statuses = [
+        RuntimeStatus.INVALID_PROPOSAL,
+        RuntimeStatus.ACTOR_ERROR,
+        RuntimeStatus.STALE_DISCARDED,
+    ] * 5
+    session = _FakeSession(
+        [MissionRuntimeResult(status) for status in statuses]
+        + [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
+    )
+    events: list[dict[str, Any]] = []
+    manager = ArpRunManager()
+    execution = _prepare(
+        _graph(),
+        {},
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+    BUS.add_sink(events.append)
+    try:
+        snapshot = _run_prepared(manager, execution)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert snapshot["status"] == ArpRunStatus.FAILED.value
+    assert snapshot["error"] == "vNext Runtime returned stale_discarded"
+    assert session.calls == 15
+    turns = [
+        item for item in events if item["type"] == "live_agent_turn"
+    ]
+    assert len(turns) == 15
+    assert turns[-1]["status"] == "stale_discarded"
+
+
+@pytest.mark.parametrize(
+    "progress_status",
+    [
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.OBSERVATION_REQUESTED,
+    ],
+)
+def test_real_progress_resets_consecutive_recovery_failures(
+    progress_status: RuntimeStatus,
+) -> None:
+    failure = MissionRuntimeResult(RuntimeStatus.INVALID_PROPOSAL)
+    session = _FakeSession(
+        [failure] * 14
+        + [MissionRuntimeResult(progress_status)]
+        + [failure] * 14
+        + [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
+    )
+    manager = ArpRunManager()
+    execution = _prepare(
+        _graph(),
+        {},
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+
+    snapshot = _run_prepared(manager, execution)
+
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"]["status"] == "mission_verified"
+    assert snapshot["result"]["turns_used"] == 30
+    assert session.calls == 30
+
+
 def test_invalid_proposal_rejection_detail_is_fed_to_the_next_turn() -> None:
     session = _FakeSession(
         [
