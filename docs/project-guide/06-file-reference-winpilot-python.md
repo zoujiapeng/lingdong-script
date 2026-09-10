@@ -607,12 +607,13 @@ finally:
   `removed` 状态供设置面板显示。
 - [`integrations/connector_gateway.py`](../../python/winpilot_home/winpilot/integrations/connector_gateway.py) —
   **主链 connector owner**。`ConnectorGateway.available/search/call` 做显式配置、目录有界化、
-  opaque ref、descriptor fingerprint 二次核对、参数/结果边界、result hash/
-  receipt；依赖 `mcp_client`，由 `live_agent` 注入同一 `LiveVisualActor`。
+  直接 connector/tool 名称调用及参数/结果边界；空目录时仍可让 Actor 通过既有 shell/file
+  工具添加 `.mcp.json`。依赖 `mcp_client`，由 `live_agent` 注入同一 `LiveVisualActor`。
 - [`integrations/mcp_client.py`](../../python/winpilot_home/winpilot/integrations/mcp_client.py) —
-  **主链共享**。解析显式 MCP 配置，建立 stdio/streamable HTTP 连接，
-  `discover/call` 在同一物理连接内重检 tool descriptor/annotations；依赖 `config` 和 MCP SDK
-  （函数内 import），被 `ConnectorGateway` 调用（Legacy `agent.mcp_tools` 随旧线删除）。
+  **主链共享**。解析 Claude-compatible 显式 MCP 配置，按完整 server 配置维持长寿命
+  stdio/streamable HTTP session，支持 tools 分页、initialize instructions、Windows
+  `npx`/`uvx` 和断线后的下一操作重连；`call` 不重复 discover，也不自动重试远端动作。
+  依赖 `config` 和 MCP SDK（函数内 import），被 `ConnectorGateway` 调用。
 
 ### 4.8 `utils/`：跨路径机械工具（6）
 

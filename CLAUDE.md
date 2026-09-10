@@ -424,8 +424,8 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 | Owner | 负责 | 不负责 |
 | --- | --- | --- |
 | `LiveVisualActor` | 理解完整目标、看当前 JPEG、选择语义目标/精确坐标/下一动作、维护有界状态、决定结束 | 物理输入、应用脚本、隐藏策略 |
-| Thread/Turn Store | 机械绑定连续成功 Turn、并发与有界历史 | 摘要、长期 memory、理解任务 |
-| `ConnectorGateway` | 显式 MCP 目录、参数/结果边界、指纹与 receipt | connector 路由、应用规则、自动重试 |
+| Thread/Turn Store | 机械绑定用户可见 Turn（含未完成进度）、并发与有界历史 | 摘要、长期 memory、理解任务 |
+| `ConnectorGateway` | 显式 MCP 目录、参数/结果边界、按服务名/工具名直接调用 | connector 路由、应用规则、自动重试 |
 | `ProviderProtocolAdapter` | 显式 wire 翻译和原生签名/tool exchange 回放 | provider 猜测、重试、模型选择 |
 | `MissionRuntime` | 驱动模型→动作→新帧的顺序循环 | 编译任务步骤、纠正模型答案 |
 | `FrameAuthority` / workspace | 当前窗口、区域、frame id、epoch、JPEG | 解释画面 |

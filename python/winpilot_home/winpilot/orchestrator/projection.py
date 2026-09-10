@@ -15,7 +15,7 @@ from ..utils.log import BUS
 
 _TERMINAL = {
     "done", "failed", "fail", "error", "stopped", "canceled", "reply",
-    "interrupted",
+    "interrupted", "waiting_for_followup",
 }
 
 
@@ -98,6 +98,7 @@ class RunProjectionStore:
             "task_state": "",
             "task_state_revision": 0,
             "task_state_explicit": False,
+            "continuation": {},
             "timeline": [],
             "evidence": [],
             # Audit data is kept separately from the lightweight run list.
@@ -776,6 +777,11 @@ class RunProjectionStore:
                 )
                 run["error"] = str(event.get("error") or "")
                 run["failure_stage"] = str(event.get("failure_stage") or "")
+                run["continuation"] = copy.deepcopy(
+                    event.get("continuation")
+                    if isinstance(event.get("continuation"), dict)
+                    else {}
+                )
                 run["current_node_id"] = None
                 run["current_tool"] = None
                 run["finished_at"] = run["updated_at"]

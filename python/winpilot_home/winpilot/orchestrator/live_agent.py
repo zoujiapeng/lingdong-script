@@ -1595,6 +1595,15 @@ class _BudgetedActor:
         finally:
             self._counter.finish(VISUAL_ACTOR_MODEL_ROLE)
 
+    @property
+    def task_progress(self) -> Mapping[str, Any]:
+        value = getattr(self._role, "task_progress", {})
+        return value if isinstance(value, Mapping) else {}
+
+    @property
+    def latest_narration(self) -> str:
+        return str(getattr(self._role, "latest_narration", "") or "")
+
     def propose_flow_fragment(
         self,
         *args: Any,
@@ -1753,6 +1762,14 @@ class _LiveAgentSession:
             return str(self._runtime.latest_narration or "")
         except Exception:
             return ""
+
+    @property
+    def task_progress(self) -> dict[str, Any]:
+        try:
+            value = self._runtime.task_progress
+            return dict(value) if isinstance(value, Mapping) else {}
+        except Exception:
+            return {}
 
     def run_one_turn(
         self,
@@ -2477,6 +2494,57 @@ def _public_runtime_detail(status: RuntimeStatus) -> str:
     return f"vNext Runtime returned {status.value}"
 
 
+def _followup_reason(
+    terminal_status: RuntimeStatus,
+    detail: str,
+) -> str:
+    """Return a mechanical reason when another user turn can continue work."""
+
+    if terminal_status is RuntimeStatus.BLOCKED:
+        return "blocked"
+    if detail in {
+        "vNext runtime time budget exhausted",
+        "vNext model-call budget exhausted",
+        "vNext turn budget exhausted",
+        "Actor visual turn exhausted its model-call allowance",
+    }:
+        return "execution_budget_exhausted"
+    return ""
+
+
+def _followup_result(
+    *,
+    reason: str,
+    narration: str,
+    progress: Mapping[str, Any],
+    detail: str,
+) -> tuple[str, dict[str, Any]]:
+    scratchpad = str(progress.get("scratchpad") or "").strip()[:8192]
+    raw_remaining = progress.get("remaining_items")
+    remaining = [
+        str(item).strip()[:256]
+        for item in raw_remaining
+        if str(item).strip()
+    ][:32] if isinstance(raw_remaining, (list, tuple)) else []
+    lines: list[str] = []
+    for text in (narration.strip(), scratchpad):
+        if text and text not in lines:
+            lines.append(text)
+    if not lines:
+        lines.append(detail or "Work is not complete yet.")
+    if remaining:
+        lines.append("Remaining work: " + "; ".join(remaining))
+    lines.append("Progress is saved in this conversation; send another message to continue.")
+    continuation = {
+        "format": "agent-continuation/1",
+        "reason": reason,
+        "scratchpad": scratchpad,
+        "remaining_items": remaining,
+        "next_action": "continue_in_thread",
+    }
+    return "\n\n".join(lines)[:16_384], continuation
+
+
 def classify_live_agent_failure_stage(
     terminal_status: RuntimeStatus,
     detail: str,
@@ -2713,6 +2781,7 @@ class _PreparedHandler:
             )
         runtime_state.pop("user_result", None)
         runtime_state.pop("model_usage", None)
+        runtime_state.pop("continuation", None)
         mission_id = (
             "vnext-mission-"
             + hashlib.sha256(
@@ -3066,6 +3135,8 @@ class _PreparedHandler:
         finally:
             model_usage = actor_bundle.usage_total
             runtime_state["model_usage"] = model_usage
+            progress: dict[str, Any] = {}
+            progress_narration = ""
             raw_completion_snapshot: dict[str, Any] = {
                 "mission_id": mission_id,
                 "run_id": run_id,
@@ -3076,6 +3147,12 @@ class _PreparedHandler:
             if session is not None:
                 try:
                     model_calls = session.model_calls
+                    progress_narration = str(
+                        getattr(session, "latest_narration", "") or ""
+                    ).strip()
+                    raw_progress = getattr(session, "task_progress", {})
+                    if isinstance(raw_progress, Mapping):
+                        progress = dict(raw_progress)
                     observed = session.completion_snapshot()
                     raw_completion_snapshot = (
                         dict(observed)
@@ -3116,18 +3193,28 @@ class _PreparedHandler:
                 raw_completion_snapshot.get("mission_id") == mission_id
                 and raw_completion_snapshot.get("run_id") == run_id
             )
+            followup_reason = _followup_reason(terminal_status, detail)
             if (
                 terminal_status is RuntimeStatus.MISSION_VERIFIED
                 and completion_scope_matches
                 and type(completion_result) is str
             ):
                 runtime_state["user_result"] = completion_result
+            elif followup_reason:
+                user_result, continuation = _followup_result(
+                    reason=followup_reason,
+                    narration=progress_narration,
+                    progress=progress,
+                    detail=detail,
+                )
+                runtime_state["user_result"] = user_result
+                runtime_state["continuation"] = continuation
             else:
                 narration = (
-                    str(getattr(session, "latest_narration", "") or "")
+                    progress_narration
                     if session is not None
                     else ""
-                ).strip()
+                )
                 if narration:
                     runtime_state["user_result"] = narration[:16_384]
                     if (
@@ -3135,19 +3222,33 @@ class _PreparedHandler:
                         and not detail
                     ):
                         detail = narration[:500]
+            public_status = (
+                "waiting_for_followup"
+                if followup_reason
+                else terminal_status.value
+            )
+            failure_stage = (
+                ""
+                if followup_reason
+                else classify_live_agent_failure_stage(
+                    terminal_status,
+                    detail,
+                )
+            )
             output = {
                 **snapshot,
                 "runtime_version": _RUNTIME_VERSION,
                 "runtime_budget": budget_wire,
                 "no_legacy_fallback": True,
-                "status": terminal_status.value,
-                "failure_stage": classify_live_agent_failure_stage(
-                    terminal_status,
-                    detail,
-                ),
+                "status": public_status,
+                "failure_stage": failure_stage,
                 "turns_used": turns_used,
                 "model_calls": model_calls,
             }
+            if followup_reason:
+                output["continuation"] = deepcopy(
+                    runtime_state["continuation"]
+                )
             if model_usage.get("prompt_tokens") or model_usage.get(
                 "completion_tokens"
             ):
@@ -3159,8 +3260,8 @@ class _PreparedHandler:
                 runtime_version=_RUNTIME_VERSION,
                 runtime_budget=budget_wire,
                 no_legacy_fallback=True,
-                status=terminal_status.value,
-                failure_stage=output["failure_stage"],
+                status=public_status,
+                failure_stage=failure_stage,
                 turns_used=turns_used,
                 model_calls=model_calls,
                 model_usage=model_usage,
@@ -3169,6 +3270,12 @@ class _PreparedHandler:
                 target_hwnd=snapshot.get("target_hwnd"),
                 frame_id=snapshot.get("frame_id"),
                 frame_epoch=snapshot.get("frame_epoch"),
+            )
+        if followup_reason:
+            return NodeResult(
+                ok=True,
+                branch="reply",
+                output=output,
             )
         if terminal_status is not RuntimeStatus.MISSION_VERIFIED:
             return NodeResult(

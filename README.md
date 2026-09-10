@@ -27,7 +27,7 @@ Electron「智能代理」
        -> 直接回复，或调用 connector / shell / GUI
        -> 本地或 connector 结果回到同一个 Actor
        -> GUI 动作经唯一坐标映射和 RawDevice 执行，再提供新帧
-       -> reply_to_user 或 blocked
+       -> reply_to_user；若本轮未完成则保存进度并等待同一对话继续
 ```
 
 这是当前 GUI 产品验收的唯一语义入口。内部仍会托管 ARP job 和兼容数据，但它们不能获得第二份任务计划或执行策略。显式 MCP 只作为同一 Actor 的普通工具；旧 `/api/chat` 已删除，CLI、直接 API runner、FlowScript 或直接 MCP 调用仍不能替代客户端 E2E，也不能发展成另一套产品主循环。
@@ -36,9 +36,9 @@ Electron「智能代理」
 
 | 组件 | 职责 | 不应承担 |
 | --- | --- | --- |
-| `AgentThreadStore` | 保存有界成功 Turn 文本并绑定 run 终态 | 长期记忆、摘要模型、执行选择 |
+| `AgentThreadStore` | 保存有界用户可见 Turn（含未完成进度）并绑定 run 终态 | 长期记忆、摘要模型、执行选择 |
 | `LiveVisualActor` | 首次调用即看完整桌面 JPEG，直接回复或选择 connector、shell、GUI 工具 | 物理输入、应用脚本、第二角色委派 |
-| `ConnectorGateway` | 向同一 Actor 暴露显式配置的 MCP 目录和调用回执 | 服务专属 adapter、关键词路由、应用规则 |
+| `ConnectorGateway` | 向同一 Actor 暴露 MCP 目录和按名称直接调用 | 服务专属 adapter、关键词路由、应用规则 |
 | `MissionRuntime` | 驱动模型 → 工具 → 新帧循环，保存最小任务状态 | 关键词规划、修正目标、替模型重试策略 |
 | `FrameAuthority` | 原子发布帧、窗口、区域、epoch 和提交图片尺寸 | 解释画面或选择动作 |
 | `AtomicDesktopAdapter` | 将模型提交图片坐标映射一次并执行一笔输入 | 目标吸附、offset 补偿、应用特判 |
@@ -57,11 +57,13 @@ Electron「智能代理」
 - 按下后目标才出现时，跨权威帧保留一个有超时和强制清理的 held-pointer session；
 - 动作前帧新鲜度检查、物理完成回执、新权威帧，以及不阻塞输入的异步 trace；任务是否完成由同一个模型在真实屏幕上判断；
 - 同一模型首次调用就看到完整真实桌面；Electron 在 run 前后保持普通可见控制面；
-- 有界 Thread/Turn 上下文：只保留最近成功且有用户结果的原生文本交换，失败 Turn
-  不污染下一轮；
+- 有界 Thread/Turn 上下文：保留最近有用户可见结果的原生文本交换；blocked 或预算耗尽
+  会保存 scratchpad、剩余项和下一步提示为可继续回复，真正失败的 Turn 不污染下一轮；
 - 两个通用 connector 工具 `search_connector_tools` / `call_connector_tool`；它们只发现
-  显式配置的 MCP，并与 reply/GUI 同时交给同一个 Actor，不经过关键词 router 或副作用门禁；
-  调用前重新核对完整 descriptor，并服从同一 deadline/cancel；
+  显式配置的 MCP，并与 reply/GUI 同时交给同一个 Actor，不经过关键词 router 或副作用门禁。
+  Gateway 即使目录为空也保持可用，因此 Actor 可用既有 `write_file` / `run_shell` 创建
+  `.mcp.json`，由 `npx -y` 或 `uvx` 首次启动 stdio server，再在同一 run 搜索；调用只传
+  `connector + tool + arguments_json`，复用长连接且不自动重试含糊的远端动作；
 - run 级冷启动、session 引用、Memory Graph 和已验证 Skill replay；
 - 真实 Electron 客户端 E2E harness 与浏览器侧可信指针 oracle。
 
@@ -125,8 +127,9 @@ $env:WINPILOT_MCP_CONFIG = (Resolve-Path .mcp.example.json)
 npm run dev
 ```
 
-示例在 server 与 Agent 两侧都保持只读。其他 remote HTTP 或 stdio connector 复用同一
-`.mcp.json` 结构和两个通用工具，不应新增服务专属 adapter。
+示例在 server 与 Agent 两侧都保持只读。其他 remote HTTP 或 stdio connector 复用
+Claude-compatible `.mcp.json` 和两个通用工具；stdio server 可直接写 `command: "npx"` /
+`command: "uvx"`，无需新增安装器、插件管理器或服务专属 adapter。
 
 ## 验证
 

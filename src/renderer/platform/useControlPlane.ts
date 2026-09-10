@@ -123,6 +123,12 @@ export function useControlPlane() {
           }
           if (event.type === 'arp_run_done' && event.run_id) {
             const status = String(event.status || '').toLowerCase();
+            const continuation = (
+              event.continuation && typeof event.continuation === 'object'
+                ? event.continuation as Record<string, unknown>
+                : null
+            );
+            const resumable = continuation?.next_action === 'continue_in_thread';
             const failed = [
               'failed',
               'fail',
@@ -134,9 +140,11 @@ export function useControlPlane() {
               'blocked',
             ].includes(status);
             void window.electronAPI?.notifyTaskbar?.(
-              failed ? '任务失败' : status === 'reply' ? 'Agent 已回复' : '任务完成',
+              resumable
+                ? '进度已保存'
+                : failed ? '任务失败' : status === 'reply' ? 'Agent 已回复' : '任务完成',
               String(event.user_result || event.error || event.result || '').slice(0, 220),
-              failed ? 'error' : 'success',
+              resumable ? 'info' : failed ? 'error' : 'success',
               String(event.run_id),
             );
           }

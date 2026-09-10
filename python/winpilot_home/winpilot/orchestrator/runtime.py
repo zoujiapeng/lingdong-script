@@ -360,6 +360,9 @@ class ArpExecution:
                     str(self.runtime_state.get("user_result") or "")[:16_384]
                     or None
                 ),
+                "continuation": _json_preview(
+                    self.runtime_state.get("continuation") or {},
+                ),
                 "error": self.error,
                 "created_at": self.created_at,
                 "started_at": self.started_at,
@@ -436,6 +439,7 @@ class ArpExecution:
             "contract_evidence",
             "completion_contract",
             "stage_trace",
+            "continuation",
         )
         return {key: snapshot.get(key) for key in keys}
 
@@ -706,6 +710,15 @@ class ArpExecution:
             **(
                 {"user_result": user_result}
                 if user_result is not None
+                else {}
+            ),
+            **(
+                {
+                    "continuation": _json_preview(
+                        self.runtime_state.get("continuation") or {},
+                    )
+                }
+                if self.runtime_state.get("continuation")
                 else {}
             ),
         )

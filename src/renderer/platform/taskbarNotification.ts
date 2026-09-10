@@ -43,10 +43,13 @@ export function taskbarNotificationForTransition(
     return null;
   }
 
+  const resumable = currentRun.continuation?.next_action === 'continue_in_thread';
   const outcome = taskOutcomeForRun(currentRun);
   const success = outcome === 'success';
   const stopped = outcome === 'info';
-  const title = success ? '任务完成' : stopped ? '任务已停止' : '任务失败';
+  const title = resumable
+    ? '进度已保存'
+    : success ? '任务完成' : stopped ? '任务已停止' : '任务失败';
   const body = String(
     currentRun.error
       || taskResultText(currentRun.result)
@@ -56,7 +59,7 @@ export function taskbarNotificationForTransition(
   return {
     title,
     body,
-    kind: success ? 'success' : stopped ? 'info' : 'error',
+    kind: resumable ? 'info' : success ? 'success' : stopped ? 'info' : 'error',
     runId: current.runId,
   };
 }

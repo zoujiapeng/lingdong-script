@@ -148,13 +148,29 @@ class MissionRuntime:
     def latest_narration(self) -> str:
         """Return the Actor's most recent progress note in its own words."""
 
-        return self._latest_narration
+        actor_note = str(getattr(self._actor, "latest_narration", "") or "")
+        return (actor_note or self._latest_narration)[:_MAX_NARRATION_CHARS]
 
     @property
     def task_state(self) -> ActorTaskState:
         """Return the current in-memory, non-authoritative Actor notes."""
 
         return self._task_state
+
+    @property
+    def task_progress(self) -> dict[str, Any]:
+        """Return the latest validated Actor-owned resumable working state."""
+
+        value = getattr(self._actor, "task_progress", None)
+        if isinstance(value, Mapping):
+            try:
+                return ActorTaskState(
+                    scratchpad=value.get("scratchpad", ""),
+                    remaining_items=tuple(value.get("remaining_items", ())),
+                ).to_dict()
+            except ActorTaskStateError:
+                pass
+        return self._task_state.to_dict()
 
     @staticmethod
     def _stopped(stop_event: threading.Event | None) -> bool:

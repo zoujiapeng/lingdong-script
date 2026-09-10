@@ -26,6 +26,7 @@ from ..runtime.contracts import (
     APPROVED_DESKTOP_ACTIONS,
     APPROVED_RUNTIME_TOOLS,
     TASK_STATE_UPDATE_SCHEMA,
+    ActorTaskState,
     ActorTaskStateError,
     ActorTaskStateUpdate,
     ActorToolView,
@@ -190,6 +191,7 @@ _STANDALONE_LIST_WINDOWS_ALLOWANCE = 1
 # never disagree.
 _OPTIONAL_TOOL_DEFAULTS = {
     _DETACHED_SHELL_TOOL: {"name": "task"},
+    _CONNECTOR_SEARCH_TOOL: {"query": "", "connector": ""},
 }
 
 
@@ -1141,23 +1143,66 @@ def _tool_format_repair(
 
 
 def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
-    if gateway is None or getattr(gateway, "available", False) is not True:
+    if (
+        gateway is None
+        or not callable(getattr(gateway, "search", None))
+        or not callable(getattr(gateway, "call", None))
+    ):
         return []
+    search_schema = _actor_parameters_from_schema(
+        _CONNECTOR_SEARCH_TOOL,
+        {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Tool name or capability words. Terms are ranked "
+                        "independently; use an exact tool name when known."
+                    ),
+                },
+                "connector": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Configured MCP server name, or empty to search all."
+                    ),
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        requires_local_intent=False,
+    )
+    call_schema = _actor_parameters_from_schema(
+        _CONNECTOR_CALL_TOOL,
+        {
+            "type": "object",
+            "properties": {
+                "connector": {"type": "string", "minLength": 1},
+                "tool": {"type": "string", "minLength": 1},
+                "arguments_json": {"type": "string", "minLength": 2},
+            },
+            "required": ["connector", "tool", "arguments_json"],
+            "additionalProperties": False,
+        },
+        requires_local_intent=False,
+    )
     return [
         {
             "type": "function",
             "function": {
                 "name": _CONNECTOR_SEARCH_TOOL,
-                "description": "Find a connected-service tool.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "connector": {"type": "string"},
-                    },
-                    "required": ["query", "connector"],
-                    "additionalProperties": False,
-                },
+                "description": (
+                    "Search tools from MCP servers configured in .mcp.json. "
+                    "Use an empty query for a compact catalog. If no server "
+                    "is configured and the user asked to add one, use the "
+                    "generic shell/file tools to create .mcp.json, then "
+                    "search again; npx -y and uvx can install stdio servers "
+                    "on first launch."
+                ),
+                "parameters": search_schema,
                 "strict": True,
             },
         },
@@ -1165,16 +1210,11 @@ def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _CONNECTOR_CALL_TOOL,
-                "description": "Call a discovered tool.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "ref": {"type": "string", "minLength": 1},
-                        "arguments_json": {"type": "string", "minLength": 2},
-                    },
-                    "required": ["ref", "arguments_json"],
-                    "additionalProperties": False,
-                },
+                "description": (
+                    "Call one MCP tool by the connector and tool names "
+                    "returned by search_connector_tools."
+                ),
+                "parameters": call_schema,
                 "strict": True,
             },
         },
@@ -1602,11 +1642,14 @@ def _connector_exchange(
     if type(call_id) is not str or not call_id:
         raise LiveModelRoleError("Actor connector tool call requires an id")
     arguments = _decode_arguments(raw_arguments)
+    arguments.pop("task_state_update", None)
     expected = (
         {"query", "connector"}
         if name == _CONNECTOR_SEARCH_TOOL
-        else {"ref", "arguments_json"}
+        else {"connector", "tool", "arguments_json"}
     )
+    for field, default in _OPTIONAL_TOOL_DEFAULTS.get(name, {}).items():
+        arguments.setdefault(field, default)
     for field in set(arguments) - expected:
         arguments.pop(field, None)
     if not expected.issubset(arguments) or not all(
@@ -1646,7 +1689,7 @@ def _call_connector(
     timeout_s: float,
     stop_event: Any | None,
 ) -> dict[str, Any]:
-    if gateway is None or getattr(gateway, "available", False) is not True:
+    if gateway is None:
         return _actionable_tool_result(
             name,
             {"ok": False, "error": "connector gateway is unavailable"},
@@ -1661,7 +1704,8 @@ def _call_connector(
             )
         elif name == _CONNECTOR_CALL_TOOL:
             result = gateway.call(
-                ref=arguments["ref"],
+                connector=arguments["connector"],
+                tool=arguments["tool"],
                 arguments_json=arguments["arguments_json"],
                 timeout_s=timeout_s,
                 stop_event=stop_event,
@@ -2109,7 +2153,10 @@ class LiveVisualActor:
         self._on_activity = on_activity
         self._connector_gateway = (
             connector_gateway
-            if getattr(connector_gateway, "available", False) is True
+            if (
+                callable(getattr(connector_gateway, "search", None))
+                and callable(getattr(connector_gateway, "call", None))
+            )
             else None
         )
         self._shell_runner = (
@@ -2145,7 +2192,17 @@ class LiveVisualActor:
         # the current JPEG remains the only visual truth.
         self._completed_visual_history: list[dict[str, Any]] = []
         self._pending_task_state: ActorTaskStateUpdate | None = None
+        self._current_task_state = ActorTaskState.initial()
+        self._latest_progress_note = ""
         self._state_lock = threading.Lock()
+
+    @property
+    def task_progress(self) -> dict[str, Any]:
+        return self._current_task_state.to_dict()
+
+    @property
+    def latest_narration(self) -> str:
+        return self._latest_progress_note
 
     @property
     def standalone_model_call_allowance(self) -> int:
@@ -2186,6 +2243,7 @@ class LiveVisualActor:
         except Exception:
             return
         if narration:
+            self._latest_progress_note = narration[:4000]
             self._emit_activity(kind="message", message=narration)
 
     def _emit_activity(self, **activity: Any) -> None:
@@ -2218,6 +2276,10 @@ class LiveVisualActor:
                 if self._pending_task_state is None
                 else self._pending_task_state.merged_with(patch)
             )
+            try:
+                self._current_task_state = self._current_task_state.apply(patch)
+            except ActorTaskStateError:
+                pass
             visible_state = (
                 patch.scratchpad
                 if patch.scratchpad is not None
@@ -2326,6 +2388,7 @@ class LiveVisualActor:
             raise LiveModelRoleError(
                 "Visual Actor requires canonical ActorTurnInput"
             )
+        self._current_task_state = turn.task_state
         if not (
             turn.frame.image_available
             and turn.frame.authoritative

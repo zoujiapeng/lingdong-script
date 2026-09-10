@@ -157,9 +157,9 @@ Task Contract、TASK_STAGE、StageRuntime 和 InteractionStageEngine 已删除�
 
 | Owner | 唯一职责 | 明确禁止 |
 | --- | --- | --- |
-| `AgentThreadStore` | 保存并恢复有界成功 Turn 文本与已完成 run 投影 | 长期记忆、语义总结、执行选择 |
+| `AgentThreadStore` | 保存并恢复有界用户可见 Turn（含未完成进度）与已完成 run 投影 | 长期记忆、语义总结、执行选择 |
 | `LiveVisualActor` | 理解完整目标和当前 JPEG，选择一笔工具调用 | 物理输入、应用脚本、第二角色委派 |
-| `ConnectorGateway` | 有界发现显式 MCP，并把调用结果及 receipt 返回同一 Actor | 服务专属 adapter、任务路由、应用规则 |
+| `ConnectorGateway` | 有界发现显式 MCP，并按服务名/工具名把结果返回同一 Actor | 服务专属 adapter、任务路由、应用规则 |
 | `MissionRuntime` | 顺序驱动模型、动作、新帧与一个 goal 的最小状态 | 关键词规划、纠正模型答案 |
 | `FrameAuthority` / workspace | 发布当前 frame、epoch、hwnd、region、图像身份 | 理解画面或选择目标 |
 | `AtomicDesktopAdapter` / `RawDevice` | 唯一坐标映射、真实输入和机械回执 | snap、offset、语义成功 |
@@ -316,19 +316,28 @@ Legacy `wait(until_change=true, persistent=true)` 只负责在绑定窗口或 RO
 
 Memory Pack 只能作为提示。当前权威帧、确定性文件/进程证据和用户最新指令优先于记忆。
 
+如果同一个 Actor 明确返回 blocked，或 run 只因 turn/model/time 预算耗尽而停止，handler
+不会把已经完成的工作丢成失败：它把 Actor 当前 scratchpad、remaining items 和最新进度
+组成 `agent-continuation/1`，以顶层 `status=reply` 返回并写入同一 Thread。下一条“继续”
+仍通过正常 `/api/v2/goals/runs {goal, thread_id}`，模型直接看到该原生文本历史；没有第二个
+任务状态机、恢复 planner 或后台常驻 job。取消、transport 错误、机械拒绝等真实失败仍保持失败。
+
 ## MCP 边界
 
 MCP 是显式可选的 capability source。只有 `.mcp.json`、配置路径或
 `WINPILOT_MCP_CONFIG` 明确登记的 remote HTTP / stdio server 才会出现；没有配置时
-两个 connector 工具不进入模型目录，原生视觉主线仍可独立运行。这里没有应用名
-adapter、关键词 router 或 GUI 失败后的自动 fallback。
+搜索返回空目录，但两个 generic connector 工具仍在模型目录中。这样同一个 Actor 可通过
+既有 `write_file` / `run_shell` 创建或更新 `.mcp.json`，随后在同一 run 热读取新配置；
+`npx -y` / `uvx` 的按需下载行为由用户选择的普通命令自然提供，不另建安装器或 marketplace。
+这里没有应用名 adapter、关键词 router 或 GUI 失败后的自动 fallback。
 
-`search_connector_tools` 返回有界、标为不可信的 descriptor 和不透明 ref；
-`call_connector_tool` 只接受该 ref 与 JSON object 参数。Gateway 在调用前重新发现并核对
-descriptor/fingerprint，MCP client 又在同一
-物理连接的 `call_tool` 前核对一次 annotations 与完整 descriptor；整次发现/调用服从
-单一 deadline/cancel，且不会重试含糊的远端动作。结果有大小上限、hash 与 receipt，
-但仍是不可信数据，模型和外部 oracle 不能把远端 `ok` 当任务完成。
+`search_connector_tools` 做有界 OR/精确名称优先搜索，返回
+`connector + tool + description + input_schema + annotations`；`call_connector_tool` 直接接受
+`connector + tool + arguments_json`，不再生成 ref、fingerprint、hash 或 Gateway receipt，
+也不为一次调用重复三次目录发现。MCP client 按完整 server 配置复用长寿命 session，支持
+tools 分页与 initialize instructions；断开的 session 在下一次操作重连。每次调用仍服从
+deadline/cancel、参数/结果 JSON 大小上限，且不会自动重试含糊的远端动作。远端结果仍是
+模型输入，不能把其中的 `ok` 当作用户任务完成。
 
 仓库的 `.mcp.example.json` 指向 GitHub 官方 remote MCP，用
 `${env:GITHUB_PAT_TOKEN}` 注入 bearer token，并请求 server-side readonly 与有限
@@ -339,7 +348,7 @@ toolsets。仓库不分发 credential，也没有 GitHub OAuth 登录流程；�
 fixture 的精确 read 与 connector→Notepad 外部结果为 `2/2`；GitHub 官方 remote 也已
 完成真实 discover、`get_file_contents` 以及
 `get_commit(owner=zoujiapeng, repo=lingdong-script, sha=master, detail=none)` 物理调用，
-后者 receipt 为 `succeeded`，并返回 2026-07-31 该次调用时独立 `gh api` 核对的
+后者调用成功，并返回 2026-07-31 该次调用时独立 `gh api` 核对的
 `fba5d7bb6dcb13c46e93dbc29bc3cef44e560622`。首个中文 Electron run 的
 before-submit 已把目标损坏为大量 `?`，属于测试输入干扰，不能归因模型。随后 ASCII
 run `arp-20260731-220327-1ed4e4` 完整提交目标，官方 remote 有真实会话/POST；五次模型
@@ -347,8 +356,7 @@ run `arp-20260731-220327-1ed4e4` 完整提交目标，官方 remote 有真实会
 零 GUI 动作。这个干净任务失败的首个分歧是模型工具选择/停止，不是 connector
 transport；Runtime 不应增加 GitHub 专属修正。
 
-显式 MCP 配置现在拥有最高优先级，120 秒目录缓存也按完整 server 配置 fingerprint
-隔离；相关聚焦测试 `21 passed`。这两项不再是未修 P1。
+显式 MCP 配置现在拥有最高优先级，120 秒目录缓存与长连接都按完整 server 配置隔离。
 
 ## 缓存与用量
 

@@ -55,6 +55,27 @@ describe('taskbarNotificationForTransition', () => {
     });
   });
 
+  it('treats a follow-up wait as a resumable terminal state', () => {
+    expect(taskbarNotificationForTransition(
+      { runId: 'run-1', status: 'running' },
+      run('waiting_for_followup', {
+        result: '已完成数据导入，下一轮继续汇总。',
+        continuation: {
+          format: 'agent-continuation/1',
+          reason: 'blocked',
+          scratchpad: '数据已导入',
+          remaining_items: ['生成汇总'],
+          next_action: 'continue_in_thread',
+        },
+      }),
+    )).toEqual({
+      title: '进度已保存',
+      body: '已完成数据导入，下一轮继续汇总。',
+      kind: 'info',
+      runId: 'run-1',
+    });
+  });
+
   it('notifies a new terminal run that completed between overview polls', () => {
     expect(taskbarNotificationForTransition(
       { runId: 'old-run', status: 'done' },
@@ -81,6 +102,27 @@ describe('taskbarNotificationForTransition', () => {
       title: '任务失败',
       body: result,
       kind: 'error',
+      runId: 'run-1',
+    });
+  });
+
+  it('reports a resumable reply as saved progress instead of completion', () => {
+    expect(taskbarNotificationForTransition(
+      { runId: 'run-1', status: 'running' },
+      run('reply', {
+        result: '已导入源数据，继续后将生成汇总表。',
+        continuation: {
+          format: 'agent-continuation/1',
+          reason: 'execution_budget_exhausted',
+          scratchpad: '已导入源数据',
+          remaining_items: ['生成汇总表'],
+          next_action: 'continue_in_thread',
+        },
+      }),
+    )).toEqual({
+      title: '进度已保存',
+      body: '已导入源数据，继续后将生成汇总表。',
+      kind: 'info',
       runId: 'run-1',
     });
   });

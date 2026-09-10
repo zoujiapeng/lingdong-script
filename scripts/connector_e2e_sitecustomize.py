@@ -1,8 +1,8 @@
 """Test-only connector trace sidecar loaded as ``sitecustomize``.
 
 The Electron E2E runner puts a temporary copy of this file on ``PYTHONPATH``.
-It activates only for the managed ``serve.py`` process and records private
-raw -> canonical -> receipt evidence without changing model requests, tool
+It activates only for the managed ``serve.py`` process and records the direct
+model -> gateway connector call without changing model requests, tool
 arguments, return values, retries, or Runtime control flow.
 """
 from __future__ import annotations
@@ -182,13 +182,21 @@ def _install() -> None:
                 probe_context.canonical_error_kind = type(exc).__name__
             raise
         if getattr(probe_context, "capture_gateway_arguments", False):
-            probe_context.canonical_arguments = parsed[0]
-            probe_context.canonical_arguments_sha256 = parsed[1]
+            probe_context.canonical_arguments = parsed
+            probe_context.canonical_arguments_sha256 = _sha256(
+                json.dumps(
+                    parsed,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         return parsed
 
     def call_connector(
         self: Any,
-        ref: str,
+        connector: str,
+        tool: str,
         arguments_json: str,
         *args: Any,
         **kwargs: Any,
@@ -203,20 +211,27 @@ def _install() -> None:
         result: Any = None
         call_error_kind = ""
         try:
-            result = original_call(self, ref, arguments_json, *args, **kwargs)
+            result = original_call(
+                self,
+                connector,
+                tool,
+                arguments_json,
+                *args,
+                **kwargs,
+            )
             return result
         except Exception as exc:
             call_error_kind = type(exc).__name__
             raise
         finally:
-            receipt = result.get("receipt") if isinstance(result, dict) else None
             _append(
                 {
                     "phase": "canonical_gateway_call",
                     "run_id": str(
                         getattr(self, "_connector_e2e_run_id", "") or ""
                     ),
-                    "ref_sha256": _sha256(str(ref)),
+                    "connector": str(connector),
+                    "tool": str(tool),
                     "arguments_json": arguments_json,
                     "canonical_arguments": getattr(
                         probe_context, "canonical_arguments", None
@@ -236,7 +251,9 @@ def _install() -> None:
                         or ""
                     ),
                     "call_error_kind": call_error_kind,
-                    "receipt": receipt,
+                    "result_ok": bool(
+                        isinstance(result, dict) and result.get("ok") is True
+                    ),
                 }
             )
             probe_context.capture_gateway_arguments = previous_capture

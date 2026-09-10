@@ -291,7 +291,7 @@ def read_connector_probe_evidence(
     *,
     run_id: str,
 ) -> dict[str, Any]:
-    """Project private raw/canonical/receipt probe records into hashes only."""
+    """Project the private direct model-to-gateway connector call."""
 
     events, errors = _read_connector_probe_events(fixture)
     raw_calls = [
@@ -336,21 +336,21 @@ def read_connector_probe_evidence(
             continue
         if (
             isinstance(outer, dict)
-            and set(outer) == {"ref", "arguments_json"}
+            and set(outer) == {"connector", "tool", "arguments_json"}
+            and outer.get("connector") == fixture.server_name
+            and outer.get("tool") == "read_value"
             and decoded == {"key": FIXTURE_KEY}
             and _sha256_text(canonical_wire) == expected_hash
         ):
             matching_raw += 1
     matching_gateway = 0
     for event in gateway_calls:
-        receipt = event.get("receipt")
         if (
-            event.get("canonical_arguments") == {"key": FIXTURE_KEY}
+            event.get("connector") == fixture.server_name
+            and event.get("tool") == "read_value"
+            and event.get("canonical_arguments") == {"key": FIXTURE_KEY}
             and event.get("canonical_arguments_sha256") == expected_hash
-            and isinstance(receipt, dict)
-            and receipt.get("format") == "connector-receipt/1"
-            and receipt.get("arguments_sha256") == expected_hash
-            and receipt.get("status") == "succeeded"
+            and event.get("result_ok") is True
         ):
             matching_gateway += 1
     passed = bool(
@@ -361,7 +361,7 @@ def read_connector_probe_evidence(
         and matching_gateway == len(gateway_calls)
     )
     return {
-        "source": "test_only_raw_canonical_receipt_probe",
+        "source": "test_only_direct_connector_call_probe",
         "passed": passed,
         "run_id": run_id,
         "raw_call_count": len(raw_calls),
@@ -2795,7 +2795,7 @@ def run_history_depth_ab_e2e(
             "comparison": comparison,
             "connector_argument_chain": {
                 "raw_model_arguments_private_probe": True,
-                "canonical_gateway_receipt_private_probe": True,
+                "canonical_gateway_call_private_probe": True,
                 "physical_mcp_arguments_hashed": True,
                 "runtime_telemetry_changed": False,
             },

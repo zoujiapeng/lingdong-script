@@ -182,6 +182,53 @@ def test_thread_continuation_checkpoint_round_trips_exact_history(tmp_path):
         BUS.remove_sink(restored.on_event)
 
 
+def test_saved_partial_progress_is_available_to_the_next_thread_turn(tmp_path):
+    from winpilot.orchestrator.agent_threads import AgentThreadStore
+    from winpilot.utils.log import BUS
+
+    checkpoint = tmp_path / "thread-continuation.json"
+    original = AgentThreadStore(checkpoint_path=checkpoint)
+    restored = AgentThreadStore(checkpoint_path=checkpoint)
+    progress = (
+        "Created RawData with 400 rows.\n\n"
+        "Remaining work: Create formulas; Verify workbook.\n\n"
+        "Progress is saved in this conversation; send another message to continue."
+    )
+    try:
+        thread_id, turn_id, _ = original.begin_turn("Build the quarterly workbook.")
+        original.bind_run(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            run_id="run-partial",
+        )
+        original.on_event({
+            "type": "arp_run_done",
+            "run_id": "run-partial",
+            "status": "reply",
+            "user_result": progress,
+            "continuation": {
+                "format": "agent-continuation/1",
+                "reason": "execution_budget_exhausted",
+                "next_action": "continue_in_thread",
+            },
+        })
+
+        assert restored.load_checkpoint() == 1
+        same_thread, _, history = restored.begin_turn(
+            "Continue from the saved progress.",
+            thread_id=thread_id,
+        )
+
+        assert same_thread == thread_id
+        assert history == [
+            {"role": "user", "content": "Build the quarterly workbook."},
+            {"role": "assistant", "content": progress},
+        ]
+    finally:
+        BUS.remove_sink(original.on_event)
+        BUS.remove_sink(restored.on_event)
+
+
 def test_thread_checkpoint_keeps_only_the_bounded_model_history(tmp_path):
     from winpilot.orchestrator.agent_threads import AgentThreadStore
     from winpilot.utils.log import BUS

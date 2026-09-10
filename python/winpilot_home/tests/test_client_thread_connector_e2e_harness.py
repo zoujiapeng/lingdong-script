@@ -434,7 +434,7 @@ def test_usage_projection_reports_cache_tokens_without_model_content(
     assert "private" not in json.dumps(evidence)
 
 
-def test_connector_probe_projects_raw_canonical_receipt_chain_without_content(
+def test_connector_probe_projects_the_direct_call_without_content(
     tmp_path,
 ):
     harness = _load_harness()
@@ -446,7 +446,11 @@ def test_connector_probe_projects_raw_canonical_receipt_chain_without_content(
         separators=(",", ":"),
     )
     outer = json.dumps(
-        {"ref": "connector-tool/1:opaque", "arguments_json": inner},
+        {
+            "connector": fixture.server_name,
+            "tool": "read_value",
+            "arguments_json": inner,
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -464,13 +468,11 @@ def test_connector_probe_projects_raw_canonical_receipt_chain_without_content(
             "format": "connector-e2e-probe/1",
             "phase": "canonical_gateway_call",
             "run_id": run_id,
+            "connector": fixture.server_name,
+            "tool": "read_value",
             "canonical_arguments": {"key": harness.FIXTURE_KEY},
             "canonical_arguments_sha256": arguments_sha256,
-            "receipt": {
-                "format": "connector-receipt/1",
-                "arguments_sha256": arguments_sha256,
-                "status": "succeeded",
-            },
+            "result_ok": True,
         },
     ]
     fixture.probe_path.write_text(

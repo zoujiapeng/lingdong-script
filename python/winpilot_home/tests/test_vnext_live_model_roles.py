@@ -340,9 +340,8 @@ class _RecordingConnectorGateway:
             "ok": True,
             "tools": [
                 {
-                    "ref": "connector-ref",
                     "connector": "github",
-                    "name": "get_issue",
+                    "tool": "get_issue",
                 }
             ],
         }
@@ -350,14 +349,16 @@ class _RecordingConnectorGateway:
     def call(
         self,
         *,
-        ref: str,
+        connector: str,
+        tool: str,
         arguments_json: str,
         timeout_s: float,
         stop_event: Any | None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
-                "ref": ref,
+                "connector": connector,
+                "tool": tool,
                 "arguments_json": arguments_json,
             }
         )
@@ -684,8 +685,13 @@ def test_visual_actor_can_use_a_connector_before_one_gui_action() -> None:
             _connector_response(
                 "call_connector_tool",
                 {
-                    "ref": "connector-ref",
+                    "connector": "github",
+                    "tool": "get_issue",
                     "arguments_json": '{"number":7}',
+                    "task_state_update": {
+                        "scratchpad": "Loaded issue 7 from GitHub.",
+                        "remaining_items": ["Enter the issue value"],
+                    },
                 },
                 call_id="visual-call",
             ),
@@ -725,7 +731,15 @@ def test_visual_actor_can_use_a_connector_before_one_gui_action() -> None:
         "assistant",
         "tool",
     ]
-    assert gateway.calls[0]["ref"] == "connector-ref"
+    assert gateway.calls[0] == {
+        "connector": "github",
+        "tool": "get_issue",
+        "arguments_json": '{"number":7}',
+    }
+    assert actor.task_progress == {
+        "scratchpad": "Loaded issue 7 from GitHub.",
+        "remaining_items": ["Enter the issue value"],
+    }
 
 
 def test_press_key_model_tool_maps_to_existing_hotkey_runtime_action() -> None:
@@ -2301,7 +2315,7 @@ def test_visual_turn_keeps_repeated_window_text_body() -> None:
     assert tool_results[2]["text"] == "changed text"
 
 
-def test_next_visual_turn_keeps_gui_action_but_drops_local_narration() -> None:
+def test_next_visual_turn_keeps_thread_context_and_gui_action() -> None:
     shell_call = _tool_response(
         name="run_shell",
         arguments={
@@ -2337,6 +2351,19 @@ def test_next_visual_turn_keeps_gui_action_but_drops_local_narration() -> None:
         model="vision-model",
         runtime=ModelCallRuntime(),
         shell_runner=runner,
+        history=(
+            {
+                "role": "user",
+                "content": "Create the three files in the requested folder.",
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    r"Created C:\delivery\project.xlsx, "
+                    r"C:\delivery\report.docx, and C:\delivery\briefing.pptx."
+                ),
+            },
+        ),
     )
     turn = _actor_turn()
 
@@ -2365,7 +2392,22 @@ def test_next_visual_turn_keeps_gui_action_but_drops_local_narration() -> None:
     messages = clients[0].requests[-1]["messages"]
     encoded = json.dumps(messages, ensure_ascii=False)
     assert [message["role"] for message in messages] == [
-        "system", "user", "user", "assistant", "tool", "assistant", "tool", "user",
+        "system", "user", "assistant", "user", "user", "assistant", "tool",
+        "assistant", "tool", "user",
+    ]
+    assert messages[1:4] == [
+        {
+            "role": "user",
+            "content": "Create the three files in the requested folder.",
+        },
+        {
+            "role": "assistant",
+            "content": (
+                r"Created C:\delivery\project.xlsx, "
+                r"C:\delivery\report.docx, and C:\delivery\briefing.pptx."
+            ),
+        },
+        {"role": "user", "content": turn.mission.original_goal},
     ]
     assert "unique-command" in encoded
     assert "UNIQUE-DIAGNOSTIC-BODY" in encoded
@@ -2374,11 +2416,11 @@ def test_next_visual_turn_keeps_gui_action_but_drops_local_narration() -> None:
     assert "private old reasoning" not in encoded
     assert "final-gui-0" in encoded
     assert json.loads(
-        messages[5]["tool_calls"][0]["function"]["arguments"]
+        messages[7]["tool_calls"][0]["function"]["arguments"]
     ) == {"text": "hello"}
     assert _JPEG_B64 in encoded
     assert encoded.count(_JPEG_B64) == 1
-    current_context = json.loads(messages[7]["content"][1]["text"])
+    current_context = json.loads(messages[-1]["content"][1]["text"])
     assert current_context["mission"]["original_goal"] == (
         turn.mission.original_goal
     )

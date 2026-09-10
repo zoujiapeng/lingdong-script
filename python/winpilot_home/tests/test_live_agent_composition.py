@@ -351,6 +351,7 @@ class _FakeSession:
     results: list[MissionRuntimeResult]
     model_calls: int = 0
     latest_narration: str = ""
+    task_progress: dict[str, Any] = field(default_factory=dict)
     closed: bool = False
     calls: int = 0
     mission_id: str = ""
@@ -1788,7 +1789,7 @@ def test_handler_keeps_redeciding_after_actor_errors_until_budget() -> None:
     assert turns[-1]["recovery"] is None
 
 
-def test_handler_stops_on_blocked_without_retry_and_closes() -> None:
+def test_handler_saves_progress_on_blocked_without_retry_and_closes() -> None:
     session = _FakeSession(
         [
             MissionRuntimeResult(
@@ -1796,7 +1797,12 @@ def test_handler_stops_on_blocked_without_retry_and_closes() -> None:
                 detail="the requested state could not be established",
             ),
             MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
-        ]
+        ],
+        latest_narration="I finished the source-data import.",
+        task_progress={
+            "scratchpad": "Imported and normalized the source rows.",
+            "remaining_items": ["Build the summary sheet", "Add charts"],
+        },
     )
     manager = ArpRunManager()
     execution = _prepare(
@@ -1809,13 +1815,58 @@ def test_handler_stops_on_blocked_without_retry_and_closes() -> None:
 
     snapshot = _run_prepared(manager, execution)
 
-    assert snapshot["status"] == ArpRunStatus.FAILED.value
+    assert snapshot["status"] == ArpRunStatus.REPLY.value
+    assert snapshot["result"]["status"] == "waiting_for_followup"
+    assert snapshot["result"]["failure_stage"] == ""
+    assert snapshot["continuation"] == {
+        "format": "agent-continuation/1",
+        "reason": "blocked",
+        "scratchpad": "Imported and normalized the source rows.",
+        "remaining_items": ["Build the summary sheet", "Add charts"],
+        "next_action": "continue_in_thread",
+    }
+    user_result = execution.runtime_state["user_result"]
+    assert "I finished the source-data import." in user_result
+    assert "Remaining work: Build the summary sheet; Add charts" in user_result
+    assert "send another message to continue" in user_result
     assert session.calls == 1
     assert session.closed is True
-    # The real per-turn failure reason is preserved instead of being replaced
-    # by a generic status string.
-    assert snapshot["error"] == "the requested state could not be established"
+    assert snapshot["error"] == ""
     assert snapshot["evidence"] == []
+
+
+def test_handler_saves_progress_when_model_call_budget_is_exhausted() -> None:
+    session = _FakeSession(
+        [MissionRuntimeResult(RuntimeStatus.ACTION_RECORDED)],
+        latest_narration="The first workbook phase is complete.",
+        task_progress={
+            "scratchpad": "Created RawData with 400 rows.",
+            "remaining_items": ["Create formulas", "Verify workbook"],
+        },
+    )
+    config = _config()
+    config["vnext"]["max_model_calls"] = 1
+    manager = ArpRunManager()
+    execution = _prepare(
+        _graph(),
+        {},
+        config,
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+
+    snapshot = _run_prepared(manager, execution)
+
+    assert snapshot["status"] == ArpRunStatus.REPLY.value
+    assert snapshot["result"]["status"] == "waiting_for_followup"
+    assert snapshot["continuation"]["reason"] == "execution_budget_exhausted"
+    assert snapshot["continuation"]["remaining_items"] == [
+        "Create formulas",
+        "Verify workbook",
+    ]
+    assert "Created RawData with 400 rows." in execution.runtime_state["user_result"]
+    assert session.calls == 1
+    assert session.closed is True
 
 
 class _SnapshotErrorSession(_FakeSession):

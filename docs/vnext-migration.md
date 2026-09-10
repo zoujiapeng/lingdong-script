@@ -41,8 +41,9 @@ connector、shell、GUI；Electron 不再参与桌面交接。
 
 前端执行策略选择器，以及随后的 request、admission、runtime 与 trace policy 字段已经删除。
 
-用户口头强调 GUI 时，只提交原始 `goal`。显式配置 MCP 后，同一个 Actor 当前会同时
-看到两个通用 connector 工具与 reply/GUI 决策；没有配置时工具不出现。它们不读取
+用户口头强调 GUI 时，只提交原始 `goal`。同一个 Actor 当前始终同时看到两个通用
+connector 工具与 reply/GUI 决策；没有配置时搜索返回空目录，使 Actor 可用既有 shell/file
+工具创建 `.mcp.json` 后在同一 run 重试发现。它们不读取
 任务关键词，也不按副作用标签拒绝模型选择。第一次视觉调用就把通用
 `run_shell`、`run_detached`、`write_file` 与 GUI 一起交给同一个
 Agent。它们的进程或文件回执不替代物理输入回执，也不决定任务完成；不能因此增加
@@ -54,8 +55,10 @@ profiler、关键词路由、前端开关或第二套 planner。
 
 `LiveVisualActor` 在第一次及后续视觉调用都能看到 `search_connector_tools` /
 `call_connector_tool`。目录只来自显式 MCP 配置，结果回到
-同一个 Actor；没有 connector 角色、service adapter、router 或副作用分类器。调用在发现、
-Gateway 和物理 `call_tool` 边界重新核对 fingerprint/descriptor，服从同一 deadline/cancel。
+同一个 Actor；没有 connector 角色、service adapter、router、副作用分类器或专用安装器。
+搜索返回直接的服务名/工具名/schema，调用只传 `connector + tool + arguments_json`；同一
+server 配置复用长寿命 MCP session，支持分页与 server instructions，调用不会重新发现也不会
+自动重试含糊的远端动作。配置仍可热读取，变化时关闭旧 session 并按新配置连接。
 
 `.mcp.example.json` 提供 GitHub 官方 remote MCP 的只读配置和有限 toolsets，token 只
 通过 `${env:GITHUB_PAT_TOKEN}` 注入。仓库不携带 credential，也不实现 OAuth 登录；
@@ -67,10 +70,15 @@ Gateway 和物理 `call_tool` 边界重新核对 fingerprint/descriptor，服从
 核对的 SHA。首个中文 Electron run 在 before-submit 已把目标损坏为大量 `?`，只能记
 测试输入干扰。随后 ASCII run `arp-20260731-220327-1ed4e4` 完整提交目标，官方 remote
 有真实会话/POST；五次模型响应后 Actor 选择未批准工具，Runtime 以
-`state_rejected` fail closed，回复为空、零 GUI 动作，usage 为 `8126` prompt、`539`
+  `state_rejected` fail closed，回复为空、零 GUI 动作，usage 为 `8126` prompt、`539`
 completion、`4160` hit、`3966` miss。这个干净任务的首次分歧属于
 模型工具选择/停止，不属于 transport，也不准入 GitHub 专属修正。显式 MCP 配置最高
-优先级与按 server 配置 fingerprint 隔离目录缓存已经修复，聚焦测试 `21 passed`。
+  优先级与按完整 server 配置隔离目录缓存已经修复。
+
+blocked 以及仅因 turn/model/time 预算停止的 run 现在会输出
+`agent-continuation/1` 并以普通 `reply` 进入同一 Thread；界面显示“进度已保存 · 可继续”，
+下一轮直接从原始进度文本继续。这个状态复用现有 Thread/Turn owner，没有新增 planner、
+checkpoint service 或后台任务。其他真实错误继续 fail closed。
 
 模型后端保留 OpenAI-compatible Chat Completions，同时支持通过
 `openai_responses`、`anthropic`、`gemini` wire。协议只由

@@ -108,18 +108,19 @@ flowchart TD
 如果 thread_id 非空但不存在 -> 拒绝
 如果该 Thread 有 queued/running/paused Turn -> 拒绝
 否则：
-  读取最多最近 6 个成功 Turn
+  读取最多最近 6 个有用户可见结果的 Turn
   每个 Turn 展开为 user goal + assistant result
   总计最多 12 条消息、16384 字符；从最旧 pair 开始裁剪
   新建 queued Turn
   单 Thread 最多 40 个 Turn；全局最多 100 个 Thread
 ```
 
-Actor 请求层还会二次执行 `_bounded_thread_messages`：把“成功历史 + 当前 goal”共同限制在 16384 字符内，并继续按完整 user/assistant pair 丢弃最旧历史。因此 ThreadStore 的 16384 是历史自身上限，不保证一个接近上限的新 goal 能与全部历史同时发送。
+Actor 请求层还会二次执行 `_bounded_thread_messages`：把“用户可见历史 + 当前 goal”共同限制在 16384 字符内，并继续按完整 user/assistant pair 丢弃最旧历史。因此 ThreadStore 的 16384 是历史自身上限，不保证一个接近上限的新 goal 能与全部历史同时发送。
 
-当前 `arp_run_done` 状态为 `done` 且存在非空 `user_result` 的 Turn 才进入下一轮历史和
-continuation checkpoint；加载旧 checkpoint 时仍兼容历史 `reply`。失败、取消、blocked、
-空结果不会污染对话。
+当前 `arp_run_done` 状态为 `done` 或 `reply` 且存在非空 `user_result` 的 Turn 才进入下一轮
+历史和 continuation checkpoint。Actor blocked 或仅因 turn/model/time 预算耗尽时，handler
+把 scratchpad/remaining items 组成 `agent-continuation/1` 并返回 `reply`，所以已完成进度能随
+同一 `thread_id` 进入下一轮；真正失败、取消和空结果不会污染对话。
 
 ## 4. 精确三节点壳与唯一语义节点
 
@@ -508,9 +509,11 @@ flowchart TD
 
 ## 21. 服务重启与 Thread continuation
 
-成功 Thread 的最小 checkpoint 写入 traces 下的私有 continuation 文件，采用临时文件、flush、fsync、`os.replace` 原子替换。启动时只加载格式、大小、ID、时间、状态和上限均合法的成功 Turn。
+有用户可见结果的 Thread 最小 checkpoint 写入 traces 下的私有 continuation 文件，采用临时文件、flush、fsync、`os.replace` 原子替换。启动时只加载格式、大小、ID、时间、状态和上限均合法的 `done`/`reply` Turn。
 
-它保存的只是最近原始 `goal/result` 文本，不保存模型隐藏状态、截图、工具内部计划或失败 Turn。因此服务重启后的上下文是有界对话连续性，不是长期 memory。
+它保存的只是最近原始 `goal/result` 文本；可续跑 reply 的 result 已含模型公开的进度与剩余项。
+checkpoint 不保存模型隐藏状态、截图、工具内部计划或失败 Turn。因此服务重启后的上下文是
+有界对话连续性，不是长期 memory，也没有后台恢复执行器。
 
 ## 22. 退出清理
 

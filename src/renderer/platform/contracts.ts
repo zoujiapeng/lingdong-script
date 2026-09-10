@@ -209,6 +209,13 @@ export interface RunProjection {
   narration?: string;
   task_state?: string;
   task_state_revision?: number;
+  continuation?: {
+    format?: string;
+    reason?: string;
+    scratchpad?: string;
+    remaining_items?: string[];
+    next_action?: string;
+  };
   timeline: RunTimelineEvent[];
   evidence: Array<Record<string, unknown>>;
   metrics: RunMetrics;

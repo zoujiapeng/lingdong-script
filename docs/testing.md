@@ -226,6 +226,12 @@ checkpoint 精确一致。失败基线
 `output/playwright/client-thread-restart-e2e/20260801-194535-thread-restart/report.json`。
 这只证明最近成功 Turn 的短会话连续性，不证明长期 memory。
 
+长任务续跑还必须覆盖两种机械停止：Actor blocked 与 turn/model/time 预算耗尽。两者都应
+生成顶层 `reply`、`agent-continuation/1` 和用户可见的 scratchpad/remaining items，前端显示
+“进度已保存”而不是“任务完成”或“任务失败”；进程重启后用同一 `thread_id` 提交“继续”，
+provider 的初始 history 必须包含前一轮真实进度文本。真正的 provider/transport、取消和
+物理输入错误仍应保持失败，不得泛化为可续跑成功。
+
 未发送草稿是独立客户端状态：正常关闭/重启后应逐字恢复，但不能创建 run；成功发送和
 “新建对话”必须清除。可见 Electron 证据为
 `output/playwright/client-draft-restart-e2e/20260801-170711-draft-restart/report.json`。
@@ -243,11 +249,10 @@ foreground HWND 和窗口矩形；harness 的聚焦或截图动作不能掩盖�
 ## Connector、模型协议与缓存
 
 Connector 的组件测试至少覆盖：仅加载显式 MCP 配置、remote HTTP 与 stdio 两种
-transport、环境变量替换、目录/参数/结果大小上限、取消和总 deadline，以及 stale
-ref、descriptor 变化和调用前完整 descriptor 重检。不能只 mock Gateway 后
-声称远端调用成立。正式报告还应持久化不含 credential/正文的 run-scoped physical
-receipt（connector、tool fingerprint、arguments hash、result hash、status）；当前官方
-GitHub E2E 报告尚缺这一项，因此 direct Gateway smoke 是补强证据，不是替代品。
+transport、环境变量替换、tools 分页、server instructions、Windows `npx`/`uvx` 命令解析、
+目录/参数/结果大小上限、取消和总 deadline、同配置 session 复用、配置改变后的重连，以及
+调用失败后下次操作重连。测试必须证明一次 `call_connector_tool` 不会再次 list/discover，
+且不会自动重试含糊的远端动作。不能只 mock Gateway 后声称远端调用成立。
 
 真实客户端 connector E2E 仍从可见 Electron 输入目标并点击发送。同一个 Actor 的
 trace 应显示 connector 与 reply/GUI 同轮可选，没有关键词 router；read 场景需用独立
@@ -260,9 +265,20 @@ trace 应显示 connector 与 reply/GUI 同轮可选，没有关键词 router；
   `output/playwright/client-thread-connector-e2e/20260731-214024-thread-connector/report.json`；
   后者精确落盘时 run 尚在 `running`，不能把外部成功扩写为停止判断通过；
 - GitHub 官方 remote 的 Gateway 物理
-  `get_commit(owner=zoujiapeng, repo=lingdong-script, sha=master, detail=none)` receipt 为
-  `succeeded`，返回值与独立 `gh api` 的
+  `get_commit(owner=zoujiapeng, repo=lingdong-script, sha=master, detail=none)` 调用成功，
+  返回值与独立 `gh api` 的
   `fba5d7bb6dcb13c46e93dbc29bc3cef44e560622` 一致；
+- 2026-09-10 从可见 Electron 提交的 Office 压力任务通过通用 MCP 热加载
+  `mbeps/excel-mcp`（`uvx --with mcp<2 --from git+https://github.com/mbeps/excel-mcp excel-mcp`），
+  真实发现 69 个工具并在同一 Thread
+  `thread-03f95b56b5a34c09856084682eff846f` 分三轮生成
+  `output/office-mcp-e2e/world-bank-macro-analysis.xlsx`。第一、二轮分别停在
+  `arp-20260910-184941-999c62` 和 `arp-20260910-190518-9edd3d` 的
+  `waiting_for_followup`，关闭并重启产品后，同一 Thread 恢复历史并由
+  `arp-20260910-193549-986819` 完成。独立读回确认 90 行 World Bank 数据逐字段一致、
+  4 张表顺序、`A1:H91` 表范围、公式、2 张图表、冻结窗格与 2 条条件格式均存在；
+  渲染也暴露列宽截断和两个比率列显示放大 100 倍的非致命质量问题。该结果证明
+  transport、热配置和跨进程续接成立，不应扩写为模型一次成稿或排版完全正确；
 - 首个中文 Electron run `arp-20260731-214538-485580` 的 before-submit 已把目标转为大量
   `?`，必须记为测试输入干扰，不能用其输出归因模型；
 - ASCII 可见复验 `arp-20260731-220327-1ed4e4` 的提交文本完整，官方 remote 有真实
@@ -303,8 +319,8 @@ prefill run，其 raw/Gateway connector、tool attempt 和 GUI action 均为 0�
 当前发布前全量回归为 Python `3462 passed, 13 skipped, 1 warning`、renderer
 `234 passed`，TypeScript typecheck 通过。
 
-显式 MCP 配置最高优先级与按完整 server 配置 fingerprint 隔离目录缓存已有
-`21 passed` 聚焦测试；后续回归仍需覆盖同名 server 多配置，防止再次读到错误目录。
+显式 MCP 配置最高优先级与按完整 server 配置隔离目录缓存/长连接均需持续覆盖；后续回归
+仍需覆盖同名 server 多配置，防止再次读到错误目录或复用错误 session。
 
 OpenAI Responses、Anthropic Messages 与 Gemini `generateContent` 首先做 canonical
 message/tool/image 的双向 fixture 测试，再分别用真实 credential 做 provider smoke；

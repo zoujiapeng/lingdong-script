@@ -935,6 +935,7 @@ function contextItemLabel(filePath: string): string {
 
 function visualRunTone(run: RunProjection | null): string {
   if (!run) return 'idle';
+  if (run.continuation?.next_action === 'continue_in_thread') return 'paused';
   if (run.phase === 'awaiting_human') return 'waiting';
   if (run.status === 'paused') return 'paused';
   if (!isTerminalTaskStatus(run.status)) return 'running';
@@ -945,6 +946,7 @@ function visualRunTone(run: RunProjection | null): string {
 
 function runActivityLabel(run: RunProjection | null): string {
   if (!run) return '等待任务';
+  if (run.continuation?.next_action === 'continue_in_thread') return '进度已保存，等待你继续';
   if (run.phase === 'awaiting_human') return '等待你的确认';
   if (run.status === 'paused') return '任务已暂停';
   if (isTerminalTaskStatus(run.status)) {
@@ -1097,6 +1099,7 @@ function AgentConversationTurn({
   const successful = terminal && taskOutcome === 'success';
   const unsuccessful = terminal && taskOutcome !== 'success';
   const directReply = run.status === 'reply';
+  const resumable = run.continuation?.next_action === 'continue_in_thread';
   const currentTool = TOOL_LABELS[run.current_tool || ''] || run.current_tool || '尚未选择工具';
   const liveEntries = liveActivityEntries(run);
   const toolEntries = liveEntries.filter((entry) => (
@@ -1194,11 +1197,11 @@ function AgentConversationTurn({
       )}
 
       {!active && successful && (
-        <article className={`ld-agent-response ${directReply ? 'reply' : 'complete'}`} aria-label="任务结果" role="status">
+        <article className={`ld-agent-response ${directReply ? 'reply' : 'complete'}`} aria-label={resumable ? '任务进度' : '任务结果'} role="status">
           <div className="ld-agent-response-icon">{directReply ? <Bot size={16} /> : <CheckCircle2 size={16} />}</div>
           <div className="ld-agent-response-body">
             <div className="ld-agent-response-meta">
-              <strong>{directReply ? 'Agent 回复' : '任务已完成'}</strong>
+              <strong>{resumable ? '进度已保存 · 可继续' : directReply ? 'Agent 回复' : '任务已完成'}</strong>
               <small>{formatTime(run.finished_at || run.updated_at)}</small>
             </div>
             <CollapsibleAgentText text={resultText || (directReply ? 'Agent 已回复。' : '任务已完成。')} />

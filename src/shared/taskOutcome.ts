@@ -2,10 +2,12 @@ export type TaskOutcomeKind = 'success' | 'error' | 'info';
 
 const UNCONDITIONAL_SUCCESS_STATUSES = new Set(['done', 'completed', 'success']);
 const STOPPED_STATUSES = new Set(['canceled', 'cancelled', 'stopped', 'interrupted']);
+const RESUMABLE_STATUSES = new Set(['waiting_for_followup']);
 const FAILURE_STATUSES = new Set(['failed', 'fail', 'error', 'blocked']);
 const TERMINAL_STATUSES = new Set([
   ...UNCONDITIONAL_SUCCESS_STATUSES,
   ...STOPPED_STATUSES,
+  ...RESUMABLE_STATUSES,
   ...FAILURE_STATUSES,
   'reply',
 ]);
@@ -105,7 +107,7 @@ export function classifyTaskOutcome(
   error?: unknown,
 ): TaskOutcomeKind {
   const normalized = String(status || '').trim().toLowerCase();
-  if (STOPPED_STATUSES.has(normalized)) return 'info';
+  if (STOPPED_STATUSES.has(normalized) || RESUMABLE_STATUSES.has(normalized)) return 'info';
   if (hasExplicitTaskFailure({ result, error })) return 'error';
   if (UNCONDITIONAL_SUCCESS_STATUSES.has(normalized) || normalized === 'reply') return 'success';
   return 'error';

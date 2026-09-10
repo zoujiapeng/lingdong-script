@@ -697,6 +697,47 @@ describe('primary agent surface', () => {
     expect(screen.getByRole('button', { name: '打开对话列表' })).toHaveTextContent('Agent 已回复');
   });
 
+  it('shows resumable work as saved progress rather than a completed task', () => {
+    render(
+      <AgentCockpit
+        plane={cockpitPlane(
+          vi.fn(async () => goalRunStart()),
+          {
+            run_id: 'run-resumable',
+            kind: 'arp',
+            runtime_version: 'vnext',
+            no_legacy_fallback: true,
+            status: 'reply',
+            phase: 'terminal',
+            goal: 'Build a quarterly workbook',
+            started_at: 1,
+            updated_at: 2,
+            finished_at: 2,
+            result: '已完成原始数据导入，继续后将生成公式和图表。',
+            continuation: {
+              format: 'agent-continuation/1',
+              reason: 'execution_budget_exhausted',
+              scratchpad: '已导入 400 行原始数据',
+              remaining_items: ['生成公式', '添加图表'],
+              next_action: 'continue_in_thread',
+            },
+            timeline: [],
+            evidence: [],
+            metrics: {},
+          },
+        ) as never}
+      />,
+    );
+
+    expect(screen.getByRole('status', { name: '任务进度' })).toHaveTextContent(
+      '进度已保存 · 可继续',
+    );
+    expect(screen.getByRole('status', { name: '任务进度' })).toHaveTextContent(
+      '已完成原始数据导入',
+    );
+    expect(screen.queryByText('任务已完成')).not.toBeInTheDocument();
+  });
+
   it('locks conversation mutation controls while a follow-up is submitting', async () => {
     const startGoal = vi.fn(() => new Promise<GoalRunStart>(() => {}));
     const user = userEvent.setup();

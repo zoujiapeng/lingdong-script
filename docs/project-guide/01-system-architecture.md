@@ -109,7 +109,8 @@ Renderer 保存的 run ID 列表只用于界面聚合。服务端 Thread/Turn、
 ### 2.4 外部进程和资源
 
 - 模型 provider 通过 `modeling` 层的 canonical request 和显式 protocol adapter 调用；
-- connector 只从显式 MCP 配置发现，Gateway 重新核验 descriptor 后才调用；
+- connector 只从显式 MCP 配置发现，Gateway 按服务名和工具名直接调用；目录发现与调用
+  共用按完整 server 配置隔离的长寿命 session，不在每次调用前重复发现；
 - Windows GUI 通过 `FrameAuthority`、`AtomicDesktopAdapter`、`RawDeviceExecutor` 与 SendInput 类 backend 交互；
 - trace、artifact、memory 与 replay 文件各有独立 owner，只用于诊断或显式离线功能，不应混成生产任务的“成功账本”。
 
@@ -244,18 +245,21 @@ ConnectorGateway 不是新 Agent。它只给同一个 Actor两项通用工具：
 ```text
 搜索:
   只遍历显式配置的 MCP server
-  返回有界 descriptor/ref
+  返回有界 connector/tool/schema；精确名称优先、普通词 OR 排序
+  空配置返回空目录，Actor 可用既有 shell/file 工具创建 .mcp.json 后重试
   不根据 goal 关键词选择服务
 
 调用:
-  用 ref 找到 descriptor
-  在真正 call_tool 前重新读取并比较完整 descriptor
+  直接传 connector + tool + arguments_json
+  复用同一 server 配置的长寿命 session，不为调用重复 list/discover
   不按 readOnly/destructive annotation 拒绝模型选择
   参数、结果、deadline、cancel 均有界
+  失败调用不自动重试；下一操作可在断线后重连
   结果作为普通 tool result 回到同一个 Actor
 ```
 
-当前外部 mutation 没有因为 connector 存在而获得授权。若未来接入，也必须进入同一 Actor 工具面并拥有独立可审计 receipt，不能增加一个服务专属 Agent。
+当前外部 mutation 没有因为 connector 存在而获得额外授权。若未来接入，也必须进入同一
+Actor 工具面，不能增加服务专属 Agent、安装器或策略层；不可逆外部动作仍只保留原有用户同意边界。
 
 ## 9. 桌面执行层
 
