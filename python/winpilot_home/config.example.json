@@ -1,9 +1,11 @@
 {
+  "active_model_profile": "",
+  "model_profiles": {},
   "api": {
     "provider": "auto",
     "base_url": "https://api.deepseek.com",
     "api_key": "在这里填入 API key",
-    "model": "deepseek-v4-flash",
+    "model": "deepseek-v4-flash-vision-exp",
     "temperature": 0.3,
     "max_tokens": 4096,
     "thinking": false,

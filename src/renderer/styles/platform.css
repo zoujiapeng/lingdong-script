@@ -546,8 +546,9 @@
 .arp-form-grid > label:not(.arp-toggle-row) { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .arp-form-grid > label.wide { grid-column: span 2; }
 .arp-form-grid label > span { font-size: 9px; color: var(--arp-text-muted); }
-.arp-form-grid input { width: 100%; height: 31px; padding: 0 8px; border: 1px solid var(--arp-line); border-radius: 4px; outline: none; background: var(--arp-surface-subtle); color: var(--arp-text); font-size: 10px; user-select: text; }
-.arp-form-grid input:focus { border-color: var(--arp-accent); }
+.arp-form-grid input, .arp-form-grid select { width: 100%; height: 31px; padding: 0 8px; border: 1px solid var(--arp-line); border-radius: 4px; outline: none; background: var(--arp-surface-subtle); color: var(--arp-text); font-size: 10px; user-select: text; }
+.arp-form-grid input:focus, .arp-form-grid select:focus { border-color: var(--arp-accent); }
+.arp-profile-hint { color: var(--arp-text-muted); font-size: 8px; line-height: 1.45; }
 .arp-toggle-list { padding: 8px 11px; }
 .arp-toggle-row { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 10px; color: var(--arp-text-soft); }
 .arp-toggle { width: 31px; height: 17px; padding: 2px; border: 0; border-radius: 999px; background: var(--arp-surface-strong); cursor: pointer; }

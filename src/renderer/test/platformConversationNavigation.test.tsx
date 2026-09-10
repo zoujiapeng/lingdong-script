@@ -46,6 +46,7 @@ function createPlane(currentRun: Record<string, unknown> | null = null) {
     traces: vi.fn(async () => []),
     scripts: vi.fn(async () => []),
     memories: vi.fn(async () => []),
+    config: vi.fn(async () => ({})),
   };
   const startGoal = vi.fn(async (goal: string, threadId: string) => ({
     ok: true,
@@ -160,10 +161,10 @@ describe('conversation and workbench navigation', () => {
     expect(taskBoard).toHaveTextContent('模型已更新 2 次');
     expect(document.querySelector('.ld-activity-capsule .ld-progress-ring')).not.toBeNull();
 
-    const commandOrb = screen.getByRole('button', { name: '打开命令面板' });
-    await user.click(commandOrb);
-    expect(screen.getByRole('dialog', { name: '命令面板' })).toBeInTheDocument();
-    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: '添加上下文' }));
+    expect(screen.getByRole('menu', { name: '添加上下文' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: '命令面板' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '添加上下文' }));
     await user.click(screen.getByRole('button', { name: '打开工作台' }));
 
     const workbench = screen.getByRole('complementary', { name: '工作台' });

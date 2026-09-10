@@ -23,11 +23,16 @@ MEMORY_PATH = ROOT_DIR / "experience_memory.json"
 MEMORY_DB_PATH = ROOT_DIR / "memory.db"
 
 _DEFAULTS: dict[str, Any] = {
+    # Provider credentials stay in local config.json profiles.  The runtime
+    # still reads the flat api/vlm sections below; activating a profile simply
+    # replaces those two sections, so there is one model execution line.
+    "active_model_profile": "",
+    "model_profiles": {},
     "api": {
         "provider": "auto",
         "base_url": "https://api.deepseek.com",
         "api_key": "",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-v4-flash-vision-exp",
         "temperature": 0.3,
         "max_tokens": 4096,
         "thinking": False,
@@ -189,6 +194,43 @@ class Config:
         """Deep-merge a patch dict (from the web UI) and persist."""
         with _lock:
             self._data = _merge(self._data, patch)
+        self.save()
+        return self.snapshot()
+
+    def activate_model_profile(self, profile_id: str) -> dict[str, Any]:
+        """Make one saved provider profile the runtime's active api/vlm pair."""
+        clean_id = str(profile_id or "").strip()
+        if not clean_id:
+            raise ValueError("模型档案不能为空")
+        with _lock:
+            profiles = self._data.get("model_profiles", {})
+            profile = profiles.get(clean_id) if isinstance(profiles, dict) else None
+            if not isinstance(profile, dict):
+                raise ValueError(f"模型档案不存在: {clean_id}")
+            api = profile.get("api")
+            if not isinstance(api, dict):
+                raise ValueError(f"模型档案缺少 API 配置: {clean_id}")
+            vlm = profile.get("vlm")
+            self._data["api"] = _merge(_DEFAULTS["api"], api)
+            self._data["vlm"] = _merge(
+                _DEFAULTS["vlm"], vlm if isinstance(vlm, dict) else {}
+            )
+            self._data["active_model_profile"] = clean_id
+        self.save()
+        return self.snapshot()
+
+    def save_active_model_profile(self) -> dict[str, Any]:
+        """Persist edits to api/vlm back into the selected local profile."""
+        with _lock:
+            profile_id = str(self._data.get("active_model_profile") or "").strip()
+            if not profile_id:
+                return deepcopy(self._data)
+            profiles = self._data.get("model_profiles", {})
+            profile = profiles.get(profile_id) if isinstance(profiles, dict) else None
+            if not isinstance(profile, dict):
+                raise ValueError(f"模型档案不存在: {profile_id}")
+            profile["api"] = deepcopy(self._data.get("api", {}))
+            profile["vlm"] = deepcopy(self._data.get("vlm", {}))
         self.save()
         return self.snapshot()
 

@@ -1,7 +1,7 @@
 # 模型 Provider、视觉路由、Thinking、缓存与成本
 
 本文只描述当前代码和官方文档能够证明的事实。模型能力与调用口径核对日期为
-2026-07-31；如果上游模型能力发生变化，应同时更新
+2026-09-08；如果上游模型能力发生变化，应同时更新
 `python/winpilot_home/winpilot/model_adapter.py`、对应测试和本文，不能只改模型名称或提示词。
 
 ## 当前调用路径
@@ -28,6 +28,10 @@ Responses、Anthropic Messages 或 Gemini `generateContent`。旧 `AgentRunner` 
 `python/winpilot_home/winpilot/config.py` 和本机、被 Git 忽略的
 `python/winpilot_home/config.json`。
 
+### 已保存模型档案
+
+输入框旁的模型菜单和设置页的“已保存模型档案”下拉框都可以直接切换本机保存的 provider 配置。每个档案同时保存主模型和视觉模型的 endpoint、模型名、API key 及其余请求参数；切换后仍只把选中的一套复制到运行时 `api` / `vlm`，不会按任务自动路由到多个模型。页面和 `/api/config` 只取得脱敏密钥，保存普通设置时也不会让脱敏占位符覆盖本机真实密钥。
+
 ## Provider 识别
 
 代码内置能力/usage 元数据语义的 provider family 包括 `mimo`、`deepseek`、
@@ -49,8 +53,9 @@ Gemini，自动改成原生协议会破坏兼容。原生 wire 只接受以下�
 tools 与工具后续回合所需的原生 reasoning/signature replay sidecar；不支持音频、
 视频、文件或 provider built-in tools。canonical `strict:true` 会保留到 Anthropic
 tool schema，signed thinking / thought signature 也随对应 tool exchange 回放。相关
-5 个测试文件为 `214 passed`，但尚无三家真实 credential smoke 或可见 Electron
-provider E2E，不能据此声称“大部分模型 API 已端到端适配”。
+5 个测试文件为 `214 passed`。DeepSeek Chat Completions 已有真实 credential smoke
+和可见 Electron provider E2E；Anthropic、Gemini 等原生协议仍没有对应真实凭据验证，
+不能据此声称“大部分模型 API 已端到端适配”。
 
 这只是当前 vNext 模型调用主线的薄协议层，不是完整 provider registry。模型名称
 相似、上下文更长或推理更强，都不能自动推出它支持图片。
@@ -61,6 +66,8 @@ provider E2E，不能据此声称“大部分模型 API 已端到端适配”。
 | --- | --- | --- |
 | `mimo-v2.5` | 是 | 原生视觉主路径，直接接收真实 GUI JPEG |
 | `mimo-v2.5-pro` | 否 | text-only GUI 路径；使用 UIA/OCR/CV/非视觉摘要，必要时使用独立 VLM |
+| `deepseek-v4-flash-vision-exp` | 是 | 原生视觉主路径，直接接收真实 GUI JPEG |
+| `deepseek-v4-flash` / `deepseek-v4-pro` | 否 | text-only；DeepSeek 官方只为上述 `vision-exp` 模型开放图片 |
 | 名称符合当前 Claude 3/4/5 family 且 provider 为 Anthropic | 是 | 仅在显式 native wire 或兼容端点确实接受图片时使用 |
 | Gemini 1.5 或 2+ family 且 provider 为 Gemini | 是 | 仅在显式 native wire 或兼容端点确实接受图片时使用 |
 | 名称明确含 `omni`、`-vl`、`vision` 或 `gpt-4o` 的模型 | 是 | 原生视觉主路径 |
@@ -74,6 +81,12 @@ provider E2E，不能据此声称“大部分模型 API 已端到端适配”。
 支持图像理解。文档支持图片 URL 和 Base64 data URL 输入，正好覆盖 WinPilot
 注入本地截图的方式。官方页面没有把 `mimo-v2.5-pro` 列为图像理解模型，
 所以当前代码绝不向 Pro 路径发送 `image_url`。
+
+DeepSeek 官方在 2026-08-21 发布
+[`deepseek-v4-flash-vision-exp`](https://api-docs.deepseek.com/guides/vision/)。该模型在
+标准 OpenAI-compatible Chat Completions 中接受 JPEG/PNG/GIF/WebP 的 Base64 data URL，
+并支持 tool calls；`deepseek-v4-flash`、`deepseek-v4-pro` 等其他模型仍会拒绝图片。
+WinPilot 因此只显式放行这个完整模型名，不把整个 DeepSeek family 猜成视觉模型。
 
 这意味着：
 
@@ -93,6 +106,24 @@ provider E2E，不能据此声称“大部分模型 API 已端到端适配”。
 text-only 路径不会收到不可见的截图字节。它必须依赖 UIA、Win32、OCR、CV、
 `nonvisual_summary`、确定性检查或单独配置的 VLM；因此在画布、游戏和自绘控件等
 场景中通常更慢，也更容易受结构化感知缺失影响。
+
+### 2026-09-08 DeepSeek / MiMo 最小真实 A/B
+
+固定 `seed=20260908`、同一 Windows 机器、同一可见 Electron 入口、同一 goal、工具
+schema、system contract 和外部 oracle，各模型各跑一次最小三题。MiMo 使用
+`mimo-v2.5`，DeepSeek 使用 `deepseek-v4-flash-vision-exp` 的原生默认 thinking：
+
+| 场景 | MiMo | DeepSeek |
+| --- | --- | --- |
+| 精确点击 | 通过；267.676s，18 次模型调用，16 次物理动作 | 失败；303.291s 超时，25 次模型调用，0 次物理动作 |
+| corridor-v0 | 通过；89.860s，5 次模型调用，4 次物理动作 | 失败；300.715s 超时，13 次模型调用，9 次物理动作 |
+| Calculator `42+35=77` | 通过；88.422s，13 次模型调用，12 次物理动作 | 通过；53.946s，4 次模型调用，2 次物理动作 |
+
+六个有效 run 的物理尝试与 RawDevice 回执均逐笔配对且零机械失败。DeepSeek 的
+Calculator 通过 `input_sequence` 明显更快；精确点击中却反复选择本地查询而没有点击，
+corridor 中多次提交出界路径。这个单 seed 结果只说明本轮候选在标准控件效率上更强、
+在两项像素几何任务上更弱，不能外推成稳定成功率或整个模型的总排名。完整报告位于
+忽略目录 `output/deepseek-ab/`。
 
 ## MiMo Thinking 策略
 
@@ -204,3 +235,5 @@ MiMo 官方价格会变化，代码没有硬编码。需要估价时，应从官
 - [MiMo Deep Thinking](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/deep-thinking)
 - [MiMo API Integration FAQ](https://mimo.mi.com/docs/en-US/quick-start/faq/api-integration)
 - [MiMo OpenAI-compatible API Reference](https://mimo.mi.com/docs/api/chat/openai-api)
+- [DeepSeek Vision](https://api-docs.deepseek.com/guides/vision/)
+- [DeepSeek 模型与价格](https://api-docs.deepseek.com/quick_start/pricing/)

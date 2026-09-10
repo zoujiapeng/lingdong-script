@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -1228,14 +1229,32 @@ async def chatgpt_integration(request: Request) -> dict[str, Any]:
 
 @app.get("/api/config")
 def get_config() -> dict[str, Any]:
-    snapshot = CONFIG.snapshot()
-    key = snapshot.get("api", {}).get("api_key", "")
+    return _public_config_snapshot(CONFIG.snapshot())
+
+
+def _mask_config_key(section: dict[str, Any]) -> None:
+    key = str(section.get("api_key") or "")
     if key:
-        snapshot["api"]["api_key"] = "***" + key[-4:]
-    vkey = snapshot.get("vlm", {}).get("api_key", "")
-    if vkey:
-        snapshot["vlm"]["api_key"] = "***" + vkey[-4:]
-    return snapshot
+        section["api_key"] = "***" + key[-4:]
+
+
+def _public_config_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return UI-safe config, including saved profiles with masked secrets."""
+    public = deepcopy(snapshot)
+    for section_name in ("api", "vlm"):
+        section = public.get(section_name)
+        if isinstance(section, dict):
+            _mask_config_key(section)
+    profiles = public.get("model_profiles")
+    if isinstance(profiles, dict):
+        for profile in profiles.values():
+            if not isinstance(profile, dict):
+                continue
+            for section_name in ("api", "vlm"):
+                section = profile.get(section_name)
+                if isinstance(section, dict):
+                    _mask_config_key(section)
+    return public
 
 
 def _canonicalize_model_aliases(patch: dict[str, Any]) -> None:
@@ -1251,6 +1270,11 @@ def _canonicalize_model_aliases(patch: dict[str, Any]) -> None:
 
 @app.patch("/api/config")
 def patch_config(patch: dict[str, Any]) -> dict[str, Any]:
+    patch = deepcopy(patch)
+    # Profiles contain credentials and are managed locally, never round-tripped
+    # from the renderer's masked snapshot.
+    patch.pop("model_profiles", None)
+    requested_profile = patch.pop("active_model_profile", None)
     # Don't let the masked placeholder overwrite the real key.
     for section in ("api", "vlm"):
         sec = patch.get(section)
@@ -1258,10 +1282,18 @@ def patch_config(patch: dict[str, Any]) -> dict[str, Any]:
             sec.pop("api_key")
     _canonicalize_model_aliases(patch)
     try:
-        CONFIG.update(patch)
+        if requested_profile is not None:
+            CONFIG.activate_model_profile(str(requested_profile))
+        if patch:
+            CONFIG.update(patch)
+        if "api" in patch or "vlm" in patch:
+            CONFIG.save_active_model_profile()
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    BUS.publish("config", changed=list(patch.keys()))
+    changed = list(patch.keys())
+    if requested_profile is not None:
+        changed.insert(0, "active_model_profile")
+    BUS.publish("config", changed=changed)
     return get_config()
 
 

@@ -1,5 +1,19 @@
 # AI / Codex / 开发者接手入口
 
+## 2026-09-10 模型直切、通用连接器入口与 detached CI 修复
+
+- 本机 `config.json` 可保存 MiMo / DeepSeek 等模型档案；输入框模型名直接展开并切换，
+  设置页复用同一档案。切换只替换现有 `api` / `vlm`，没有增加模型路由或第二执行线。
+- 输入框“+”只提供本地文件与 MCP/GitHub 配置入口；连接器仍由同一个
+  `ConnectorGateway` 延迟发现，没有 GitHub 专属 adapter。当前可见 Electron 已真实读取
+  私有仓库 README 并返回正确首行标题。
+- `run_detached` 的 monitor 本身已经独立，因此删除 monitor 内第二层 `Start-Process`；
+  payload 由 monitor 直接等待并从 `$LASTEXITCODE` 取得退出码，避开 Windows 重定向
+  `Process.ExitCode` 偶发变成空值、再被强转为成功 0 的问题。
+- 当前回归：WinPilot `1469 passed, 13 skipped`，根测试 `2508 passed`，Renderer
+  `321 passed`，connector `39 passed`，TypeScript/typecheck/build/build:all 全部通过；
+  detached 非零退出压力复跑 `20/20`。本地凭据文件、`.mcp.json` 与 `CON` 均未纳入 Git。
+
 > 最后核对：2026-08-20。唯一长期产品分支是 `master`；2026-08-14/08-15 内容与
 > 2026-08-17 旧架构删除批次均已提交并合入 `master`。本文件不再把某个提交写成“当前 HEAD”；
 > 接手时必须现场运行

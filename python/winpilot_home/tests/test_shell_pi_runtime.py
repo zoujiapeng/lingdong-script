@@ -285,8 +285,10 @@ def test_run_detached_returns_started_receipt_and_pollable_artifacts(
     assert result["status_path"].endswith(".status.json")
     monitor = Path(result["monitor_path"]).read_text(encoding="utf-8-sig")
     assert "state = 'running'" in monitor
-    assert "$null = $child.Handle" in monitor
-    assert "$child.WaitForExit()" in monitor
+    assert "& powershell -NoProfile -NonInteractive" in monitor
+    assert "$rawExitCode = $LASTEXITCODE" in monitor
+    assert "Start-Process powershell -WindowStyle Hidden -PassThru" not in monitor
+    assert "$null -eq $rawExitCode" in monitor
     assert "exit_code = $exitCode" in monitor
 
 

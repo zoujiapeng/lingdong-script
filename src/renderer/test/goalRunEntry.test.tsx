@@ -348,7 +348,6 @@ describe('primary agent surface', () => {
     const openResources = vi.fn();
     const openSystem = vi.fn();
     const openWorkbench = vi.fn();
-    const openCommand = vi.fn();
 
     render(
       <AgentCockpit
@@ -356,7 +355,6 @@ describe('primary agent surface', () => {
         onOpenResources={openResources}
         onOpenSystem={openSystem}
         onOpenWorkbench={openWorkbench}
-        onOpenCommand={openCommand}
       />,
     );
 
@@ -377,7 +375,96 @@ describe('primary agent surface', () => {
     await user.click(screen.getByRole('button', { name: /^工作台/ }));
     expect(openWorkbench).toHaveBeenCalledOnce();
     expect(openResources).not.toHaveBeenCalled();
-    expect(openCommand).not.toHaveBeenCalled();
+  });
+
+  it('adds a local file from the composer plus menu and submits its path as context', async () => {
+    const startGoal = vi.fn(async () => goalRunStart());
+    const user = userEvent.setup();
+    (window as any).electronAPI = {
+      openFileDialog: vi.fn(async () => ({
+        canceled: false,
+        filePaths: ['C:\\work\\brief.pdf'],
+      })),
+    };
+
+    render(<AgentCockpit plane={cockpitPlane(startGoal) as never} />);
+    await user.click(screen.getByRole('button', { name: '添加上下文' }));
+    expect(screen.getByRole('menu', { name: '添加上下文' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: '命令面板' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('menuitem', { name: /添加文件/ }));
+
+    expect(await screen.findByText('brief.pdf')).toBeVisible();
+    await user.type(screen.getByRole('textbox', { name: '消息输入' }), '总结这个文件');
+    await user.click(screen.getByRole('button', { name: '发送消息' }));
+    expect(startGoal).toHaveBeenCalledWith(
+      '总结这个文件\n\n[用户添加的本地文件] C:\\work\\brief.pdf',
+      '',
+    );
+  });
+
+  it('adds an MCP or GitHub config without leaking its local path into the goal', async () => {
+    const user = userEvent.setup();
+    const config = { mcp: { config_paths: ['C:\\work\\existing.json'] } };
+    const patchConfig = vi.fn(async () => config);
+    const client = { config: vi.fn(async () => config), patchConfig };
+    const startGoal = vi.fn(async () => ({ ok: true, run_id: 'run-connector' }));
+    (window as any).electronAPI = {
+      openFileDialog: vi.fn(async () => ({
+        canceled: false,
+        filePaths: ['C:\\work\\github.mcp.json'],
+      })),
+    };
+    const plane = {
+      ...cockpitPlane(),
+      baseUrl: 'http://127.0.0.1:8765/',
+      getClient: vi.fn(() => client),
+      startGoal,
+    };
+
+    render(<AgentCockpit plane={plane as never} />);
+    await user.click(screen.getByRole('button', { name: '添加上下文' }));
+    await user.click(screen.getByRole('menuitem', { name: /MCP \/ GitHub 连接器/ }));
+
+    await waitFor(() => expect(patchConfig).toHaveBeenCalledWith({
+      mcp: { config_paths: ['C:\\work\\existing.json', 'C:\\work\\github.mcp.json'] },
+    }));
+    expect(screen.getByText('github.mcp.json')).toBeVisible();
+    await user.type(screen.getByRole('textbox', { name: '消息输入' }), '读取仓库信息');
+    await user.click(screen.getByRole('button', { name: '发送消息' }));
+    expect(startGoal).toHaveBeenCalledWith('读取仓库信息', '');
+  });
+
+  it('switches a saved model directly from the composer menu', async () => {
+    const user = userEvent.setup();
+    const config = {
+      active_model_profile: 'mimo',
+      api: { model: 'mimo-v2.5' },
+      model_profiles: {
+        mimo: { label: 'MiMo V2.5', api: { model: 'mimo-v2.5' } },
+        deepseek: { label: 'DeepSeek V4 Vision', api: { model: 'deepseek-v4-flash-vision-exp' } },
+      },
+    };
+    const patchConfig = vi.fn(async () => ({
+      ...config,
+      active_model_profile: 'deepseek',
+      api: { model: 'deepseek-v4-flash-vision-exp' },
+    }));
+    const plane = {
+      ...cockpitPlane(),
+      baseUrl: 'http://127.0.0.1:8765/',
+      getClient: vi.fn(() => ({
+        config: vi.fn(async () => config),
+        patchConfig,
+      })),
+    };
+
+    render(<AgentCockpit plane={plane as never} />);
+    await user.click(screen.getByRole('button', { name: 'Visual Actor' }));
+    await user.click(await screen.findByRole('option', { name: '切换到 DeepSeek V4 Vision' }));
+
+    expect(patchConfig).toHaveBeenCalledWith({ active_model_profile: 'deepseek' });
+    expect(screen.getByRole('button', { name: 'deepseek-v4-flash-vision-exp' })).toBeVisible();
+    expect(screen.queryByLabelText('模型选项')).not.toBeInTheDocument();
   });
 
   it('reuses the original composer controls instead of replacing the input in conversation view', () => {

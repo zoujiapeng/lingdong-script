@@ -16,6 +16,7 @@ from typing import Any
 
 _THINKING_DISABLED_BY_DEFAULT = {"reasonix"}
 _VISION_MODEL_MARKERS = ("omni", "-vl", "vision", "gpt-4o")
+_DEEPSEEK_VISION_MODELS = {"deepseek-v4-flash-vision-exp"}
 _NATIVE_PROTOCOL_ALIASES = {
     "openai_responses": "openai_responses",
     "responses": "openai_responses",
@@ -148,6 +149,11 @@ def model_supports_vision(
     # are intentionally not inferred from that result.
     if name == "mimo-v2.5":
         return True
+    # DeepSeek exposes vision on one explicit experimental model. Other
+    # DeepSeek V4 aliases still reject image input, so keep this family
+    # fail-closed instead of relying on the generic ``vision`` name marker.
+    if family == "deepseek":
+        return name in _DEEPSEEK_VISION_MODELS
     if family in {"anthropic", "claude"} and re.match(
         r"^claude-(?:(?:opus|sonnet|haiku)-)?[345](?:[.-]|$)", name
     ):

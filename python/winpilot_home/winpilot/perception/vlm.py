@@ -7,8 +7,9 @@ WinPilot gains true vision:
   lowest default priority; used when structured dimensions fail).
 
 The vision invocation may reuse the main model when that endpoint accepts
-``image_url`` content (currently verified for ``mimo-v2.5``), or use a
-separate endpoint for a text-only main model.
+``image_url`` content (currently verified for ``mimo-v2.5`` and
+``deepseek-v4-flash-vision-exp``), or use a separate endpoint for a text-only
+main model.
 """
 from __future__ import annotations
 
@@ -59,10 +60,10 @@ def _settings() -> dict:
 def configuration_issue() -> str:
     """Return a human-readable reason the VLM path is unavailable.
 
-    DeepSeek's current public chat API rejects image_url inputs for the text
-    models we tested (deepseek-chat, deepseek-reasoner, deepseek-v4-flash,
-    deepseek-v4-pro), so it cannot back the visual/perception pipeline
-    directly. Use a separate multimodal endpoint as the vision proxy.
+    DeepSeek's public chat API rejects image_url inputs for its text models
+    (deepseek-chat, deepseek-reasoner, deepseek-v4-flash, deepseek-v4-pro).
+    The separate deepseek-v4-flash-vision-exp model is allowed by the shared
+    model profile and can back this path directly.
     """
     vlm = _settings()
     base_url = str(vlm.get("base_url") or "").lower()
@@ -70,7 +71,8 @@ def configuration_issue() -> str:
     if vlm.get("enabled") and base_url and model:
         if "deepseek" in base_url and _DEEPSEEK_TEXT_ONLY_RE.fullmatch(model):
             return (
-                "DeepSeek V4 API is text-only; use a separate multimodal VLM "
+                "Configured DeepSeek model is text-only; use "
+                "deepseek-v4-flash-vision-exp or a separate multimodal VLM "
                 "endpoint for screenshots/images."
             )
     return ""

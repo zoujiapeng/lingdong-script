@@ -1,4 +1,15 @@
 from winpilot.perception import vlm
+from winpilot.model_adapter import model_supports_vision
+
+
+def test_only_deepseek_vision_exp_is_native_visual():
+    assert model_supports_vision(
+        "deepseek-v4-flash-vision-exp",
+        "deepseek",
+    )
+    assert not model_supports_vision("deepseek-v4-flash", "deepseek")
+    assert not model_supports_vision("deepseek-v4-pro", "deepseek")
+    assert not model_supports_vision("deepseek-made-up-vision", "deepseek")
 
 
 def test_deepseek_v4_is_reported_as_text_only(monkeypatch):
@@ -11,7 +22,8 @@ def test_deepseek_v4_is_reported_as_text_only(monkeypatch):
     })
 
     assert vlm.configuration_issue() == (
-        "DeepSeek V4 API is text-only; use a separate multimodal VLM endpoint "
+        "Configured DeepSeek model is text-only; use "
+        "deepseek-v4-flash-vision-exp or a separate multimodal VLM endpoint "
         "for screenshots/images."
     )
     assert not vlm.is_configured()
@@ -28,6 +40,19 @@ def test_deepseek_chat_is_reported_as_text_only(monkeypatch):
 
     assert "text-only" in vlm.configuration_issue()
     assert not vlm.is_configured()
+
+
+def test_deepseek_vision_exp_is_configured(monkeypatch):
+    monkeypatch.setitem(vlm.CONFIG._data, "vlm", {
+        "enabled": True,
+        "base_url": "https://api.deepseek.com",
+        "api_key": "dummy",
+        "model": "deepseek-v4-flash-vision-exp",
+        "thinking": False,
+    })
+
+    assert vlm.configuration_issue() == ""
+    assert vlm.is_configured()
 
 
 def test_non_deepseek_multimodal_endpoint_stays_enabled(monkeypatch):

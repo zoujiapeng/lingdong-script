@@ -562,22 +562,23 @@ $startedAt = [DateTime]::UtcNow.ToString('o')
 $exitCode = 1
 $childPid = $null
 try {{
-  $child = Start-Process powershell -WindowStyle Hidden -PassThru `
-    -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$payloadPath) `
-    -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-  $childPid = [int]$child.Id
   [ordered]@{{
     state = 'running'
     monitor_pid = [int]$PID
     child_pid = $childPid
     started_at = $startedAt
   }} | ConvertTo-Json -Compress | Set-Content -LiteralPath $statusPath -Encoding UTF8
-  # PowerShell 5.1 can drop ExitCode after redirected processes exit unless
-  # the Process handle is materialized before WaitForExit.
-  $null = $child.Handle
-  $child.WaitForExit()
-  $child.Refresh()
-  $exitCode = [int]$child.ExitCode
+  # The monitor is already detached. Invoke the payload synchronously so the
+  # native process exit is reported by $LASTEXITCODE instead of Start-Process's
+  # unreliable redirected Process.ExitCode on Windows.
+  $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+  $ErrorActionPreference = 'Continue'
+  & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $payloadPath `
+    1> $stdoutPath 2> $stderrPath
+  $rawExitCode = $LASTEXITCODE
+  $ErrorActionPreference = 'Stop'
+  if ($null -eq $rawExitCode) {{ throw 'Child process exit code unavailable.' }}
+  $exitCode = [int]$rawExitCode
   $state = if ($exitCode -eq 0) {{ 'succeeded' }} else {{ 'failed' }}
   [ordered]@{{
     state = $state

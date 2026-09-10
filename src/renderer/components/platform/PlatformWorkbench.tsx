@@ -8,7 +8,6 @@ import {
   Braces,
   Check,
   CheckCircle2,
-  Command,
   ChevronRight,
   CircleStop,
   Clock3,
@@ -919,10 +918,19 @@ interface AgentCockpitProps {
   onOpenSystem?: () => void;
   onOpenWorkbench?: () => void;
   onLoadConversationFlow?: (automation: AutomationIR) => void;
-  onOpenCommand?: () => void;
   onCompact?: () => void;
   threadState?: AgentThreadState;
   onThreadStateChange?: (state: AgentThreadState) => void;
+}
+
+interface ComposerContextItem {
+  kind: 'file' | 'connector';
+  path: string;
+  label: string;
+}
+
+function contextItemLabel(filePath: string): string {
+  return filePath.split(/[\\/]/).filter(Boolean).pop() || filePath;
 }
 
 function visualRunTone(run: RunProjection | null): string {
@@ -1241,7 +1249,6 @@ export function AgentCockpit({
   onOpenSystem,
   onOpenWorkbench,
   onLoadConversationFlow,
-  onOpenCommand,
   onCompact,
   threadState: controlledThreadState,
   onThreadStateChange,
@@ -1252,7 +1259,10 @@ export function AgentCockpit({
   const [controlling, setControlling] = useState(false);
   const [actionError, setActionError] = useState('');
   const [composerFocused, setComposerFocused] = useState(false);
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const [composerContexts, setComposerContexts] = useState<ComposerContextItem[]>([]);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelConfig, setModelConfig] = useState<Record<string, any> | null>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [localThreadState, setLocalThreadState] = useState<AgentThreadState>(readAgentThreadState);
   const threadState = controlledThreadState || localThreadState;
@@ -1286,7 +1296,7 @@ export function AgentCockpit({
   const modelProfile = plane.overview?.status.model_profile;
   const showComposer = !hasConversation;
   const showFollowupComposer = hasConversation;
-  const modelLabel = String(modelProfile?.model || 'Visual Actor');
+  const modelLabel = String(modelConfig?.api?.model || modelProfile?.model || 'Visual Actor');
   const connectionLabel = plane.connection === 'online'
     ? '运行时在线'
     : plane.connection === 'degraded'
@@ -1306,8 +1316,20 @@ export function AgentCockpit({
     setGoal('');
     setActionError('');
     setActivityOpen(false);
+    setContextMenuOpen(false);
+    setComposerContexts([]);
     followConversationTail.current = true;
   }, [threadState.threadId]);
+
+  useEffect(() => {
+    if (!contextMenuOpen) return;
+    const closeContextMenu = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.ld-context-add-field')) return;
+      setContextMenuOpen(false);
+    };
+    window.addEventListener('pointerdown', closeContextMenu);
+    return () => window.removeEventListener('pointerdown', closeContextMenu);
+  }, [contextMenuOpen]);
 
   useEffect(() => {
     if (!modelMenuOpen) return;
@@ -1318,6 +1340,19 @@ export function AgentCockpit({
     window.addEventListener('pointerdown', closeModelMenu);
     return () => window.removeEventListener('pointerdown', closeModelMenu);
   }, [modelMenuOpen]);
+
+  useEffect(() => {
+    if (!plane.baseUrl) return;
+    let disposed = false;
+    plane.getClient().config()
+      .then((nextConfig) => {
+        if (!disposed) setModelConfig(nextConfig);
+      })
+      .catch((loadError) => {
+        if (!disposed) setActionError(loadError instanceof Error ? loadError.message : String(loadError));
+      });
+    return () => { disposed = true; };
+  }, [plane.baseUrl]);
 
   useEffect(() => {
     try {
@@ -1435,8 +1470,12 @@ export function AgentCockpit({
     setActionError('');
     followConversationTail.current = true;
     try {
+      const contextLines = composerContexts
+        .filter((item) => item.kind === 'file')
+        .map((item) => `[用户添加的本地文件] ${item.path}`);
+      const submittedGoal = [goal.trim(), ...contextLines].join('\n\n');
       const started = await plane.startGoal(
-        goal.trim(),
+        submittedGoal,
         threadState.threadId,
       );
       if (started?.run_id) {
@@ -1458,6 +1497,7 @@ export function AgentCockpit({
         }
       }
       setGoal('');
+      setComposerContexts([]);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setActionError(message);
@@ -1473,6 +1513,8 @@ export function AgentCockpit({
     commitThreadState({ persisted: true, threadId: '', runIds: [] });
     setRunDetails({});
     setGoal('');
+    setContextMenuOpen(false);
+    setComposerContexts([]);
     setActionError('');
     setActivityOpen(false);
     followConversationTail.current = true;
@@ -1545,6 +1587,72 @@ export function AgentCockpit({
     }
   };
 
+  const rememberComposerContext = (item: ComposerContextItem) => {
+    setComposerContexts((current) => (
+      current.some((existing) => existing.kind === item.kind && existing.path === item.path)
+        ? current
+        : [...current, item]
+    ));
+  };
+
+  const addLocalFile = async () => {
+    setContextMenuOpen(false);
+    const api = window.electronAPI;
+    if (!api?.openFileDialog) {
+      setActionError('当前环境不支持选择本地文件。');
+      return;
+    }
+    try {
+      const selected = await api.openFileDialog([{ name: '所有文件', extensions: ['*'] }]);
+      const filePath = selected.filePaths[0];
+      if (selected.canceled || !filePath) return;
+      rememberComposerContext({ kind: 'file', path: filePath, label: contextItemLabel(filePath) });
+    } catch (fileError) {
+      setActionError(fileError instanceof Error ? fileError.message : String(fileError));
+    }
+  };
+
+  const addConnectorConfig = async () => {
+    setContextMenuOpen(false);
+    const api = window.electronAPI;
+    if (!api?.openFileDialog || !plane.baseUrl) {
+      setActionError('连接器配置需要桌面文件选择器和在线运行时。');
+      return;
+    }
+    try {
+      const selected = await api.openFileDialog([{ name: 'MCP 连接器配置', extensions: ['json'] }]);
+      const filePath = selected.filePaths[0];
+      if (selected.canceled || !filePath) return;
+      const client = plane.getClient();
+      const currentConfig = await client.config();
+      const existingPaths = Array.isArray(currentConfig.mcp?.config_paths)
+        ? currentConfig.mcp.config_paths.map(String)
+        : [];
+      const nextConfig = await client.patchConfig({
+        mcp: { config_paths: [...new Set([...existingPaths, filePath])] },
+      });
+      setModelConfig(nextConfig);
+      rememberComposerContext({ kind: 'connector', path: filePath, label: contextItemLabel(filePath) });
+    } catch (connectorError) {
+      setActionError(connectorError instanceof Error ? connectorError.message : String(connectorError));
+    }
+  };
+
+  const activateComposerModelProfile = async (profileId: string) => {
+    if (!profileId || profileId === modelConfig?.active_model_profile) {
+      setModelMenuOpen(false);
+      return;
+    }
+    setActionError('');
+    try {
+      const nextConfig = await plane.getClient().patchConfig({ active_model_profile: profileId });
+      setModelConfig(nextConfig);
+      setModelMenuOpen(false);
+    } catch (switchError) {
+      setActionError(switchError instanceof Error ? switchError.message : String(switchError));
+    }
+  };
+
   const renderComposerField = (compact = false) => (
     <>
       <textarea
@@ -1572,10 +1680,48 @@ export function AgentCockpit({
             : '描述任务或直接告诉 Agent 你需要什么…'}
         disabled={submitting}
       />
+      {composerContexts.length > 0 && (
+        <div className="ld-composer-context-items" aria-label="已添加的上下文">
+          {composerContexts.map((item) => (
+            <span key={`${item.kind}:${item.path}`}>
+              {item.kind === 'file' ? <FilePlus2 size={12} /> : <Network size={12} />}
+              <span>{item.label}</span>
+              <button
+                type="button"
+                aria-label={`移除 ${item.label}`}
+                onClick={() => setComposerContexts((current) => current.filter((existing) => existing !== item))}
+              ><X size={11} /></button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="ld-composer-footer">
-        <button className="ld-round-control" type="button" onClick={onOpenCommand} aria-label="添加上下文" title="添加上下文或打开隐藏功能（Ctrl+K）">
-          <Plus size={18} />
-        </button>
+        <span className="ld-context-add-field">
+          <button
+            className="ld-round-control"
+            type="button"
+            aria-label="添加上下文"
+            aria-expanded={contextMenuOpen}
+            title="添加文件或连接器"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              setModelMenuOpen(false);
+              setContextMenuOpen((current) => !current);
+            }}
+          >
+            <Plus size={18} />
+          </button>
+          {contextMenuOpen && (
+            <span className="ld-context-add-menu" role="menu" aria-label="添加上下文">
+              <button type="button" role="menuitem" onMouseDown={(event) => event.preventDefault()} onClick={() => void addLocalFile()}>
+                <FilePlus2 size={15} /><span><strong>添加文件</strong><small>选择本机文件作为任务上下文</small></span>
+              </button>
+              <button type="button" role="menuitem" onMouseDown={(event) => event.preventDefault()} onClick={() => void addConnectorConfig()}>
+                <Network size={15} /><span><strong>MCP / GitHub 连接器</strong><small>添加已有连接器 JSON 配置</small></span>
+              </button>
+            </span>
+          )}
+        </span>
         <div
           className={`ld-composer-context ${compact || composerFocused || goal.trim() || modelMenuOpen ? '' : 'soft-hidden'}`}
           aria-label="输入框运行上下文"
@@ -1592,7 +1738,27 @@ export function AgentCockpit({
             </button>
             {modelMenuOpen && (
               <span className="ld-composer-inline-options" role="listbox" aria-label="模型选项">
+                {Object.entries(modelConfig?.model_profiles || {}).map(([profileId, rawProfile]) => {
+                  const profile = rawProfile as Record<string, any>;
+                  const activeProfile = profileId === modelConfig?.active_model_profile;
+                  return (
+                    <button
+                      className={activeProfile ? 'active' : ''}
+                      type="button"
+                      role="option"
+                      aria-selected={activeProfile}
+                      aria-label={`切换到 ${profile.label || profileId}`}
+                      key={profileId}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => void activateComposerModelProfile(profileId)}
+                    >
+                      <span><strong>{profile.label || profileId}</strong><small>{profile.api?.model || '未指定模型'}</small></span>
+                      {activeProfile && <Check size={13} />}
+                    </button>
+                  );
+                })}
                 <button
+                  className="settings"
                   type="button"
                   role="option"
                   onMouseDown={(event) => event.preventDefault()}
@@ -1643,7 +1809,6 @@ export function AgentCockpit({
               <span>所有能力默认收起，需要时再打开</span>
               <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenResources}><MessageSquare size={14} /><span><strong>历史对话</strong><small>打开已有对话并继续聊天</small></span><ChevronRight size={14} /></button>
               <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenWorkbench}><Activity size={14} /><span><strong>工作台</strong><small>执行、资料、流程与设置</small></span><ChevronRight size={14} /></button>
-              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenCommand}><Command size={14} /><span><strong>命令面板</strong><small>直接搜索任何隐藏功能</small></span><ChevronRight size={14} /></button>
             </div>
           )}
           {(actionError || plane.error || (modelProfile?.model && modelProfile.supports_vision === false)) && (
@@ -2639,6 +2804,16 @@ function SystemView({ plane }: { plane: Plane }) {
   }, [plane.baseUrl]);
 
   const patch = (section: string, key: string, value: unknown) => setConfig((current) => current ? { ...current, [section]: { ...current[section], [key]: value } } : current);
+  const activateModelProfile = async (profileId: string) => {
+    if (!profileId || profileId === config?.active_model_profile) return;
+    setSaving(true); setError('');
+    try {
+      const next = await plane.getClient().patchConfig({ active_model_profile: profileId });
+      setConfig(next);
+      setSaved(true); setTimeout(() => setSaved(false), 1800);
+    } catch (switchError) { setError(switchError instanceof Error ? switchError.message : String(switchError)); }
+    finally { setSaving(false); }
+  };
   const save = async () => {
     if (!config) return;
     setSaving(true); setError('');
@@ -2659,6 +2834,13 @@ function SystemView({ plane }: { plane: Plane }) {
           <div className="arp-panel-heading"><div><Bot size={15} /><strong>模型</strong></div></div>
           {config ? (
             <div className="arp-form-grid">
+              <label className="wide"><span>已保存模型档案</span><select aria-label="已保存模型档案" value={config.active_model_profile || ''} disabled={saving} onChange={(event) => activateModelProfile(event.target.value)}>
+                <option value="" disabled>选择一个模型档案</option>
+                {Object.entries(config.model_profiles || {}).map(([profileId, rawProfile]) => {
+                  const profile = rawProfile as Record<string, any>;
+                  return <option key={profileId} value={profileId}>{profile.label || profileId} · {profile.api?.model || '未指定模型'}</option>;
+                })}
+              </select><small className="arp-profile-hint">切换立即生效；API 密钥保存在本机，无需重复输入。</small></label>
               <label><span>服务商</span><input value={config.api?.provider || ''} onChange={(event) => patch('api', 'provider', event.target.value)} /></label>
               <label><span>主模型</span><input value={config.api?.model || ''} onChange={(event) => patch('api', 'model', event.target.value)} /></label>
               <label className="wide"><span>API 基础地址</span><input value={config.api?.base_url || ''} onChange={(event) => patch('api', 'base_url', event.target.value)} /></label>
@@ -3038,69 +3220,6 @@ function RuntimeWorkbench({
   );
 }
 
-interface FloatingCommand {
-  id: string;
-  label: string;
-  detail: string;
-  icon: React.ElementType;
-  action: () => void;
-}
-
-function CommandPalette({
-  commands,
-  query,
-  onQuery,
-  onClose,
-}: {
-  commands: FloatingCommand[];
-  query: string;
-  onQuery: (query: string) => void;
-  onClose: () => void;
-}) {
-  const needle = query.trim().toLocaleLowerCase();
-  const visible = commands.filter((command) => !needle || `${command.label} ${command.detail}`.toLocaleLowerCase().includes(needle));
-  const runCommand = (command: FloatingCommand) => {
-    onClose();
-    command.action();
-  };
-
-  return (
-    <div className="ld-command-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="ld-command-palette" role="dialog" aria-modal="true" aria-label="命令面板">
-        <div className="ld-command-input">
-          <Search size={18} />
-          <input
-            autoFocus
-            value={query}
-            onChange={(event) => onQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && visible[0]) runCommand(visible[0]);
-              if (event.key === 'Escape') onClose();
-            }}
-            placeholder="搜索隐藏功能或命令…"
-            aria-label="搜索命令"
-          />
-          <kbd>Esc</kbd>
-        </div>
-        <div className="ld-command-list">
-          {visible.map((command, index) => {
-            const Icon = command.icon;
-            return (
-              <button key={command.id} type="button" className={index === 0 ? 'active' : ''} onClick={() => runCommand(command)}>
-                <span><Icon size={15} /></span>
-                <span><strong>{command.label}</strong><small>{command.detail}</small></span>
-                <ChevronRight size={14} />
-              </button>
-            );
-          })}
-          {!visible.length && <EmptyState icon={Search} title="没有匹配命令" detail="换一个更短的关键词。" />}
-        </div>
-        <footer><span><kbd>Enter</kbd> 打开</span><span><kbd>Esc</kbd> 关闭</span><span><kbd>Ctrl K</kbd> 随时呼出</span></footer>
-      </section>
-    </div>
-  );
-}
-
 export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () => Promise<void> }) {
   const plane = useControlPlane();
   const desktopWindowApi = window.electronAPI;
@@ -3114,8 +3233,6 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
     initialView === 'runs' || initialView === 'assets' || initialView === 'system' ? initialView : null,
   );
   const [flowOpen, setFlowOpen] = useState(initialView === 'studio');
-  const [commandOpen, setCommandOpen] = useState(false);
-  const [commandQuery, setCommandQuery] = useState('');
 
   useEffect(() => {
     useStore.getState().fetchFeatures();
@@ -3168,17 +3285,8 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'k') {
-        event.preventDefault();
-        setCommandOpen((value) => !value);
-        setCommandQuery('');
-        return;
-      }
       if (event.key !== 'Escape') return;
-      if (commandOpen) {
-        setCommandOpen(false);
-        setCommandQuery('');
-      } else if (flowOpen) {
+      if (flowOpen) {
         closeFlow();
       } else if (conversationOpen) {
         setConversationOpen(false);
@@ -3188,12 +3296,7 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [closeFlow, commandOpen, conversationOpen, flowOpen, workbenchView]);
-
-  const closeCommand = () => {
-    setCommandOpen(false);
-    setCommandQuery('');
-  };
+  }, [closeFlow, conversationOpen, flowOpen, workbenchView]);
 
   const updateThreadState = useCallback((next: AgentThreadState) => {
     persistAgentThread(next.threadId, next.runIds);
@@ -3230,17 +3333,6 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
     setViewMode('agent');
   }, [plane.currentRun, setViewMode, updateThreadState]);
 
-  const commands: FloatingCommand[] = [
-    { id: 'agent', label: '智能代理', detail: '新建任务或返回当前任务', icon: Bot, action: openAgent },
-    { id: 'conversations', label: '对话列表', detail: '打开已有对话并继续聊天', icon: MessageSquare, action: openConversations },
-    { id: 'activity', label: '当前执行', detail: '查看当前任务状态和控制', icon: Activity, action: () => openWorkbench('activity') },
-    { id: 'context', label: '上下文与证据', detail: '当前画面、证据与工件', icon: Layers3, action: () => openWorkbench('context') },
-    { id: 'runs', label: '运行记录', detail: '在工作台查看历史运行', icon: History, action: () => openWorkbench('runs') },
-    { id: 'assets', label: '技能与记忆', detail: '在工作台管理技能与记忆', icon: Library, action: () => openWorkbench('assets') },
-    { id: 'flow', label: '流程工作台', detail: '打开完整可编辑流程图', icon: GitBranch, action: openFlow },
-    { id: 'system', label: '系统设置', detail: '在工作台调整模型与运行时', icon: Settings, action: () => openWorkbench('system') },
-  ];
-
   return (
     <div className="arp-app ld-floating-app">
       <div className="ld-native-titlebar" aria-label="灵动脚本窗口标题栏">
@@ -3276,7 +3368,6 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
             onOpenSystem={() => openWorkbench('system')}
             onOpenWorkbench={() => openWorkbench(plane.currentRun ? 'activity' : 'flow')}
             onLoadConversationFlow={loadConversationFlow}
-            onOpenCommand={() => { setCommandOpen(true); setCommandQuery(''); }}
             onCompact={() => { if (plane.currentRun) setWindowMode('compact'); }}
           />
         )}
@@ -3316,27 +3407,6 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
         </>
       )}
 
-      {commandOpen && (
-        <CommandPalette
-          commands={commands}
-          query={commandQuery}
-          onQuery={setCommandQuery}
-          onClose={closeCommand}
-        />
-      )}
-
-      <button
-        className="ld-command-orb"
-        type="button"
-        onClick={() => {
-          setCommandOpen(true);
-          setCommandQuery('');
-        }}
-        aria-label="打开命令面板"
-        title="Ctrl+K"
-      >
-        <Command size={14} />
-      </button>
     </div>
   );
 }
