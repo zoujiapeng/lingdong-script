@@ -178,6 +178,11 @@ function buildTasks() {
       id: 'notepad_save',
       async setup() {
         const value = token('T1')
+        // Start from no Notepad at all: a window that is already open can be
+        // adopted by the launch instead of a fresh one being created, and the
+        // task should not depend on which happened.
+        killByName(['notepad'])
+        await sleep(700)
         return { value }
       },
       goal: ({ value }) => `Open Notepad, type exactly ${value} into it, and save the document to ${path.join(WORK, 't1.txt')}.`,
@@ -485,6 +490,8 @@ async function main() {
 
   const report = path.join(WORK, `report-${Date.now()}.json`)
   writeFileSync(report, JSON.stringify(results, null, 2), 'utf8')
+  // A comparison run must not leave the machine changed for the next one.
+  killByName(['notepad', 'CalculatorApp', 'Calculator', 'chrome', 'msedge'])
   console.log('\n=== summary ===')
   for (const arm of arms) {
     const rows = results.filter((row) => row.arm === arm)
