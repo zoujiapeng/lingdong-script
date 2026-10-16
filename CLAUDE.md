@@ -1,5 +1,13 @@
 # AI / Codex / 开发者接手入口
 
+> ## ⚠️ 如果你要做的是 DSH 插件子项目，先停下
+>
+> 本文件讲的是**主产品（灵动脚本 / WinPilot 桌面 Agent）**，与 DSH 插件子项目无关。
+> 子项目的唯一入口是 **`packages/dsh-plugin-lingdong/AGENTS.md`** —— 目标、现状实测数据、
+> 未完成项、踩过的坑、验证命令全在里面。**先读它，不要读本文件。**
+>
+> DSH 插件子项目的一切都限制在 `packages/` 下，分支 `feat/dsh-plugin`。
+
 ## 2026-09-10 模型直切、通用连接器入口与 detached CI 修复
 
 - 本机 `config.json` 可保存 MiMo / DeepSeek 等模型档案；输入框模型名直接展开并切换，
