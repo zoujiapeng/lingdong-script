@@ -13,6 +13,8 @@ ALLOWED_BATCH_ACTIONS = {
     "type_into_element",
     "type_text",
     "set_value",
+    "invoke_menu",
+    "kill_app",
     "hotkey",
     "scroll",
     "move_mouse",
@@ -40,6 +42,8 @@ BATCH_MUTATING_ACTIONS = {
     "type_into_element",
     "type_text",
     "set_value",
+    "invoke_menu",
+    "kill_app",
     "hotkey",
     "scroll",
     "move_mouse",
@@ -409,6 +413,46 @@ def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
             return "width must be positive"
         if args.get("height") is not None and float(args["height"]) <= 0:
             return "height must be positive"
+    if name == "invoke_menu":
+        # A menu command is addressed by its position in a menu, so the path is
+        # the whole address. Checked here so a malformed path is refused as a
+        # contract error, before it depends on any window being available.
+        path = args.get("path")
+        if not isinstance(path, (list, tuple)) or not path:
+            return "requires a non-empty path array of menu labels or indexes"
+        if len(path) > 8:
+            return "path is limited to 8 menu levels"
+        for depth, segment in enumerate(path, start=1):
+            if isinstance(segment, bool):
+                return f"path[{depth - 1}] must be a menu label or an index"
+            if isinstance(segment, (int, float)):
+                if not math.isfinite(float(segment)):
+                    return f"path[{depth - 1}] must be finite"
+                if int(segment) < 0:
+                    return f"path[{depth - 1}] must not be negative"
+                continue
+            if not str(segment or "").strip():
+                return f"path[{depth - 1}] must be a menu label or an index"
+    if name == "kill_app":
+        # Terminating a process is not reversible, so the target must be named
+        # exactly once and unambiguously: a handle, a process id, or a title.
+        if not any(
+            args.get(key) not in (None, "")
+            for key in ("pid", "hwnd", "title")
+        ):
+            return "requires pid, hwnd, or title"
+        if args.get("pid") is not None:
+            pid = args.get("pid")
+            if isinstance(pid, bool) or not isinstance(pid, (int, float)):
+                return "pid must be a number"
+            if not math.isfinite(float(pid)) or int(pid) <= 0:
+                return "pid must be a positive process id"
+        if args.get("timeout_s") is not None:
+            timeout = args.get("timeout_s")
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                return "timeout_s must be a number"
+            if not math.isfinite(float(timeout)) or not 0 < float(timeout) <= 60:
+                return "timeout_s must be in 0..60"
     if name == "hotkey" and not (args.get("keys") or args.get("value")):
         return "requires keys"
     if name == "hold_key" and not (args.get("keys") or args.get("value")):

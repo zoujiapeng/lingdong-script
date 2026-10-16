@@ -9,17 +9,21 @@ single-writer lease.
 from __future__ import annotations
 
 import base64
+import ctypes
+from ctypes import wintypes
 from io import BytesIO
 import json
 import math
 from pathlib import Path
 import shlex
+import subprocess
 import time
 from typing import Any, Callable
 
 from PIL import Image
 import win32con
 import win32gui
+import win32process
 
 from ..action import executor as action_executor
 from ..action.desktop_queue import (
@@ -117,12 +121,81 @@ def _redact_action_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
             "arguments_length": len(str(arguments or "")),
             "command_redacted": True,
         })
+    if name == "kill_app":
+        # A window title is arbitrary application text and a pid names a specific
+        # process on a specific machine; the trace keeps the fact of the action,
+        # not either identifier.
+        title = projected.pop("title", "")
+        projected.pop("pid", None)
+        projected.update({
+            "title_length": len(str(title or "")),
+            "target_redacted": True,
+        })
+    return projected
+
+
+# Bounded so the record also survives the run timeline's own cap (600 characters
+# in the projection), which would otherwise cut it in half. It is the timeline
+# summary a caller and the recorder read, so a record that only fits the larger
+# budget here still arrives there unparseable.
+_EVENT_PREVIEW_LIMIT = 560
+# How many alternatives a refusal offers. Deliberately small: the entries carry
+# display text, and the whole refusal -- reason, resolved prefix and choices --
+# has to survive into the bounded BUS preview a caller reads. The preview
+# shortens this list further if it still does not fit.
+_EVENT_PREVIEW_LIST_LIMIT = 8
+# What a preview keeps, most useful first. The leading group is what a caller
+# needs to decide what to do next; the rest is context that may be dropped.
+_EVENT_PREVIEW_KEY_ORDER = (
+    "ok", "verified", "input_completed", "delivered", "action_state",
+    "command", "command_text", "enabled", "error", "note", "error_kind",
+    "outcome", "hwnd", "resolved_by", "resolved_path", "available",
+    "available_truncated", "changed", "text_length", "text_codepoint_count",
+    "before", "after", "target", "value", "coords", "region", "metrics",
+)
+
+
+def _preview_projection(data: dict[str, Any]) -> dict[str, Any]:
+    """Bound the open-ended parts of one action result for a BUS preview."""
+    projected = dict(data or {})
+    available = projected.get("available")
+    if isinstance(available, list) and len(available) > _EVENT_PREVIEW_LIST_LIMIT:
+        projected["available"] = available[:_EVENT_PREVIEW_LIST_LIMIT]
+        projected["available_truncated"] = len(available) - _EVENT_PREVIEW_LIST_LIMIT
     return projected
 
 
 def _safe_event_preview(name: str, data: dict[str, Any], args: dict[str, Any]) -> str:
+    """Render one action result as a bounded, always-parseable record.
+
+    A caller reads this record to decide what to do next, so it is kept valid
+    JSON rather than being cut off mid-token. When the record does not fit, the
+    list of alternatives is shortened first - a caller that has some of the
+    choices can still act - and only then are the least useful fields dropped.
+    """
     if name not in _SENSITIVE_TRACE_ACTIONS:
-        return json.dumps(data, ensure_ascii=False, default=str)[:800]
+        projected = _preview_projection(data)
+        available = projected.get("available")
+        for keep in range(len(available), -1, -1) if isinstance(available, list) else [0]:
+            candidate = dict(projected)
+            if isinstance(available, list):
+                candidate["available"] = available[:keep]
+                if keep < len(available):
+                    candidate["available_truncated"] = len(available) - keep
+            if len(json.dumps(candidate, ensure_ascii=False, default=str)) <= _EVENT_PREVIEW_LIMIT:
+                return json.dumps(candidate, ensure_ascii=False, default=str)
+        ordered = [key for key in _EVENT_PREVIEW_KEY_ORDER if key in projected]
+        ordered += [key for key in projected if key not in _EVENT_PREVIEW_KEY_ORDER]
+        for keep in range(len(ordered), 0, -1):
+            selected = {key: projected[key] for key in ordered[:keep]}
+            text = json.dumps(selected, ensure_ascii=False, default=str)
+            if len(text) <= _EVENT_PREVIEW_LIMIT:
+                return text
+        return json.dumps(
+            {"ok": bool(projected.get("ok")), "error": "action result was too large to preview"},
+            ensure_ascii=False,
+            default=str,
+        )
     safe = {
         "ok": bool(data.get("ok")),
         "input_completed": data.get("input_completed"),
@@ -187,6 +260,271 @@ def _region_payload(region: Region) -> dict[str, int]:
         "width": int(region.width),
         "height": int(region.height),
     }
+
+
+# --------------------------------------------------------------------------
+#  Application menus, read through the Win32 menu API.
+#
+#  Accessibility reaches a menu bar and its first-level items but reports no
+#  children for them, so a submenu item is simply not addressable that way
+#  (measured on Notepad: MenuBarControl with five MenuItemControl children,
+#  each with GetChildren() == []).  ``GetMenu``/``GetMenuItemInfo`` read the
+#  same menu through the API the application itself populated, nested levels
+#  included, and a leaf carries the command id the window reacts to.
+# --------------------------------------------------------------------------
+
+
+class _MenuItemInfo(ctypes.Structure):
+    """MENUITEMINFOW, laid out the way the Win32 header defines it.
+
+    ``dwTypeData`` is declared as a plain address on purpose. Typing it
+    ``LPWSTR`` makes ctypes dereference the pointer on assignment, so the struct
+    would carry the *contents* of an empty string rather than a buffer the API
+    can write into, and every label would read back empty.
+    """
+
+    _fields_ = [
+        ("cbSize", wintypes.UINT),
+        ("fMask", wintypes.UINT),
+        ("fType", wintypes.UINT),
+        ("fState", wintypes.UINT),
+        ("wID", wintypes.UINT),
+        ("hSubMenu", wintypes.HMENU),
+        ("hbmpChecked", wintypes.HBITMAP),
+        ("hbmpUnchecked", wintypes.HBITMAP),
+        ("dwItemData", ctypes.c_void_p),
+        ("dwTypeData", ctypes.c_void_p),
+        ("cch", wintypes.UINT),
+        ("hbmpItem", wintypes.HBITMAP),
+    ]
+
+
+_MENU_INFO_MASK = (
+    win32con.MIIM_STATE | win32con.MIIM_ID | win32con.MIIM_SUBMENU
+    | win32con.MIIM_STRING | win32con.MIIM_FTYPE
+)
+_MENU_LABEL_LIMIT = 200
+# How many alternatives a refusal offers. Bounded so the whole refusal - the
+# reason, the resolved prefix and the choices - survives into the bounded BUS
+# preview a caller reads, instead of being cut off mid-list.
+_MENU_LIST_LIMIT = 24
+# A menu command is sent with a deadline rather than synchronously: an
+# application that has stopped pumping messages must not be able to hold the
+# controller's desktop lease open.
+_MENU_COMMAND_TIMEOUT_MS = 30_000
+_MENU_TEXT_TIMEOUT_MS = 5_000
+# How long to keep watching a window for the effect of its own menu command.
+# Bounded because a command that changes nothing observable must not cost more
+# than this, and it exits as soon as anything does change.
+_MENU_SETTLE_TIMEOUT_S = 1.0
+_MENU_SETTLE_POLL_S = 0.05
+# Terminating a process is the one action whose effect cannot be undone, and it
+# is immediate on this platform, so there is nothing to tune: the process is
+# asked to end, and how long the caller waits for the confirmation is theirs.
+_KILL_DEFAULT_TIMEOUT_S = 10.0
+_KILL_POLL_S = 0.2
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+
+def _menu_handle(value: Any) -> int:
+    """The integer behind a Win32 handle.
+
+    A ctypes handle type does not convert to ``int`` directly, and reading it via
+    ``.value`` yields the raw bytes, so it is read through the pointer cast.
+    """
+    return int(ctypes.cast(value, ctypes.c_void_p).value or 0)
+
+
+def _process_is_alive(pid: int) -> bool:
+    """Whether a process id still names a running process.
+
+    The repository already answers this by opening the process with query rights
+    (``perception.apps``); reusing that keeps one definition of "running" rather
+    than a second one that could disagree with the ground-truth checks.
+    """
+    try:
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+    except Exception:
+        return False
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
+def _window_process_id(hwnd: int) -> int:
+    """The process that owns a window, or 0 when it cannot be read."""
+    try:
+        _thread_id, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return int(pid or 0)
+    except Exception:
+        return 0
+
+
+def _menu_label(value: Any) -> str:
+    """Flatten a menu label for matching.
+
+    A label carries its accelerator marker, a tab-separated shortcut and often
+    a trailing ellipsis: ``&Save As...\\tCtrl+Shift+S``. None of that is part of
+    what a caller means by "Save As", so all of it is dropped and the rest is
+    compared case-insensitively.
+    """
+    text = str(value or "")[: _MENU_LABEL_LIMIT * 2]
+    text = text.replace("&", "").split("\t")[0].strip()
+    return text.rstrip(".").strip().casefold()
+
+
+def _menu_read_item(menu: int, position: int) -> dict[str, Any] | None:
+    """Read one menu item by position, or ``None`` when it is unreadable."""
+    if not menu:
+        return None
+    info = _MenuItemInfo()
+    info.cbSize = ctypes.sizeof(_MenuItemInfo)
+    info.fMask = _MENU_INFO_MASK
+    buffer = ctypes.create_unicode_buffer(_MENU_LABEL_LIMIT)
+    info.dwTypeData = ctypes.cast(buffer, ctypes.c_void_p)
+    info.cch = _MENU_LABEL_LIMIT
+    if not _user32.GetMenuItemInfoW(
+        wintypes.HMENU(menu), int(position), True, ctypes.byref(info)
+    ):
+        return None
+    submenu = _menu_handle(info.hSubMenu)
+    return {
+        "index": int(position),
+        "text": buffer.value,
+        "label": _menu_label(buffer.value),
+        "id": int(info.wID),
+        "submenu": submenu,
+        "is_container": bool(submenu) and bool(int(info.fMask & win32con.MIIM_SUBMENU)),
+        "enabled": (int(info.fState) & win32con.MFS_GRAYED) == 0,
+        "separator": bool(int(info.fType) & win32con.MF_SEPARATOR),
+    }
+
+
+def _menu_items(menu: int) -> list[dict[str, Any]]:
+    """Read every item of one menu handle, in menu order."""
+    if not menu:
+        return []
+    count = int(_user32.GetMenuItemCount(wintypes.HMENU(menu)))
+    items = [_menu_read_item(menu, position) for position in range(count)]
+    return [item for item in items if item is not None]
+
+
+def _menu_describe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project menu items down to what a caller needs to choose between them."""
+    described: list[dict[str, Any]] = []
+    for item in items[:_MENU_LIST_LIMIT]:
+        if item.get("separator") and not str(item.get("text") or "").strip():
+            continue
+        described.append({
+            "index": item["index"],
+            "text": str(item["text"] or ""),
+            "id": int(item["id"]),
+            "container": bool(item["is_container"]),
+            "enabled": bool(item["enabled"]),
+        })
+    return described
+
+
+def _menu_select(
+    items: list[dict[str, Any]],
+    selector: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    """Choose one menu item by index or by label.
+
+    Choosing by label picks the first match; a label that matches more than one
+    item in the same menu is reported instead of silently resolved, because the
+    caller would otherwise get an arbitrary one of them.
+    """
+    if isinstance(selector, bool):
+        return None, "a menu selector must be a label or an index"
+    if isinstance(selector, (int, float)) and not isinstance(selector, bool):
+        position = int(selector)
+        for item in items:
+            if item["index"] == position:
+                return item, ""
+        return None, f"index {position} is outside this menu ({len(items)} items)"
+    wanted = _menu_label(selector)
+    if not wanted:
+        return None, "a menu selector must not be empty"
+    matches = [item for item in items if item["label"] == wanted]
+    if not matches:
+        return None, f"no menu item is named {str(selector).strip()!r}"
+    if len(matches) > 1:
+        return None, (
+            f"{str(selector).strip()!r} names {len(matches)} items in this menu; "
+            "address one of them by index"
+        )
+    return matches[0], ""
+
+
+def _menu_state_equal(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Whether two reads of a window's own facts agree on every field."""
+    return all(left.get(key) == right.get(key) for key in ("title", "text_length", "visible_children"))
+
+
+def _menu_read_text_length(hwnd: int) -> int:
+    """The length of the text the window's content holds, or -1 when unreadable.
+
+    Applications usually keep their document in an edit control rather than in
+    the top-level window, and a top-level window answers ``WM_GETTEXTLENGTH``
+    with its caption: on Notepad that reads 10 no matter how long the document
+    is, so measuring it there would report every document command as having no
+    effect. The control that holds the content is therefore measured first.
+    """
+    controls: list[int] = []
+
+    def collect(child: int, _param: Any) -> bool:
+        try:
+            if str(win32gui.GetClassName(child) or "") in {"Edit", "RichEdit20W", "RICHEDIT50W"}:
+                controls.append(child)
+        except Exception:
+            return True
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, collect, None)
+    except Exception:
+        controls = []
+
+    out = ctypes.c_size_t()
+    for target in [*controls, hwnd]:
+        ok = _user32.SendMessageTimeoutW(
+            wintypes.HWND(target),
+            win32con.WM_GETTEXTLENGTH,
+            0,
+            0,
+            win32con.SMTO_ABORTIFHUNG,
+            _MENU_TEXT_TIMEOUT_MS,
+            ctypes.byref(out),
+        )
+        if ok:
+            return int(out.value)
+    return -1
+
+
+def _menu_visible_children(hwnd: int) -> list[str]:
+    """Class names of the window's visible child controls, sorted.
+
+    An application that answers a menu command by showing or hiding a control
+    (a status bar, a toolbar, a find bar) changes this list, which makes the
+    change observable from outside the application.
+    """
+    classes: list[str] = []
+
+    def collect(child: int, _param: Any) -> bool:
+        try:
+            if win32gui.IsWindowVisible(child):
+                classes.append(str(win32gui.GetClassName(child) or ""))
+        except Exception:
+            return True
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, collect, None)
+    except Exception:
+        return []
+    return sorted(classes)
 
 
 class FastGuiController:
@@ -726,6 +1064,303 @@ class FastGuiController:
             "activated": foreground_after != foreground_before,
         }
 
+    def _invoke_menu(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run one application menu command, addressed by its menu path.
+
+        This is deliberately not a click on a menu: nothing is aimed, no
+        keystroke is synthesized, and the window never has to be in front. The
+        path is walked through the application's own Win32 menu, and only a leaf
+        that carries a command id is executed, so a caller that names a menu
+        heading is told what that heading contains instead of having a submenu
+        opened on its behalf.
+
+        The command is sent as ``WM_COMMAND``, which is the message Windows
+        itself delivers when a menu item is chosen, and which crosses the
+        process boundary. Delivery is therefore its own answer; whether the
+        application *changed* anything is a separate observation, reported as
+        such rather than folded into success.
+        """
+        raw_path = args.get("path")
+        path = list(raw_path) if isinstance(raw_path, (list, tuple)) else []
+        if not path:
+            return {"ok": False, "error": "invoke_menu requires a non-empty path array of menu labels or indexes"}
+
+        hwnd, resolved_by = self._resolve_action_hwnd(args)
+        if not hwnd:
+            return {"ok": False, "error": "invoke_menu requires an hwnd, a matching title, or a focused target window"}
+
+        try:
+            menu = int(win32gui.GetMenu(hwnd) or 0)
+        except Exception as exc:
+            return {"ok": False, "error": f"the target window's menu could not be read: {exc}", "hwnd": hwnd}
+        if not menu:
+            return {
+                "ok": False,
+                "error": "the target window has no Win32 menu; use the accessibility tree or a keystroke instead",
+                "hwnd": hwnd,
+                "resolved_by": resolved_by,
+            }
+
+        resolved: list[dict[str, Any]] = []
+        current = menu
+        for depth, selector in enumerate(path, start=1):
+            items = _menu_items(current)
+            item, failure = _menu_select(items, selector)
+            if item is None:
+                return {
+                    "ok": False,
+                    "error": f"menu path level {depth}: {failure}",
+                    "hwnd": hwnd,
+                    "resolved_path": resolved,
+                    "available": _menu_describe(items),
+                }
+            resolved.append({
+                "level": depth,
+                "selector": selector,
+                "index": item["index"],
+                "text": str(item["text"] or ""),
+                "id": int(item["id"]),
+                "container": bool(item["is_container"]),
+                "enabled": bool(item["enabled"]),
+            })
+            if item["is_container"]:
+                if depth == len(path):
+                    # The path stopped at a heading, so nothing was chosen. Show
+                    # what is in it; opening a menu is not a command.
+                    children = _menu_items(item["submenu"])
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"the path ends at the menu {str(item['text'] or '').strip()!r}, "
+                            "which is a container rather than a command"
+                        ),
+                        "hwnd": hwnd,
+                        "resolved_path": resolved,
+                        "available": _menu_describe(children),
+                    }
+                current = item["submenu"]
+            elif depth != len(path):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"menu path level {depth} resolves to {str(item['text'] or '').strip()!r}, "
+                        "which has no submenu"
+                    ),
+                    "hwnd": hwnd,
+                    "resolved_path": resolved,
+                }
+
+        command = int(resolved[-1]["id"])
+        if command <= 0:
+            return {
+                "ok": False,
+                "error": "the resolved menu item carries no command id",
+                "hwnd": hwnd,
+                "resolved_path": resolved,
+            }
+
+        before = {
+            "title": str(win32._window_text(hwnd) or ""),
+            "text_length": _menu_read_text_length(hwnd),
+            "visible_children": _menu_visible_children(hwnd),
+        }
+        outcome = ctypes.c_size_t()
+        delivered = bool(_user32.SendMessageTimeoutW(
+            wintypes.HWND(hwnd),
+            win32con.WM_COMMAND,
+            wintypes.WPARAM(command),
+            wintypes.LPARAM(0),
+            win32con.SMTO_ABORTIFHUNG,
+            _MENU_COMMAND_TIMEOUT_MS,
+            ctypes.byref(outcome),
+        ))
+        last_error = 0 if delivered else int(ctypes.get_last_error())
+        after = {
+            "title": str(win32._window_text(hwnd) or ""),
+            "text_length": _menu_read_text_length(hwnd),
+            "visible_children": _menu_visible_children(hwnd),
+        }
+        # An application may answer a menu command and act on it a moment later,
+        # so a single immediate read-back reports "unconfirmed" for a command
+        # that did work. Waiting briefly for the window to show the effect is
+        # what makes that signal mean something; it is bounded so a command with
+        # no observable effect costs a known small delay and no more.
+        if delivered and _menu_state_equal(before, after):
+            deadline = time.monotonic() + float(
+                getattr(self, "menu_settle_timeout_s", _MENU_SETTLE_TIMEOUT_S)
+            )
+            while time.monotonic() < deadline:
+                time.sleep(_MENU_SETTLE_POLL_S)
+                candidate = {
+                    "title": str(win32._window_text(hwnd) or ""),
+                    "text_length": _menu_read_text_length(hwnd),
+                    "visible_children": _menu_visible_children(hwnd),
+                }
+                if not _menu_state_equal(before, candidate):
+                    after = candidate
+                    break
+
+        # The window's own facts, read on both sides of the command. A title or
+        # control that changed is evidence the application acted; an unchanged
+        # window is reported as unconfirmed rather than as either outcome.
+        changed = [
+            key for key in ("title", "text_length", "visible_children")
+            if before[key] != after[key]
+        ]
+        action_state = "unconfirmed" if not changed else "changed"
+        self.snapshot = None
+        self.cache.clear()
+        command_text = str(resolved[-1]["text"] or "").strip()
+        # Decision-relevant fields come first on purpose: the BUS preview is
+        # bounded, and a caller that has to choose another path needs the
+        # resolved command and the alternatives more than the raw observations.
+        result: dict[str, Any] = {
+            "ok": True,
+            "verified": bool(changed),
+            "delivered": True,
+            "action_state": action_state,
+            "command": command,
+            "command_text": command_text,
+            "enabled": bool(resolved[-1]["enabled"]),
+            "hwnd": hwnd,
+            "resolved_by": resolved_by,
+            "resolved_path": resolved,
+            "changed": changed,
+            "before": before,
+            "after": after,
+        }
+        if not delivered:
+            result.update({
+                "ok": False,
+                "verified": False,
+                "delivered": False,
+                "error": (
+                    "the command could not be delivered before the deadline "
+                    f"(the application did not answer; win32 error {last_error})"
+                ),
+            })
+        elif not resolved[-1]["enabled"]:
+            result["note"] = (
+                "the resolved item is disabled; the application was sent the command "
+                "anyway and is expected to ignore it"
+            )
+        return result
+
+    def _kill_app(self, args: dict[str, Any]) -> dict[str, Any]:
+        """End an application's process, and confirm it actually ended.
+
+        Unlike the other non-synthesized actions this one is irreversible, so the
+        target has to be named exactly once and unambiguously. A title is
+        therefore matched against window titles and **only** acted on when it
+        identifies a single process: two matching windows is a question, not an
+        instruction, and guessing there would terminate the wrong application.
+
+        Success is not the termination request's own word for it. The process is
+        polled until it is gone, and a process still answering after the deadline
+        is reported as a failure of this action, because it is one.
+        """
+        raw_pid = args.get("pid")
+        pid = 0
+        resolved_by = ""
+        title = ""
+
+        if raw_pid not in (None, ""):
+            try:
+                pid = int(raw_pid)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "pid must be an integer"}
+            resolved_by = "pid"
+            title = str(win32._window_text(self.hwnd) or "") if self.hwnd else ""
+        else:
+            hwnd, how = self._resolve_action_hwnd(args)
+            if not hwnd:
+                return {
+                    "ok": False,
+                    "error": "kill_app requires a live hwnd, a matching title, or a pid",
+                }
+            title = str(win32._window_text(hwnd) or "")
+            pid = _window_process_id(hwnd)
+            resolved_by = how
+            if not pid:
+                return {"ok": False, "error": "the target window's process could not be identified", "hwnd": hwnd}
+
+            # A title that several windows answer to cannot be acted on: this is
+            # the only action where being wrong is unrecoverable.
+            if resolved_by != "hwnd":
+                query = str(args.get("title") or args.get("window") or "").strip().casefold()
+                if query:
+                    matches = [
+                        item for item in win32.list_windows()
+                        if query in str(item.get("title") or "").casefold()
+                        or query in str(item.get("class_name") or "").casefold()
+                    ]
+                    exact = [item for item in matches if str(item.get("title") or "").casefold() == query]
+                    candidates = exact or matches
+                    pids = sorted({int(item.get("pid") or 0) for item in candidates if int(item.get("pid") or 0)})
+                    if len(pids) > 1:
+                        return {
+                            "ok": False,
+                            "error": (
+                                f"{str(args.get('title') or '').strip()!r} names {len(pids)} running applications; "
+                                "name one by pid or hwnd"
+                            ),
+                            "candidate_pids": pids,
+                            "candidates": [
+                                {"pid": int(item.get("pid") or 0), "title": str(item.get("title") or "")}
+                                for item in candidates[: _MENU_LIST_LIMIT]
+                            ],
+                        }
+
+        if pid <= 0:
+            return {"ok": False, "error": "kill_app requires a positive process id"}
+        if pid == int(win32process.GetCurrentProcessId()):
+            return {"ok": False, "error": "kill_app refuses to terminate the runtime's own process", "pid": pid}
+
+        try:
+            out = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            exit_code = int(out.returncode)
+            output = f"{out.stdout or ''}{out.stderr or ''}".strip()
+        except Exception as exc:
+            return {"ok": False, "error": f"the termination request failed: {exc}", "pid": pid}
+
+        timeout_s = float(args.get("timeout_s") or _KILL_DEFAULT_TIMEOUT_S)
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        alive = _process_is_alive(pid)
+        while alive and time.monotonic() < deadline:
+            time.sleep(_KILL_POLL_S)
+            alive = _process_is_alive(pid)
+
+        self.snapshot = None
+        self.cache.clear()
+        if alive:
+            return {
+                "ok": False,
+                "verified": False,
+                "pid": pid,
+                "resolved_by": resolved_by,
+                "title": title,
+                "exit_code": exit_code,
+                "error": f"the process was still running {timeout_s:.0f}s after the termination request",
+                "output": output[:400],
+            }
+        return {
+            "ok": True,
+            "verified": True,
+            "terminated": True,
+            "pid": pid,
+            "resolved_by": resolved_by,
+            "title": title,
+            "exit_code": exit_code,
+            "output": output[:400],
+        }
+
     def _scroll(self, args: dict[str, Any]) -> dict[str, Any]:
         receipt = self.raw_device.scroll(
             self._context(),
@@ -1170,6 +1805,8 @@ class FastGuiController:
             "type_into_element": self._type_into_element,
             "type_text": self._type_text,
             "set_value": self._set_value,
+            "invoke_menu": self._invoke_menu,
+            "kill_app": self._kill_app,
             "hotkey": self._hotkey,
             "scroll": self._scroll,
             "move_mouse": self._move_mouse,
@@ -1252,6 +1889,17 @@ class FastGuiController:
         # the tool first, and a step the replayer cannot execute is worse than no
         # step at all. Add it there, then return the shape below.
         if name == "set_window_frame":
+            return None
+        # ``invoke_menu`` is a live action today, for the same reason as the
+        # frame change above: the offline replay vocabulary does not know the
+        # tool yet, and a step the replayer cannot execute is worse than no step.
+        if name == "invoke_menu":
+            return None
+        # ``kill_app`` terminates a process on *this* machine and cannot be
+        # undone. Even though ``run_shell`` can express it, an executable step
+        # that ends an application is not something a recording should be able
+        # to perform on replay, so no step is emitted.
+        if name == "kill_app":
             return None
         if name == "wait" and isinstance(args.get("condition"), dict):
             return {

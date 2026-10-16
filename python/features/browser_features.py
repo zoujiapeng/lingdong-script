@@ -1754,3 +1754,190 @@ def _do_wait_for(condition: str, target: str, timeout: float, interval: float):
             "error": f"等待条件 '{condition}={target}' 超时 ({timeout}s)",
         },
     }
+
+# ════════════════════════════════════════════════════════════════
+#  原生 dialog / 拖拽 / PDF
+#
+#  这三项先前做不到，原因都一样：页面脚本只够表达"读"和"改"，
+#  而 Playwright 的原生事件（dialog 监听、鼠标按下-移动-抬起、
+#  打印成 PDF）必须在驱动侧注册。下面全部走 Playwright 自己的 API，
+#  不新增依赖、不改动上面任何既有函数。
+# ════════════════════════════════════════════════════════════════
+
+# dialog 监听器挂在 page 上，但 _get_page() 可能换页，所以记下挂过的 page。
+_DIALOG_STATE = {"page": None, "armed": None, "seen": []}
+
+
+def _ensure_dialog_listener(page):
+    """挂一次 dialog 监听器；重复调用不会重复挂。"""
+    if _DIALOG_STATE["page"] is page:
+        return
+    _DIALOG_STATE["page"] = page
+    _DIALOG_STATE["armed"] = None
+    _DIALOG_STATE["seen"] = []
+
+    def _on_dialog(dialog):
+        entry = {
+            "kind": dialog.type,
+            "message": (dialog.message or "")[:300],
+            "default_value": (dialog.default_value or "")[:200],
+        }
+        _DIALOG_STATE["seen"].append(entry)
+        armed = _DIALOG_STATE["armed"]
+        # 没有武装答案时保守处理：确认类接受、输入类给空、提示类关掉。
+        # 让 dialog 悬着会把页面卡死，那比答错更难排查。
+        try:
+            if armed is None:
+                if dialog.type == "prompt":
+                    dialog.accept("")
+                elif dialog.type in ("alert", "beforeunload"):
+                    dialog.accept()
+                else:
+                    dialog.accept()
+            elif armed.get("mode") == "dismiss":
+                dialog.dismiss()
+            elif dialog.type == "prompt":
+                dialog.accept(armed.get("text") or "")
+            else:
+                dialog.accept()
+        except Exception:
+            pass
+
+    page.on("dialog", _on_dialog)
+
+
+@feature(
+    name="browser_arm_dialog",
+    display_name="预设对话框应答",
+    description="【浏览器·对话框】预设页面上下一个 alert/confirm/prompt 的应答方式并开始记录。必须先预设再触发，否则页面会按保守策略自答",
+    category=F.ACTION,
+    params=[
+        P("mode", "str", "应答方式", required=False, default="accept",
+          choices={"accept": "接受", "dismiss": "取消"}),
+        P("text", "str", "prompt 输入框要填的文本", required=False, default=""),
+    ],
+    returns="dict - 是否已武装",
+    tags=["browser", "playwright", "dialog"],
+)
+def browser_arm_dialog(mode: str = "accept", text: str = "") -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    try:
+        page = _get_page()
+        _ensure_dialog_listener(page)
+        _DIALOG_STATE["armed"] = {"mode": "dismiss" if mode == "dismiss" else "accept", "text": text}
+        return {"success": True, "result": {"armed": True, "mode": _DIALOG_STATE["armed"]["mode"]}}
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "result": None}
+
+
+@feature(
+    name="browser_dialogs",
+    display_name="已出现的对话框",
+    description="【浏览器·对话框】列出页面出现过的对话框及其内容，用来确认预设的应答真的生效",
+    category=F.PERCEPTION,
+    params=[],
+    returns="list - 对话框记录",
+    tags=["browser", "playwright", "dialog"],
+)
+def browser_dialogs() -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    try:
+        page = _get_page()
+        _ensure_dialog_listener(page)
+        return {"success": True, "result": list(_DIALOG_STATE["seen"])}
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "result": None}
+
+
+@feature(
+    name="browser_drag",
+    display_name="拖拽元素",
+    description="【浏览器·交互】把一个元素拖到另一个元素上。用于滑块、看板卡片、可排序列表这类只有拖拽才生效的控件",
+    category=F.ACTION,
+    params=[
+        P("source", "str", "被拖拽元素的 CSS 选择器", example="#slider-handle"),
+        P("target", "str", "放置目标的 CSS 选择器", example="#drop-zone"),
+        P("timeout", "number", "超时秒数", required=False, default=10),
+    ],
+    returns="bool - 是否完成",
+    tags=["browser", "playwright", "drag"],
+)
+def browser_drag(source: str, target: str, timeout: float = 10) -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    return _pwrap(lambda: _do_drag(source, target, timeout))
+
+
+def _do_drag(source: str, target: str, timeout: float):
+    page = _get_page()
+    page.drag_and_drop(source, target, timeout=int(timeout * 1000))
+    return {"success": True, "result": True}
+
+
+@feature(
+    name="browser_drag_path",
+    display_name="按轨迹拖拽",
+    description="【浏览器·交互】从一点按住拖到另一点，中间按给定轨迹移动。用于 HTML5 拖拽或需要中间移动事件的控件",
+    category=F.ACTION,
+    params=[
+        P("from_x", "number", "起点 X"),
+        P("from_y", "number", "起点 Y"),
+        P("to_x", "number", "终点 X"),
+        P("to_y", "number", "终点 Y"),
+        P("steps", "number", "中间步数", required=False, default=12),
+        P("button", "str", "鼠标键", required=False, default="left",
+          choices={"left": "左键", "right": "右键", "middle": "中键"}),
+    ],
+    returns="bool - 是否完成",
+    tags=["browser", "playwright", "drag"],
+)
+def browser_drag_path(from_x: float, from_y: float, to_x: float, to_y: float,
+                      steps: int = 12, button: str = "left") -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    return _pwrap(lambda: _do_drag_path(from_x, from_y, to_x, to_y, steps, button))
+
+
+def _do_drag_path(from_x: float, from_y: float, to_x: float, to_y: float,
+                  steps: int, button: str):
+    page = _get_page()
+    page.mouse.move(float(from_x), float(from_y))
+    page.mouse.down(button=button)
+    count = max(1, int(steps))
+    for index in range(1, count + 1):
+        ratio = index / count
+        page.mouse.move(
+            float(from_x) + (float(to_x) - float(from_x)) * ratio,
+            float(from_y) + (float(to_y) - float(from_y)) * ratio,
+        )
+    page.mouse.up(button=button)
+    return {"success": True, "result": True}
+
+
+@feature(
+    name="browser_save_pdf",
+    display_name="页面存为 PDF",
+    description="【浏览器·产物】把当前页面打印成 PDF 存到指定路径。只在无头模式下可用",
+    category=F.ACTION,
+    params=[
+        P("path", "str", "保存路径", example="D:/out/page.pdf"),
+        P("landscape", "bool", "横向", required=False, default=False),
+        P("print_background", "bool", "打印背景色", required=False, default=True),
+    ],
+    returns="str - 实际写入的路径",
+    tags=["browser", "playwright", "pdf"],
+)
+def browser_save_pdf(path: str, landscape: bool = False, print_background: bool = True) -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    return _pwrap(lambda: _do_save_pdf(path, landscape, print_background))
+
+
+def _do_save_pdf(path: str, landscape: bool, print_background: bool):
+    page = _get_page()
+    target = os.path.abspath(os.path.expanduser(path))
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    page.pdf(path=target, landscape=bool(landscape), print_background=bool(print_background))
+    return {"success": True, "result": {"path": target, "bytes": os.path.getsize(target)}}

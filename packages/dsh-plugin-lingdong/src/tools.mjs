@@ -80,6 +80,51 @@ export function toolResult(value, images = []) {
   return result
 }
 
+/**
+ * The page, described the way a person would describe it.
+ *
+ * Raw HTML is the wrong answer for a model: it is mostly markup, it is huge, and
+ * the part that matters - what the page offers and what it is called - is buried
+ * in it. This collects that part directly, with hard caps so one snapshot cannot
+ * flood a context window, and returns text on every item so a selector is never
+ * the only way to address something.
+ *
+ * It is composed from `browser_execute_js`, which the repository already owns,
+ * rather than from a new browser feature: the capability belongs to the tool
+ * surface, and adding it here keeps the browser stack untouched.
+ *
+ * Note the shape, and take it literally: the page evaluate helper hands this
+ * string to Playwright, which evaluates it as a JavaScript *expression*. Three
+ * measured consequences shape what follows. A self-calling arrow with a
+ * statement body answers nothing there (`(() => { 10 })()` comes back null
+ * while `(() => 10)()` comes back 10). A callback with a statement body loses
+ * its value the same way. And an object literal sitting in a comma expression is
+ * parsed as a *block*, so its keys become labels and `top(…)` stops being a call
+ * - hence the extra parentheses around the result. The helper names also avoid
+ * anything the window already owns: assigning a local called `top` silently
+ * does nothing, because the page keeps `window.top` for its own frame.
+ *
+ * No function body and no keyword appears below; the helpers are built by the
+ * comma expression itself.
+ */
+export const PAGE_SNAPSHOT_JS = `(() => (c = (s) => Array.from(document.querySelectorAll(s)), vis = (el) => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0, f = (v) => String(v || '').replace(/\\s+/g, ' ').trim(), idOf = (el) => (el.id ? '#' + el.id : (el.getAttribute('data-testid') ? el.tagName.toLowerCase() + '[data-testid="' + el.getAttribute('data-testid') + '"]' : (el.getAttribute('name') ? el.tagName.toLowerCase() + '[name="' + el.getAttribute('name') + '"]' : el.tagName.toLowerCase()))), nm = (el) => f(el.labels && el.labels.length ? el.labels[0].textContent : (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.value || el.textContent || el.getAttribute('name') || '')).slice(0, 70), cap = (list) => list.filter(vis).slice(0, 60), ({ title: document.title, url: location.href, ready: document.readyState, scroll: { y: Math.round(scrollY), height: Math.round(document.documentElement.scrollHeight) }, dialogs_open: document.querySelectorAll('dialog[open]').length, headings: cap(c('h1,h2,h3')).map((el) => f(el.textContent).slice(0, 90)), fields: cap(c('input,textarea,select')).map((el) => ({ selector: idOf(el), tag: el.tagName.toLowerCase(), type: el.type || '', name: nm(el), value: el.type === 'password' ? '' : String(el.value || '').slice(0, 60), options: el.tagName === 'SELECT' ? Array.from(el.options).slice(0, 12).map((o) => f(o.textContent).slice(0, 30)) : null })), buttons: cap(c('button,input[type=submit],input[type=button],[role=button]')).map((el) => ({ selector: idOf(el), text: nm(el), disabled: !!el.disabled })), links: cap(c('a[href]')).map((el) => ({ text: nm(el), href: String(el.getAttribute('href') || '').slice(0, 120) })), forms: cap(c('form')).map((el) => ({ selector: idOf(el), action: String(el.getAttribute('action') || '').slice(0, 90), method: (el.method || 'get').toUpperCase() })) })))()`
+
+/**
+ * Install a console and error recorder in the page, once.
+ *
+ * A page's own complaints are the cheapest diagnostic there is, and a driver
+ * that cannot see them has to guess why nothing happened. The recorder keeps a
+ * bounded ring buffer on the page and is installed by a plain script, so no new
+ * browser feature and no debugger attachment is needed.
+ */
+export const CONSOLE_HOOK_JS = `(() => (ring = [], push = (level, args) => (ring.length >= 200 && ring.shift(), ring.push({ level, text: Array.from(args).map((v) => (typeof v === 'string' ? v : String(v))).join(' ').slice(0, 300), at: Date.now() })), wrap = (level) => (orig = console[level], console[level] = (...args) => (push(level, args), orig.apply(console, args))), window.__ldConsole && window.__ldConsole.installed ? 'already installed' : (window.__ldConsole = { installed: true, ring }, ['log', 'warn', 'error', 'info'].forEach(wrap), window.addEventListener('error', (e) => push('error', [e.message + ' @' + (e.filename || '') + ':' + (e.lineno || 0)])), window.addEventListener('unhandledrejection', (e) => push('error', ['unhandled rejection: ' + String(e.reason)])), 'installed')))()`
+
+/** Arm how the page's next dialog is answered. */
+export const DIALOG_ARM_JS = `(() => (seen = (kind, message) => window.__ldDialog.seen.push({ kind, message: String(message).slice(0, 200) }), confirm = (message) => (seen('confirm', message), window.__ldDialog.mode !== 'dismiss'), prompt = (message, fallback) => (seen('prompt', message), window.__ldDialog.mode === 'dismiss' ? null : (window.__ldDialog.text != null ? window.__ldDialog.text : fallback)), alert = (message) => (seen('alert', message), 'alerted'), window.__ldDialog && window.__ldDialog.installed ? 'already installed' : (window.__ldDialog = { installed: true, mode: 'accept', text: null, seen: [] }, window.confirm = confirm, window.prompt = prompt, window.alert = alert, 'installed')))()`
+
+/** Read what the dialog recorder has seen so far. */
+export const DIALOG_SEEN_JS = `JSON.stringify((window.__ldDialog && window.__ldDialog.seen) || [])`
+
 const ACTION_BATCH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -97,14 +142,23 @@ const ACTION_BATCH_SCHEMA = {
       minItems: 1,
       description:
         'Canonical desktop actions executed in order. Supported action names: ' +
-        'observe, click, click_element, type_into_element, type_text, set_value, hotkey, scroll, ' +
-        'move_mouse, hold_key, drag, draw_strokes, focus_window, set_window_frame, launch, wait, ' +
-        'wait_change, wait_for_visual_change, wait_stable, read_text, zoom, screenshot, ' +
+        'observe, click, click_element, type_into_element, type_text, set_value, invoke_menu, hotkey, ' +
+        'scroll, move_mouse, hold_key, drag, draw_strokes, focus_window, set_window_frame, launch, ' +
+        'kill_app, wait, wait_change, wait_for_visual_change, wait_stable, read_text, zoom, screenshot, ' +
         'clipboard_read, clipboard_write, clipboard_paste. ' +
         'set_value replaces a control\'s value through its accessibility value pattern: nothing is ' +
         'clicked, no keystroke is synthesized, and the target does not have to be in front. Address it ' +
         'with automation_id, x/y, element_id or a label. set_window_frame moves and resizes one window ' +
-        'without activating it; give any of x, y, width, height and the rest is kept.',
+        'without activating it; give any of x, y, width, height and the rest is kept. ' +
+        'invoke_menu runs an application menu command addressed by its menu path, for example ' +
+        '["File", "Save As"]; it resolves each level against the application\'s real menu, including ' +
+        'submenus the accessibility tree does not expose, and needs no pointer and no activation. A ' +
+        'path that does not match is refused with the items that were available at that level, so the ' +
+        'next call can use the exact label it names. ' +
+        'kill_app ends an application: name it by pid, hwnd, or an exact window title, and it is ' +
+        'refused when that name matches more than one running application, because terminating the ' +
+        'wrong one cannot be undone. Prefer an irreversibly destructive action only when the goal ' +
+        'actually requires it.',
       items: { type: 'object', additionalProperties: true },
     },
   },
@@ -130,6 +184,29 @@ export async function browserSteps(browser, steps) {
   }
   const failed = results.find((entry) => !entry.ok)
   return { ok: !failed, steps: results, error: failed ? failed.error : '' }
+}
+
+/** Parse a JSON string, answering null rather than throwing. */
+function parseJson(value) {
+  if (typeof value !== 'string') return null
+  try { return JSON.parse(value) } catch { return null }
+}
+
+/**
+ * Read the value a script produced out of a `browserSteps` answer.
+ *
+ * The feature envelope nests its payload under `result`, and the worker wraps
+ * that once more, so a value can arrive one or two levels down, or already
+ * deserialized. All three shapes are accepted here so no call site has to know
+ * which one it got.
+ */
+function stepValue(answer, index) {
+  let value = answer?.steps?.[index]?.result
+  for (let depth = 0; depth < 2; depth += 1) {
+    if (value && typeof value === 'object' && !Array.isArray(value) && 'result' in value) value = value.result
+    else break
+  }
+  return value ?? null
 }
 
 /**
@@ -529,18 +606,40 @@ export function buildBrowserTool(browser) {
         action: {
           type: 'string',
           enum: [
-            'status', 'launch', 'connect', 'close', 'open', 'new_tab', 'tabs', 'switch', 'close_tab',
-            'read', 'find', 'click', 'type', 'press', 'select', 'hover', 'scroll', 'wait', 'eval',
-            'screenshot', 'upload', 'download',
+            'status', 'launch', 'connect', 'close',
+            'snapshot', 'read', 'find', 'attrs', 'console',
+            'open', 'history', 'new_tab', 'tabs', 'switch', 'close_tab',
+            'cookies', 'storage', 'network',
+            'click', 'type', 'press', 'select', 'hover', 'scroll', 'wait', 'drag', 'dialog', 'eval',
+            'screenshot', 'upload', 'download', 'save_pdf',
           ],
-          description: 'Which browser operation to perform.',
+          description:
+            'Which browser operation to perform. snapshot is the one to start with on a new page: it returns the '
+            + 'headings, form fields (with the text that names each one), buttons, links and forms in one call. '
+            + 'dialog arms the answers for the page\'s next alert/confirm/prompt before whatever triggers it. '
+            + 'drag takes either selector + target, or from_x/from_y/to_x/to_y for HTML5 drag. '
+            + 'cookies and storage take get/set/clear in value, with the name or key in selector. '
+            + 'network waits for a request whose URL contains selector.',
         },
-        url: { type: 'string', description: 'URL for open / new_tab. A bare domain gets https://.' },
-        selector: { type: 'string', description: 'CSS selector for the element actions.' },
-        text: { type: 'string', description: 'Element text to match when no selector is given.' },
-        value: { type: 'string', description: 'Text for type, value for select.' },
+        url: { type: 'string', description: 'URL for open / new_tab / cookies set. A bare domain gets https://.' },
+        selector: { type: 'string', description: 'CSS selector for the element actions; cookie name, storage key or URL substring for cookies / storage / network; drag source.' },
+        text: { type: 'string', description: 'Element text to match when no selector is given; response text for dialog; cookie value or storage value with set.' },
+        value: { type: 'string', description: 'Text for type, value for select, accept/dismiss for dialog, back/forward/reload for history, get/set/clear for cookies and storage, an HTTP method for network.' },
+        use: { type: 'string', description: 'For dialog: "script" arms the answer inside the page instead of the native listener.' },
         label: { type: 'string', description: 'Option label for select, when value is not used.' },
         key: { type: 'string', description: 'Key name for press, for example Enter or Control+a.' },
+        target: { type: 'string', description: 'For cookies set: the cookie domain. For drag: the drop target selector.' },
+        from_x: { type: 'number', description: 'For drag by path: start X in page pixels.' },
+        from_y: { type: 'number', description: 'For drag by path: start Y in page pixels.' },
+        to_x: { type: 'number', description: 'For drag by path: end X in page pixels.' },
+        to_y: { type: 'number', description: 'For drag by path: end Y in page pixels.' },
+        steps: { type: 'number', description: 'For drag by path: intermediate move events. Defaults to 12.' },
+        button: { type: 'string', description: 'For drag by path: left, right or middle.' },
+        landscape: { type: 'boolean', description: 'For save_pdf: print landscape.' },
+        print_background: { type: 'boolean', description: 'For save_pdf: include background colours. Defaults to true.' },
+        collect: { type: 'boolean', description: 'For console: start recording the page console and error events.' },
+        hard: { type: 'boolean', description: 'For history reload: bypass the cache.' },
+        attribute: { type: 'string', description: 'For attrs: one attribute name; omit for every attribute of the match.' },
         code: { type: 'string', description: 'JavaScript for eval. Use "return ..." to produce a value.' },
         condition: {
           type: 'string',
@@ -645,6 +744,154 @@ export function buildBrowserTool(browser) {
         return toolResult(await browserSteps(browser, [['browser_execute_js', {
           code: String(args.code || ''),
           selector: String(args.selector || ''),
+        }]]))
+      }
+      if (action === 'snapshot') {
+        // One call that answers "what is on this page and what is it called",
+        // which is otherwise a title call, a URL call, a text call and a scan
+        // of raw HTML.
+        const answer = await browserSteps(browser, [['browser_execute_js', { code: PAGE_SNAPSHOT_JS, selector: '' }]])
+        const payload = stepValue(answer, 0)
+        const page = payload && typeof payload === 'object' && !Array.isArray(payload)
+          ? payload
+          : parseJson(payload)
+        // A page-evaluate helper that answers nothing here means the script never
+        // produced a value. Saying so - with what came back instead - is the
+        // difference between a caller rephrasing and a caller concluding the page
+        // is empty.
+        if (page === null) {
+          return toolResult({
+            ...answer,
+            note: 'the page did not answer with a structure',
+            payload_type: typeof payload,
+            payload_sample: typeof payload === 'string' ? payload.slice(0, 200) : null,
+            step: answer.steps?.[0] ?? null,
+          })
+        }
+        return toolResult({ ok: true, page, steps: answer.steps })
+      }
+      if (action === 'console') {
+        // Start recording when asked; otherwise report what was recorded.
+        const code = args.collect === true
+          ? CONSOLE_HOOK_JS
+          : `JSON.stringify((window.__ldConsole && window.__ldConsole.ring) || [])`
+        const answer = await browserSteps(browser, [['browser_execute_js', { code, selector: '' }]])
+        const raw = stepValue(answer, 0)
+        if (args.collect === true) {
+          return toolResult({ ok: answer.ok, collecting: raw === 'installed' || raw === 'already installed', note: raw })
+        }
+        const entries = parseJson(raw)
+        return toolResult({
+          ok: answer.ok,
+          collecting: Array.isArray(entries),
+          entries: Array.isArray(entries) ? entries.slice(-Number(args.max_results || 50)) : [],
+          note: Array.isArray(entries) ? '' : 'console recording is not installed; call this action with collect=true first',
+        })
+      }
+      if (action === 'dialog') {
+        // Answer the page's next dialog, and only the next one: a dialog that is
+        // opened and then abandoned leaves the page wedged. The native listener
+        // is the default because it also sees the dialogs a page script cannot -
+        // beforeunload - and the script override stays available for a caller
+        // that wants the answer to exist before the page is even asked.
+        const mode = String(args.value ?? 'accept') === 'dismiss' ? 'dismiss' : 'accept'
+        if (String(args.use ?? '') === 'script') {
+          const prompt = args.text != null ? JSON.stringify(String(args.text)) : 'null'
+          const answer = await browserSteps(browser, [
+            ['browser_execute_js', { code: DIALOG_ARM_JS, selector: '' }],
+            ['browser_execute_js', {
+              code: `(window.__ldDialog.mode=${JSON.stringify(mode)},window.__ldDialog.text=${prompt},'armed')`,
+              selector: '',
+            }],
+          ])
+          return toolResult({ ok: answer.ok, mode, armed: stepValue(answer, 1) === 'armed', path: 'script', steps: answer.steps })
+        }
+        const answer = await browserSteps(browser, [
+          ['browser_arm_dialog', { mode, text: String(args.text ?? '') }],
+        ])
+        const armed = stepValue(answer, 0)
+        return toolResult({ ok: answer.ok, mode, armed: armed?.armed === true, path: 'native', steps: answer.steps })
+      }
+      if (action === 'drag') {
+        // Two ways, because they cover different controls: element-to-element
+        // for the common case, and an explicit path for HTML5 drag and drop,
+        // which only reacts to intermediate move events.
+        const hasFrom = args.from_x != null && args.from_y != null && args.to_x != null && args.to_y != null
+        if (args.selector && args.target) {
+          return toolResult(await browserSteps(browser, [['browser_drag', {
+            source: String(args.selector),
+            target: String(args.target),
+            timeout: timeout ?? 10,
+          }]]))
+        }
+        if (!hasFrom) {
+          throw new Error('drag needs either selector + target, or from_x/from_y/to_x/to_y')
+        }
+        return toolResult(await browserSteps(browser, [['browser_drag_path', {
+          from_x: Number(args.from_x),
+          from_y: Number(args.from_y),
+          to_x: Number(args.to_x),
+          to_y: Number(args.to_y),
+          steps: Number(args.steps ?? 12),
+          button: String(args.button || 'left'),
+        }]]))
+      }
+      if (action === 'save_pdf') {
+        const target = String(args.path || path.join(os.tmpdir(), `lingdong-page-${Date.now()}.pdf`))
+        const answer = await browserSteps(browser, [['browser_save_pdf', {
+          path: target,
+          landscape: args.landscape === true,
+          print_background: args.print_background !== false,
+        }]])
+        return toolResult({ ...answer, ok: answer.ok })
+      }
+      if (action === 'history') {
+        const which = String(args.value ?? args.direction ?? 'reload')
+        const feature = which === 'back' ? 'browser_go_back' : which === 'forward' ? 'browser_go_forward' : 'browser_refresh'
+        return toolResult(await browserSteps(browser, [[feature, which === 'reload' ? { hard_reload: args.hard === true } : {}]]))
+      }
+      if (action === 'attrs') {
+        return toolResult(await browserSteps(browser, [['browser_get_attributes', {
+          selector: String(args.selector || ''),
+          attribute: String(args.attribute || ''),
+        }]]))
+      }
+      if (action === 'cookies') {
+        // Read, write and clear behind one action: a caller that sets a session
+        // cookie almost always wants to read it back to confirm it took.
+        const which = String(args.value ?? 'get')
+        if (which === 'clear') {
+          return toolResult(await browserSteps(browser, [['browser_delete_cookies', { names: String(args.text || '') }]]))
+        }
+        if (which === 'set') {
+          if (!args.selector) throw new Error('cookies set needs the cookie name in selector and its value in text')
+          return toolResult(await browserSteps(browser, [['browser_set_cookie', {
+            name: String(args.selector),
+            value: String(args.text ?? ''),
+            domain: String(args.target || ''),
+            url: String(args.url || ''),
+          }]]))
+        }
+        return toolResult(await browserSteps(browser, [['browser_get_cookies', {}]]))
+      }
+      if (action === 'storage') {
+        const which = String(args.value ?? 'get')
+        if (which === 'set') {
+          if (!args.selector) throw new Error('storage set needs the key in selector and the value in text')
+          return toolResult(await browserSteps(browser, [['browser_set_local_storage', {
+            key: String(args.selector),
+            value: String(args.text ?? ''),
+          }]]))
+        }
+        return toolResult(await browserSteps(browser, [['browser_get_local_storage', { key: String(args.selector || '') }]]))
+      }
+      if (action === 'network') {
+        // Wait for a request the page is about to make. Selecting the substring
+        // is what makes it a check rather than a sleep.
+        return toolResult(await browserSteps(browser, [['browser_wait_request', {
+          url_substring: String(args.selector || args.text || ''),
+          timeout: timeout ?? 30,
+          method: String(args.value || ''),
         }]]))
       }
       if (action === 'screenshot') {

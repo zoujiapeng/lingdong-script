@@ -712,3 +712,576 @@ def test_set_window_frame_reports_the_geometry_it_actually_got(monkeypatch):
     assert result["ok"] is False
     assert result["results"][0]["data"]["verified"] is False
     assert result["results"][0]["data"]["after"] == {"left": 0, "top": 0, "width": 400, "height": 300}
+
+
+# --------------------------------------------------------------------------
+#  Menu commands: the accessibility tree reaches a menu bar and its
+#  first-level items but reports no children for them, so the menu is walked
+#  through the Win32 API the application itself populated. Like the two above,
+#  this is not synthesized input, and what the application did about it is
+#  reported as an observation rather than assumed.
+# --------------------------------------------------------------------------
+
+
+def _menu_entry(text, item_id, *, submenu=0, enabled=True, separator=False):
+    return {
+        "text": text,
+        "id": item_id,
+        "submenu": submenu,
+        "enabled": enabled,
+        "separator": separator,
+    }
+
+
+# Two levels plus a nested one, shaped the way a real application menu reads:
+# heading labels, accelerator markers, shortcut text and a disabled item.
+_MENU_ROOT = 900
+_MENU_TREE = {
+    _MENU_ROOT: [
+        _menu_entry("&Edit", 0, submenu=901),
+        _menu_entry("&Window", 0),
+        _menu_entry("&Help", 0, submenu=903),
+        _menu_entry("", 0, enabled=False, separator=True),
+    ],
+    901: [
+        _menu_entry("&Save As...\tCtrl+Shift+S", 4),
+        _menu_entry("&Copy\tCtrl+C", 769, enabled=False),
+        _menu_entry("&Zoom", 0, submenu=902),
+    ],
+    902: [_menu_entry("Zoom &in", 41)],
+    903: [_menu_entry("&Find", 21), _menu_entry("&Find", 22)],
+}
+
+
+class _MenuGui:
+    """Stands in for ``win32gui`` on the paths a menu read uses."""
+
+    def __init__(self, menu, *, children=()):
+        self._menu = menu
+        self._children = list(children)
+        self.window_text_calls = 0
+
+    def GetMenu(self, _hwnd):
+        return self._menu
+
+    def IsWindow(self, hwnd):
+        return hwnd == 4242
+
+    def IsWindowVisible(self, _hwnd):
+        return True
+
+    def GetClassName(self, hwnd):
+        return str(self._children[int(hwnd)]) if int(hwnd) < len(self._children) else "Edit"
+
+    def EnumChildWindows(self, _hwnd, callback, param):
+        for index in range(len(self._children)):
+            callback(index, param)
+
+
+def _scalar(value):
+    """Read a Win32 scalar the call handed over, however it was passed.
+
+    A nested ctypes type does not convert through ``int()`` in this runtime and
+    must be read via ``.value``; a plain Python integer must not be.
+    """
+    inner = getattr(value, "value", value)
+    return int(inner)
+
+
+def _patch_menu(monkeypatch, *, menu=_MENU_ROOT, sent=None, titles=None, children=None, tree=None):
+    """Patch a live-shaped Win32 menu, capturing every command that is sent."""
+    import ctypes
+    import win32con
+    import winpilot.fast.controller as controller_mod
+
+    tree = tree if tree is not None else _MENU_TREE
+    gui = _MenuGui(menu, children=children or ["Edit"])
+    title_calls = iter(titles) if titles else None
+    text_length_value = [0]
+
+    def read_item(handle, position):
+        items = tree.get(int(handle))
+        if items is None or not 0 <= int(position) < len(items):
+            return None
+        entry = dict(items[int(position)])
+        entry["index"] = int(position)
+        entry["label"] = controller_mod._menu_label(entry["text"])
+        entry["is_container"] = bool(entry["submenu"])
+        return entry
+
+    def item_count(handle):
+        return len(tree.get(controller_mod._menu_handle(handle), []))
+
+    def get_menu_item_info(_handle, position, _by_position, pointer):
+        # The real call receives an HMENU; read it back through the same
+        # coercion the production code uses, so the fake cannot disagree about
+        # the handle it was handed.
+        entry = read_item(controller_mod._menu_handle(_handle), int(position))
+        if entry is None:
+            return 0
+        info = ctypes.cast(pointer, ctypes.POINTER(controller_mod._MenuItemInfo)).contents
+        info.fMask = win32con.MIIM_SUBMENU if entry["is_container"] else 0
+        info.fType = win32con.MF_SEPARATOR if entry["separator"] else 0
+        info.fState = 0 if entry["enabled"] else win32con.MFS_GRAYED
+        info.wID = int(entry["id"])
+        info.hSubMenu = int(entry["submenu"])
+        label = str(entry["text"])
+        ctypes.memmove(
+            ctypes.c_void_p(info.dwTypeData),
+            label,
+            (len(label) + 1) * ctypes.sizeof(ctypes.c_wchar),
+        )
+        return 1
+
+    def send(hwnd, message, wparam, lparam, _flags, _timeout, out):
+        # Mirrors the two uses the production code makes of this call: a text
+        # length read, and the command itself.
+        if _scalar(message) == win32con.WM_GETTEXTLENGTH:
+            if out:
+                ctypes.cast(out, ctypes.POINTER(ctypes.c_size_t)).contents.value = text_length_value[0]
+            return 1
+        if sent is not None:
+            sent.append({
+                "hwnd": controller_mod._menu_handle(hwnd),
+                "message": _scalar(message),
+                "command": _scalar(wparam),
+                "lparam": _scalar(lparam),
+            })
+        return 1
+
+    monkeypatch.setattr(controller_mod, "win32gui", gui)
+    monkeypatch.setattr(controller_mod._user32, "GetMenuItemInfoW", get_menu_item_info)
+    monkeypatch.setattr(controller_mod._user32, "GetMenuItemCount", item_count)
+    monkeypatch.setattr(controller_mod._user32, "SendMessageTimeoutW", send)
+    if title_calls is not None:
+        monkeypatch.setattr(
+            controller_mod.win32,
+            "_window_text",
+            lambda _hwnd: next(title_calls, "Target"),
+        )
+    return gui
+
+
+@pytest.mark.parametrize(
+    "action,expected",
+    [
+        ({"action": "invoke_menu"}, "requires a non-empty path array"),
+        ({"action": "invoke_menu", "path": "File"}, "requires a non-empty path array"),
+        ({"action": "invoke_menu", "path": []}, "requires a non-empty path array"),
+        ({"action": "invoke_menu", "path": ["a", "b", "c", "d", "e", "f", "g", "h", "i"]}, "limited to 8 menu levels"),
+        ({"action": "invoke_menu", "path": [True]}, "path[0] must be a menu label or an index"),
+        ({"action": "invoke_menu", "path": [-1]}, "path[0] must not be negative"),
+        ({"action": "invoke_menu", "path": [""]}, "path[0] must be a menu label or an index"),
+        ({"action": "invoke_menu", "path": ["File", None]}, "path[1] must be a menu label or an index"),
+    ],
+)
+def test_invoke_menu_contract_refuses_a_path_it_could_not_walk(action, expected):
+    errors = validate_batch_actions([action])
+
+    assert len(errors) == 1
+    assert expected in errors[0]
+
+
+@pytest.mark.parametrize(
+    "action,expected",
+    [
+        ({"action": "kill_app"}, "requires pid, hwnd, or title"),
+        ({"action": "kill_app", "pid": 0}, "pid must be a positive process id"),
+        ({"action": "kill_app", "pid": -5}, "pid must be a positive process id"),
+        ({"action": "kill_app", "pid": "soon"}, "pid must be a number"),
+        ({"action": "kill_app", "pid": 10, "timeout_s": 0}, "timeout_s must be in 0..60"),
+        ({"action": "kill_app", "pid": 10, "timeout_s": 61}, "timeout_s must be in 0..60"),
+        ({"action": "kill_app", "title": ""}, "requires pid, hwnd, or title"),
+    ],
+)
+def test_kill_app_contract_refuses_an_unnameable_or_impossible_target(action, expected):
+    errors = validate_batch_actions([action])
+
+    assert len(errors) == 1
+    assert expected in errors[0]
+
+
+def test_kill_app_is_a_mutating_action_that_requires_a_post_frame():
+    assert "kill_app" in ALLOWED_BATCH_ACTIONS
+    assert "kill_app" in BATCH_MUTATING_ACTIONS
+    envelope = build_action_envelope("kill_app", {"pid": 42}, action_id="a")
+    assert envelope.policy.requires_post_frame is True
+
+
+def _patch_kill(monkeypatch, *, alive_after: int = 0, current_pid: int = 999_999, windows=None):
+    """Patch process liveness and the termination call; count the polls."""
+    import winpilot.fast.controller as controller_mod
+
+    state = {"polls": 0, "taskkill": []}
+    windows = windows if windows is not None else []
+
+    def is_alive(_pid):
+        state["polls"] += 1
+        # The first poll runs before any taskkill, so `alive_after` counts the
+        # polls that still answer "running" after the request.
+        return state["polls"] <= 1 + alive_after
+
+    def run(argv, **_kwargs):
+        state["taskkill"].append(list(argv))
+
+        class Completed:
+            returncode = 0
+            stdout = "SUCCESS: The process has been terminated."
+            stderr = ""
+
+        return Completed()
+
+    monkeypatch.setattr(controller_mod, "_process_is_alive", is_alive)
+    monkeypatch.setattr(controller_mod.subprocess, "run", run)
+    monkeypatch.setattr(controller_mod.win32process, "GetCurrentProcessId", lambda: current_pid)
+    monkeypatch.setattr(controller_mod.win32process, "GetWindowThreadProcessId", lambda _hwnd: (1, 4242))
+    monkeypatch.setattr(controller_mod.win32, "list_windows", lambda: list(windows))
+    monkeypatch.setattr(controller_mod.win32, "_window_text", lambda _hwnd: "Target")
+    return state
+
+
+def test_kill_app_terminates_by_pid_and_confirms_it_ended(monkeypatch):
+    state = _patch_kill(monkeypatch, alive_after=0)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "kill_app", "pid": 4242}])
+
+    assert result["ok"] is True
+    step = result["results"][0]["data"]
+    assert step["terminated"] is True and step["verified"] is True
+    assert step["resolved_by"] == "pid"
+    assert state["taskkill"] == [["taskkill", "/PID", "4242", "/F"]]
+
+
+def test_kill_app_fails_when_the_process_is_still_running_after_the_deadline(monkeypatch):
+    """The termination request's own success is not the claim; being gone is."""
+    _patch_kill(monkeypatch, alive_after=10_000)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "kill_app", "pid": 4242, "timeout_s": 0.4}])
+
+    assert result["ok"] is False
+    step = result["results"][0]["data"]
+    assert step["verified"] is False
+    assert "still running" in step["error"]
+    assert step["exit_code"] == 0, "the request itself succeeded, and that is not enough"
+
+
+def test_kill_app_refuses_a_title_that_names_more_than_one_application(monkeypatch):
+    """Terminating the wrong application cannot be undone, so ambiguity refuses."""
+    windows = [
+        {"hwnd": 11, "pid": 41, "title": "Notes - one"},
+        {"hwnd": 12, "pid": 42, "title": "Notes - two"},
+    ]
+    state = _patch_kill(monkeypatch, windows=windows)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "kill_app", "title": "Notes"}])
+
+    assert result["ok"] is False
+    step = result["results"][0]["data"]
+    assert "names 2 running applications" in step["error"]
+    assert step["candidate_pids"] == [41, 42]
+    assert state["taskkill"] == [], "nothing may be terminated on an ambiguous target"
+
+
+def test_kill_app_acts_when_a_title_names_exactly_one_application(monkeypatch):
+    windows = [
+        {"hwnd": 11, "pid": 41, "title": "Notes - one"},
+        {"hwnd": 12, "pid": 42, "title": "Something else"},
+    ]
+    state = _patch_kill(monkeypatch, windows=windows)
+    _patch_window(monkeypatch, rects=[(0, 0, 400, 300)])
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "kill_app", "hwnd": 4242}])
+
+    assert result["ok"] is True
+    step = result["results"][0]["data"]
+    assert step["pid"] == 4242
+    assert step["resolved_by"] == "hwnd"
+    assert state["taskkill"] == [["taskkill", "/PID", "4242", "/F"]]
+
+
+def test_kill_app_refuses_to_terminate_the_runtime_itself(monkeypatch):
+    state = _patch_kill(monkeypatch, current_pid=4242)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "kill_app", "pid": 4242}])
+
+    assert result["ok"] is False
+    assert "own process" in result["results"][0]["data"]["error"]
+    assert state["taskkill"] == []
+
+
+def test_kill_app_is_not_offered_as_a_replay_step(monkeypatch):
+    """An executable step that ends an application must not be replayable."""
+    import winpilot.fast.controller as controller_mod
+
+    events = []
+    monkeypatch.setattr(controller_mod.BUS, "publish", lambda event_type, **data: events.append({"type": event_type, **data}))
+    _patch_kill(monkeypatch)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "kill_app", "pid": 4242}])
+
+    assert result["ok"] is True
+    done = next(event for event in events if event["type"] == "agent_batch_action")
+    assert done["replay"] is None
+    # The trace keeps the fact of the action without either identifier.
+    assert done["args"]["target_redacted"] is True
+    assert "pid" not in done["args"]
+
+
+def test_invoke_menu_is_a_mutating_action_that_requires_a_post_frame():
+    assert "invoke_menu" in ALLOWED_BATCH_ACTIONS
+    assert "invoke_menu" in BATCH_MUTATING_ACTIONS
+    envelope = build_action_envelope("invoke_menu", {"path": ["File"]}, action_id="a")
+    assert envelope.policy.requires_post_frame is True
+
+
+def test_invoke_menu_walks_the_menu_by_label_and_sends_the_command_id(monkeypatch):
+    import win32con
+
+    sent = []
+    _patch_menu(monkeypatch, sent=sent, titles=["Untitled"])
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Save As"]}])
+
+    assert result["ok"] is True
+    step = result["results"][0]["data"]
+    assert step["command"] == 4
+    assert step["delivered"] is True
+    assert step["hwnd"] == 4242
+    assert step["resolved_by"] == "hwnd"
+    # The accelerator marker, the shortcut and the ellipsis are not part of what
+    # a caller meant by "Save As", and the window keeps its own label text.
+    assert [entry["text"] for entry in step["resolved_path"]] == ["&Edit", "&Save As...\tCtrl+Shift+S"]
+    assert [entry["index"] for entry in step["resolved_path"]] == [0, 0]
+    assert sent == [{"hwnd": 4242, "message": win32con.WM_COMMAND, "command": 4, "lparam": 0}]
+
+
+def test_invoke_menu_descends_nested_submenus(monkeypatch):
+    sent = []
+    _patch_menu(monkeypatch, sent=sent)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Zoom", "Zoom in"]}])
+
+    assert result["ok"] is True
+    assert result["results"][0]["data"]["command"] == 41
+    assert len(result["results"][0]["data"]["resolved_path"]) == 3
+
+
+def test_invoke_menu_addresses_items_by_index_when_the_label_is_localized(monkeypatch):
+    sent = []
+    _patch_menu(monkeypatch, sent=sent)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": [0, 0]}])
+
+    assert result["ok"] is True
+    assert result["results"][0]["data"]["command"] == 4
+
+
+def test_invoke_menu_refuses_a_path_that_ends_on_a_menu_heading_and_shows_what_is_in_it(monkeypatch):
+    sent = []
+    _patch_menu(monkeypatch, sent=sent)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Zoom"]}])
+
+    assert result["ok"] is False
+    data = result["results"][0]["data"]
+    assert "container rather than a command" in data["error"]
+    assert data["available"] == [
+        {"index": 0, "text": "Zoom &in", "id": 41, "container": False, "enabled": True},
+    ]
+    assert sent == [], "a heading must not be executed as a command"
+
+
+def test_invoke_menu_names_what_was_available_instead_of_guessing(monkeypatch):
+    sent = []
+    _patch_menu(monkeypatch, sent=sent)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Paste"]}])
+
+    assert result["ok"] is False
+    data = result["results"][0]["data"]
+    assert "no menu item is named 'Paste'" in data["error"]
+    assert "menu path level 2" in data["error"]
+    assert [entry["text"] for entry in data["available"]] == ["&Save As...\tCtrl+Shift+S", "&Copy\tCtrl+C", "&Zoom"]
+    assert sent == []
+
+
+def test_invoke_menu_refuses_an_ambiguous_label_instead_of_picking_one(monkeypatch):
+    sent = []
+    _patch_menu(monkeypatch, sent=sent)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Help", "Find"]}])
+
+    assert result["ok"] is False
+    assert "names 2 items in this menu" in result["results"][0]["data"]["error"]
+    assert sent == []
+
+
+def test_invoke_menu_refuses_a_window_without_a_menu(monkeypatch):
+    sent = []
+    _patch_menu(monkeypatch, sent=sent, menu=0)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit"]}])
+
+    assert result["ok"] is False
+    assert "no Win32 menu" in result["results"][0]["data"]["error"]
+    assert sent == []
+
+
+def test_invoke_menu_reports_a_command_whose_effect_is_not_observable_as_unconfirmed(monkeypatch):
+    """A delivered command with no visible change is not claimed as success."""
+    sent = []
+    _patch_menu(monkeypatch, sent=sent, titles=["Target"] * 4)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+    # The settle window is a real wait; this case is about what is reported when
+    # nothing ever changes, so it is not spent here.
+    controller.menu_settle_timeout_s = 0.0
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Save As"]}])
+
+    assert result["ok"] is True
+    step = result["results"][0]["data"]
+    assert step["delivered"] is True
+    assert step["action_state"] == "unconfirmed"
+    assert step["verified"] is False
+    assert step["changed"] == []
+
+
+def test_invoke_menu_waits_for_an_effect_that_lands_after_the_command(monkeypatch):
+    """An application may act a moment later; that must not read as unconfirmed."""
+    sent = []
+    # The first read on each side agrees, then the window's text length moves.
+    lengths = iter([7, 7, 7, 9])
+    _patch_menu(monkeypatch, sent=sent)
+    import winpilot.fast.controller as controller_mod
+
+    monkeypatch.setattr(controller_mod, "_menu_read_text_length", lambda _hwnd: next(lengths, 9))
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+    controller.menu_settle_timeout_s = 1.0
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Save As"]}])
+
+    assert result["ok"] is True
+    step = result["results"][0]["data"]
+    assert step["action_state"] == "changed"
+    assert step["changed"] == ["text_length"]
+    assert step["after"]["text_length"] == 9
+
+
+def test_invoke_menu_reports_what_the_application_changed(monkeypatch):
+    """The window reacting to the command is observable and reported as such."""
+    sent = []
+    _patch_menu(monkeypatch, sent=sent, titles=["Untitled", "Find"])
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Save As"]}])
+
+    assert result["ok"] is True
+    step = result["results"][0]["data"]
+    assert step["action_state"] == "changed"
+    assert step["verified"] is True
+    assert step["changed"] == ["title"]
+    assert step["before"]["title"] == "Untitled"
+    assert step["after"]["title"] == "Find"
+
+
+def test_invoke_menu_flags_a_disabled_item_instead_of_calling_it_done(monkeypatch):
+    sent = []
+    _patch_menu(monkeypatch, sent=sent)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Copy"]}])
+
+    # The command is still sent: only the application knows whether it will act.
+    assert len(sent) == 1
+    step = result["results"][0]["data"]
+    assert step["enabled"] is False
+    assert "is disabled" in step["note"]
+
+
+def test_invoke_menu_reports_a_command_that_could_not_be_delivered(monkeypatch):
+    _patch_menu(monkeypatch)
+    import winpilot.fast.controller as controller_mod
+
+    monkeypatch.setattr(controller_mod._user32, "SendMessageTimeoutW", lambda *a, **k: 0)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Save As"]}])
+
+    assert result["ok"] is False
+    step = result["results"][0]["data"]
+    assert step["delivered"] is False
+    assert "could not be delivered" in step["error"]
+
+
+def test_invoke_menu_is_not_offered_as_a_replay_step(monkeypatch):
+    """A redacted-or-unknown step must never become an executable replay."""
+    import winpilot.fast.controller as controller_mod
+
+    events = []
+    monkeypatch.setattr(controller_mod.BUS, "publish", lambda event_type, **data: events.append({"type": event_type, **data}))
+    _patch_menu(monkeypatch)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Save As"]}])
+
+    assert result["ok"] is True
+    done = next(event for event in events if event["type"] == "agent_batch_action")
+    assert done["args"]["path"] == ["Edit", "Save As"]
+    assert done["replay"] is None
+
+
+def test_a_bounded_event_preview_stays_parseable_and_keeps_the_alternatives(monkeypatch):
+    """A refusal a caller cannot parse is a refusal it cannot act on.
+
+    The BUS record is bounded, and a wholesale character cut would land inside
+    the list of alternatives. What must survive is a record that parses and
+    still names the choices.
+    """
+    import winpilot.fast.controller as controller_mod
+
+    events = []
+    monkeypatch.setattr(controller_mod.BUS, "publish", lambda event_type, **data: events.append({"type": event_type, **data}))
+    # A menu with many long entries, so the projection has something to drop.
+    crowded = {
+        _MENU_ROOT: list(_MENU_TREE[_MENU_ROOT]),
+        901: list(_MENU_TREE[901]) + [
+            _menu_entry(f"&A very long menu entry number {index} that goes on", 500 + index)
+            for index in range(30)
+        ],
+        902: list(_MENU_TREE[902]),
+        903: list(_MENU_TREE[903]),
+    }
+    _patch_menu(monkeypatch, tree=crowded)
+    controller = FastGuiController(raw_device=RecordingRawDevice())
+    # This case is about the record's shape, not about waiting for an effect.
+    controller.menu_settle_timeout_s = 0.0
+
+    result = controller.execute([{"action": "invoke_menu", "hwnd": 4242, "path": ["Edit", "Not There"]}])
+
+    assert result["ok"] is False
+    done = next(event for event in events if event["type"] == "agent_batch_action")
+    preview = done["result_preview"]
+    # 800 is what the run timeline allows before it compacts an event summary;
+    # the record must survive that cut intact, not merely be small.
+    assert len(preview) <= 600
+    decoded = json.loads(preview)
+    assert decoded["ok"] is False
+    assert "Not There" in decoded["error"]
+    assert decoded["available"], "the alternatives must survive into the record"
+    assert all("text" in entry for entry in decoded["available"])
+    # The list is what gives way when the record does not fit, and the caller is
+    # told that it was shortened rather than being left to assume it saw all.
+    assert decoded["available_truncated"] > 0

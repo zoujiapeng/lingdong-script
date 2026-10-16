@@ -14,6 +14,150 @@ import { WinPilotSidecar } from '../src/sidecar.mjs'
 import { BrowserSession } from '../src/browser.mjs'
 import { createClient } from '../src/client.mjs'
 import { buildTools, buildBrowserTool, actionBatchGraph, withTargetWindow } from '../src/tools.mjs'
+import { spawnSync } from 'node:child_process'
+
+/**
+ * Read an application's edit-control text length from outside that application.
+ *
+ * This is the oracle for the menu check: it belongs to neither the plugin nor
+ * the runtime, so a menu command that did nothing cannot pass it. It runs in a
+ * separate PowerShell process and reads the length through the same Win32 call
+ * the application answers, with a timeout so a busy application cannot hang the
+ * check.
+ * @param pid - owning process whose visible top-level window to measure.
+ * @returns the text length, or -1 when it could not be read.
+ */
+function readEditTextLength(pid) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -Namespace Ld -Name W -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+[DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr h, EnumProc cb, IntPtr p);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint f, uint t, out IntPtr r);
+public delegate bool EnumProc(IntPtr h, IntPtr p);
+'@
+$target = [uint32]${pid}
+$top = [IntPtr]::Zero
+$found = [Ld.W]::EnumWindows({ param($h, $p) $owner = [uint32]0; [void][Ld.W]::GetWindowThreadProcessId($h, [ref]$owner)
+  if ($owner -eq $target -and [Ld.W]::IsWindowVisible($h)) { $script:top = $h; return $false }; return $true }, [IntPtr]::Zero)
+if ($top -eq [IntPtr]::Zero) { Write-Output '-1'; exit 0 }
+$edit = [IntPtr]::Zero
+[void][Ld.W]::EnumChildWindows($top, { param($h, $p) $sb = New-Object System.Text.StringBuilder 64
+  [void][Ld.W]::GetClassName($h, $sb, 64)
+  if ($sb.ToString() -eq 'Edit') { $script:edit = $h; return $false }; return $true }, [IntPtr]::Zero)
+if ($edit -eq [IntPtr]::Zero) { Write-Output '-1'; exit 0 }
+$out = [IntPtr]::Zero
+[void][Ld.W]::SendMessageTimeout($edit, 0x000E, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 1000, [ref]$out)
+Write-Output ([int64]$out)
+`
+  const result = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+    shell: false,
+    timeout: 30_000,
+  })
+  const value = Number.parseInt(String(result.stdout ?? '').trim().split(/\r?\n/).pop() ?? '', 10)
+  return Number.isFinite(value) ? value : -1
+}
+
+/**
+ * Read the menu of whatever Notepad instance is running, from outside it.
+ *
+ * Notepad's menu is localized, so a check that hard-codes English or Chinese
+ * labels only passes on the machine it was written for. Reading the real menu
+ * is what lets the check address a command by position instead.
+ * @returns `{ items }` with one entry per heading, or `{ error }`.
+ */
+function readMenuDump() {
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -Namespace Ld -Name M -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
+[DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr m);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetMenuItemInfo(IntPtr m, int i, bool byPos, ref MENUITEMINFO info);
+public delegate bool EnumProc(IntPtr h, IntPtr p);
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct MENUITEMINFO {
+  public uint cbSize; public uint fMask; public uint fType; public uint fState; public uint wID;
+  public IntPtr hSubMenu; public IntPtr hbmpChecked; public IntPtr hbmpUnchecked;
+  public IntPtr dwItemData; public IntPtr dwTypeData; public uint cch; public IntPtr hbmpItem;
+}
+'@
+function Read-Menu([IntPtr]$menu) {
+  $count = [Ld.M]::GetMenuItemCount($menu)
+  $out = @()
+  for ($i = 0; $i -lt $count; $i++) {
+    $info = New-Object Ld.M+MENUITEMINFO
+    $info.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type]('Ld.M+MENUITEMINFO'))
+    $info.fMask = 0x1 -bor 0x2 -bor 0x4 -bor 0x40 -bor 0x100
+    $buf = New-Object System.Text.StringBuilder 256
+    $info.dwTypeData = [System.Runtime.InteropServices.Marshal]::StringToHGlobalUni($buf.ToString().PadRight(255, [char]0))
+    $info.cch = 256
+    $ok = [Ld.M]::GetMenuItemInfo($menu, $i, $true, [ref]$info)
+    $text = if ($ok) { [System.Runtime.InteropServices.Marshal]::PtrToStringUni($info.dwTypeData) } else { '' }
+    [void][System.Runtime.InteropServices.Marshal]::FreeHGlobal($info.dwTypeData)
+    $out += [pscustomobject]@{ index = $i; text = $text; submenu = [int64]$info.hSubMenu }
+  }
+  return $out
+}
+$menu = [IntPtr]::Zero
+[void][Ld.M]::EnumWindows({ param($h, $p) $owner = [uint32]0; [void][Ld.M]::GetWindowThreadProcessId($h, [ref]$owner)
+  $sb = New-Object System.Text.StringBuilder 64
+  [void][Ld.M]::GetClassName($h, $sb, 64)
+  if ($sb.ToString() -eq 'Notepad' -and [Ld.M]::IsWindowVisible($h)) { $script:menu = [Ld.M]::GetMenu($h); if ($menu -ne [IntPtr]::Zero) { return $false } }
+  return $true }, [IntPtr]::Zero)
+if ($menu -eq [IntPtr]::Zero) { Write-Output '{"error":"no visible Notepad window with a menu"}'; exit 0 }
+$headings = Read-Menu $menu
+foreach ($heading in $headings) {
+  if ($heading.submenu -ne 0) { $heading | Add-Member -NotePropertyName children -NotePropertyValue (Read-Menu ([IntPtr]$heading.submenu)) }
+  else { $heading | Add-Member -NotePropertyName children -NotePropertyValue @() }
+}
+ConvertTo-Json -InputObject @{ items = $headings } -Depth 6 -Compress
+`
+  const result = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+    shell: false,
+    timeout: 30_000,
+  })
+  try {
+    return JSON.parse(String(result.stdout ?? '').trim().split(/\r?\n/).pop() ?? '{}')
+  } catch (error) {
+    return { error: `menu dump unreadable: ${error.message}` }
+  }
+}
+
+/**
+ * Locate the command that inserts a timestamp, addressing it by position.
+ *
+ * The heading is the one whose items include a command whose text carries both
+ * a time and a date word (or "time" and "date" in English), because that is the
+ * command Notepad implements as a document insertion, which leaves an effect
+ * this check can observe without touching the application.
+ * @param dump - the parsed menu dump.
+ * @returns `{ path, labels }` with positional indexes, or `null`.
+ */
+function findTimestampCommand(dump) {
+  for (const heading of dump?.items ?? []) {
+    for (const child of heading.children ?? []) {
+      const text = String(child.text ?? '').toLowerCase()
+      const looksLikeTimestamp = (text.includes('时间') && text.includes('日期'))
+        || (text.includes('time') && text.includes('date'))
+      if (looksLikeTimestamp) {
+        return {
+          path: [Number(heading.index), Number(child.index)],
+          labels: [String(heading.text), String(child.text)],
+        }
+      }
+    }
+  }
+  return null
+}
 
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/
 const failures = []
@@ -268,6 +412,88 @@ try {
       if (undoRunId) await client.waitForRun(undoRunId, { timeoutMs: 60_000 })
     }
 
+    // 3c) A menu command addressed by its menu path. The accessibility tree
+    //     reaches a menu bar and its first-level items but reports no children
+    //     for them, so this walks the application's own Win32 menu instead.
+    //     The proof is external to both the plugin and the runtime: a separate
+    //     process reads the document's own text length through the Win32 API,
+    //     and a command that silently did nothing cannot pass it.
+    //
+    //     Notepad's menu is localized, so the path is taken from this machine's
+    //     own menu rather than guessed: a dump of that menu locates the command
+    //     that inserts a timestamp, and the path is then addressed by position,
+    //     which needs no label. A missing Notepad instance is reported rather
+    //     than failed: no synthetic window is opened to make the check pass.
+    const menuDump = readMenuDump()
+    const menuTarget = findTimestampCommand(menuDump)
+    if (menuTarget) {
+      const beforeLength = readEditTextLength(notepad.pid)
+      const run = await client.post('/api/v2/arp/runs', {
+        graph: actionBatchGraph({
+          actions: [{ action: 'invoke_menu', hwnd: notepad.hwnd, path: menuTarget.path }],
+          name: 'smoke menu',
+        }),
+        inputs: {},
+      }, { timeoutMs: 60_000 })
+      const runId = run.run?.run_id ?? run.run_id
+      if (runId) await client.waitForRun(runId, { timeoutMs: 60_000 })
+      const envelope = await client.get(`/api/v2/runs/${encodeURIComponent(runId)}`, { timeoutMs: 60_000 })
+      const event = (envelope?.run?.timeline ?? []).filter((entry) => entry.type === 'agent_batch_action').pop()
+      let step = null
+      try { step = JSON.parse(event?.summary ?? 'null') } catch { step = null }
+      const afterLength = readEditTextLength(notepad.pid)
+      check(
+        'invoke_menu resolved a menu path the accessibility tree cannot reach',
+        step?.delivered === true
+          && Array.isArray(step.resolved_path)
+          && step.resolved_path.length === menuTarget.path.length
+          && step.resolved_path.every((entry) => entry.text),
+        JSON.stringify(step?.resolved_path?.map((entry) => entry.text) ?? step?.error ?? step),
+      )
+      check(
+        'the menu command changed the document, read by an independent process',
+        step?.delivered === true && afterLength > beforeLength,
+        `command ${step?.command}: text length ${beforeLength} -> ${afterLength}`,
+      )
+      check(
+        'the run reported the change it could observe',
+        step?.action_state === 'changed' && step?.verified === true,
+        `action_state=${step?.action_state} changed=${JSON.stringify(step?.changed)}`,
+      )
+
+      // A path that stops at a heading must refuse and name what is inside. The
+      // record a caller reads is bounded, and one cut in half is a record it
+      // cannot act on, so this asserts the refusal arrives parseable.
+      const refused = await client.post('/api/v2/arp/runs', {
+        graph: actionBatchGraph({
+          actions: [{ action: 'invoke_menu', hwnd: notepad.hwnd, path: [menuTarget.path[0]] }],
+          name: 'smoke menu heading',
+        }),
+        inputs: {},
+      }, { timeoutMs: 60_000 })
+      const refusedId = refused.run?.run_id ?? refused.run_id
+      if (refusedId) await client.waitForRun(refusedId, { timeoutMs: 60_000 })
+      const refusedEnvelope = await client.get(`/api/v2/runs/${encodeURIComponent(refusedId)}`, { timeoutMs: 60_000 })
+      const refusedEvent = (refusedEnvelope?.run?.timeline ?? [])
+        .filter((entry) => entry.type === 'agent_batch_action')
+        .pop()
+      let refusal = null
+      try { refusal = JSON.parse(refusedEvent?.summary ?? 'null') } catch { refusal = null }
+      check(
+        'a refusal to run a menu heading arrives parseable and names the alternatives',
+        refusal?.ok === false
+          && Array.isArray(refusal.available)
+          && refusal.available.length > 0
+          && refusal.available.every((entry) => typeof entry.text === 'string')
+          && /container rather than a command/.test(String(refusal.error)),
+        `available=${refusal?.available?.length ?? '?'} error=${String(refusal?.error ?? refusedEvent?.summary).slice(0, 90)}`,
+      )
+    } else {
+      // No Notepad instance was available to ask, so the capability is simply
+      // not exercised here. Saying so is honest; asserting it would not be.
+      check('invoke_menu (no application menu to read)', true, `not exercised: ${menuDump.error ?? 'no menu'}`)
+    }
+
     // Close the window this run opened. The canonical close is attempted first;
     // a window that still refuses to go is terminated by pid through the
     // offline flow, because leaving litter on someone's desktop is not an
@@ -467,12 +693,18 @@ async function checkActivation() {
     (() => {
       const tool = withWeb.seen.tools.find((entry) => entry.name === 'lingdong_browser')
       const actions = tool?.parameters?.properties?.action?.enum ?? []
-      return actions.length === 22
-        && actions.includes('launch')
-        && actions.includes('connect')
-        && actions.includes('screenshot')
-        && actions.includes('upload')
-        && (tool.parameters.required ?? []).join(',') === 'action'
+      // One tool, many actions: the surface stays small while the capability
+      // grows, so this asserts the actions a caller needs are reachable rather
+      // than pinning a count that every added action would break.
+      const required = [
+        'launch', 'connect', 'close', 'snapshot', 'read', 'find', 'attrs', 'console',
+        'open', 'history', 'new_tab', 'tabs', 'switch', 'close_tab',
+        'cookies', 'storage', 'network',
+        'click', 'type', 'press', 'select', 'hover', 'scroll', 'wait', 'drag', 'dialog', 'eval',
+        'screenshot', 'upload', 'download', 'save_pdf',
+      ]
+      const missing = required.filter((name) => !actions.includes(name))
+      return missing.length === 0 && (tool.parameters.required ?? []).join(',') === 'action'
     })(),
     'expected the declared browser action list',
   )

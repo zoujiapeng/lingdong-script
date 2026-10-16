@@ -16,6 +16,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -137,6 +138,173 @@ function killByName(names) {
   for (const name of names) {
     spawnSync('powershell', ['-NoProfile', '-Command', `Get-Process -Name ${name} -ErrorAction SilentlyContinue | Stop-Process -Force`], { timeout: 20_000 })
   }
+}
+
+/** Whether a specific process id is still running, read from outside the run. */
+function pidIsAlive(pid) {
+  const result = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+    `if (Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue) { 'alive' } else { 'gone' }`], {
+    encoding: 'utf8',
+    timeout: 20_000,
+  })
+  return text(result.stdout).trim() === 'alive'
+}
+
+/**
+ * Build the menu target if it is not already built.
+ *
+ * The harness owns this build: the point of the task is to drive a menu, not to
+ * compile a program, and a task that made the agent build its own target would
+ * be measuring the wrong thing.
+ */
+function ensureMenuTarget() {
+  const exe = path.join(WORK, 'ld-menu-target.exe')
+  if (existsSync(exe)) return exe
+  mkdirSync(WORK, { recursive: true })
+  const result = spawnSync(
+    'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe',
+    ['/nologo', '/target:winexe', `/out:${exe}`,
+     '/reference:System.Windows.Forms.dll,System.Drawing.dll',
+     path.join(HERE, 'menu_target.cs')],
+    { encoding: 'utf8', timeout: 120_000 },
+  )
+  if (!existsSync(exe)) {
+    throw new Error(`the menu target could not be built: ${text(result.stderr || result.stdout).slice(0, 300)}`)
+  }
+  return exe
+}
+
+/** Start the menu target window and wait until it is on screen. */
+async function startMenuTarget(out, tokenValue) {
+  const exe = ensureMenuTarget()
+  const child = spawn(exe, [out, tokenValue], { stdio: 'ignore', windowsHide: false })
+  const deadline = Date.now() + 25_000
+  while (Date.now() < deadline) {
+    if (windowRect('LD Menu Target')) return child
+    await sleep(400)
+  }
+  child.kill()
+  throw new Error('the menu target window never appeared')
+}
+
+/** Start a Notepad window and return the process, so its end is checkable. */
+async function startNotepad() {
+  const child = spawn('notepad.exe', { stdio: 'ignore', windowsHide: false, detached: false })
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    if (windowRect('Notepad') || windowRect('记事本')) return child
+    await sleep(300)
+  }
+  return child
+}
+
+/**
+ * A site with one page behind a session cookie.
+ *
+ * The login form posts to the server, which answers with a session cookie and
+ * the token. The protected page requires that cookie. Nothing about the session
+ * lives in the page, so a browser that loses its cookies cannot read the token
+ * again - which is what makes this a test of the browser session rather than of
+ * the page.
+ */
+function startSessionSite(tokenValue) {
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    const cookies = String(request.headers.cookie ?? '')
+    const signedIn = cookies.includes('ld_session=ok')
+
+    if (url.pathname === '/signin' && request.method === 'POST') {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'set-cookie': 'ld_session=ok; Path=/; Max-Age=3600',
+      })
+      response.end('<title>Signed in</title><h1>welcome</h1><a href="/private">private area</a>')
+      return
+    }
+    if (url.pathname === '/private') {
+      response.writeHead(signedIn ? 200 : 403, { 'content-type': 'text/html; charset=utf-8' })
+      response.end(signedIn
+        ? `<title>Private</title><h1>secret</h1><p>The code is ${tokenValue}</p>`
+        : '<title>Denied</title><h1>not signed in</h1><p>Please sign in first.</p>')
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    response.end(`
+<title>Session Site</title>
+<h1>Please sign in</h1>
+<form method="post" action="/signin">
+  <label for="user">User</label><input id="user" name="user" value="" />
+  <label for="pass">Password</label><input id="pass" name="pass" type="password" value="" />
+  <button type="submit">Sign in</button>
+</form>`)
+  })
+  return server
+}
+
+/**
+ * A page with a slider and a drop target, for the drag task.
+ *
+ * The page reports its own state to the server whenever that state changes, and
+ * the server keeps the latest report. The oracle reads that report, so the judge
+ * is the page itself rather than anything the agent wrote down.
+ */
+function startDragSite() {
+  const state = { slider: null, zone: null }
+  const server = createServer((request, response) => {
+    if (request.method === 'POST' && request.url === '/report') {
+      let body = ''
+      request.on('data', (chunk) => { body += chunk })
+      request.on('end', () => {
+        try {
+          const parsed = JSON.parse(body || '{}')
+          state.slider = parsed.slider ?? state.slider
+          state.zone = parsed.zone ?? state.zone
+        } catch { /* a malformed report is simply not recorded */ }
+        response.writeHead(204)
+        response.end()
+      })
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    response.end(`
+<title>Drag Site</title>
+<h1>Slide to 100</h1>
+<input id="slider" type="range" min="0" max="100" value="0" />
+<div id="shown">0</div>
+<h2 id="zone" style="width:240px;height:80px;border:2px dashed #444">drop zone</h2>
+<div id="dragger" style="width:80px;height:24px;background:#bbb">drag me</div>
+<script>
+  var dragging = false;
+  var report = function () {
+    fetch('/report', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        slider: document.getElementById('slider').value,
+        zone: document.getElementById('zone').textContent,
+      }),
+    }).catch(function () {});
+  };
+  document.getElementById('slider').addEventListener('input', function () {
+    document.getElementById('shown').textContent = this.value;
+    report();
+  });
+  // The zone only says "entered" while a pointer is being held and moved over
+  // it, which neither a click nor a scroll produces.
+  document.getElementById('dragger').addEventListener('mousedown', function () { dragging = true; });
+  document.addEventListener('mouseup', function () { dragging = false; report(); });
+  document.getElementById('zone').addEventListener('mousemove', function () {
+    if (dragging && this.textContent !== 'entered') { this.textContent = 'entered'; report(); }
+  });
+</script>`)
+  })
+  server.ldState = state
+  return server
+}
+
+/** The port a promise-resolved server is listening on. */
+function portOf(server) {
+  return server.address().port
 }
 
 /** Start the GUI target window and wait until it is on screen. */
@@ -339,6 +507,143 @@ function buildTasks() {
         // Only the process this task started: killing every powershell would
         // also kill whatever the run under test is doing at that moment.
         child?.kill()
+      },
+    },
+    {
+      id: 'menu_path',
+      // A genuine Win32 menu three levels deep. The accessibility tree shows the
+      // two headings and nothing below them, so this command cannot be reached
+      // by clicking an addressable element; it can be reached by walking the
+      // menu by path. The target writes the oracle file itself when the exact
+      // command runs, so a wrong command cannot produce it.
+      async setup() {
+        const value = token('M1')
+        const out = path.join(WORK, 'm1.txt')
+        rmSync(out, { force: true })
+        killByName(['ld-menu-target'])
+        await sleep(600)
+        const child = await startMenuTarget(out, value)
+        return { value, out, child }
+      },
+      goal: ({ out }) => [
+        'A window titled "LD Menu Target" is open on the desktop.',
+        'It has a menu bar. Under the Report menu there is an Export submenu,',
+        'and under that, the command "As text".',
+        'Run that exact command. The application then writes a report file.',
+        `Do not type into it and do not use a shell: the file must be written by that menu command.`,
+        `The file is ${out} .`,
+      ].join(' '),
+      async oracle({ value, out }) {
+        if (!existsSync(out)) return { pass: false, detail: 'the menu command never wrote its report' }
+        const got = text(readFileSync(out, 'utf8')).trim()
+        return got === `${value}|text`
+          ? { pass: true, detail: `menu command wrote ${got}` }
+          : { pass: false, detail: `expected ${value}|text got ${JSON.stringify(got.slice(0, 60))}` }
+      },
+      async teardown({ child }) {
+        child?.kill()
+        killByName(['ld-menu-target'])
+      },
+    },
+    {
+      id: 'terminate_app',
+      // The oracle is the process this task started, checked by id: a window
+      // that was merely closed leaves the process running, and only terminating
+      // the application ends it. Whether the agent arrives by title or by id is
+      // its own business.
+      async setup() {
+        killByName(['notepad'])
+        await sleep(700)
+        const child = await startNotepad()
+        return { child }
+      },
+      goal: () => [
+        'A Notepad window is open on the desktop.',
+        'Terminate the Notepad application so that its process is no longer running at all.',
+        'Closing the window is not enough: the process itself must be gone.',
+      ].join(' '),
+      async oracle({ child }) {
+        if (!child?.pid) return { pass: false, detail: 'the task never started a Notepad process to end' }
+        await sleep(1200)
+        return pidIsAlive(child.pid)
+          ? { pass: false, detail: `process ${child.pid} is still running` }
+          : { pass: true, detail: `process ${child.pid} is gone` }
+      },
+      async teardown() {
+        killByName(['notepad'])
+      },
+    },
+    {
+      id: 'browser_session',
+      // The token exists on one page only, and that page answers only to a
+      // request carrying the session cookie. The browser is asked to be closed
+      // and reopened in between, so a browser that does not keep its session
+      // cannot produce the token - the page has no other copy of it.
+      async setup() {
+        const value = token('S1')
+        killByName(['chrome', 'msedge'])
+        await sleep(800)
+        const server = startSessionSite(value)
+        await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+        return { value, server, out: path.join(WORK, 's1.txt'), url: `http://127.0.0.1:${portOf(server)}/` }
+      },
+      goal: ({ url, out }) => [
+        `A local site is at ${url} .`,
+        'Sign in using the form it shows: user "demo", password "demo".',
+        'Then open its private area and read the code shown there.',
+        'To be sure the sign-in really persisted, close the browser completely first and open it again,',
+        'then go back to that site and open the private area. The sign-in must still hold after the restart.',
+        `Write the code alone to ${out} .`,
+      ].join(' '),
+      async oracle({ value, out }) {
+        if (!existsSync(out)) return { pass: false, detail: 'no code was written' }
+        const got = text(readFileSync(out, 'utf8')).trim()
+        return got === value
+          ? { pass: true, detail: `read the private code ${got}` }
+          : { pass: false, detail: `expected ${value} got ${JSON.stringify(got.slice(0, 40))}` }
+      },
+      async teardown({ server }) {
+        killByName(['chrome', 'msedge'])
+        await sleep(500)
+        await new Promise((resolve) => server.close(resolve))
+      },
+    },
+    {
+      id: 'browser_drag',
+      // Two states that only a pointer drag can produce: a slider whose value
+      // follows the movement, and a zone that lights up while something is
+      // being dragged across it. Neither is reachable by clicking or scrolling.
+      async setup() {
+        killByName(['chrome', 'msedge'])
+        await sleep(800)
+        const server = startDragSite()
+        await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+        return { server, out: path.join(WORK, 's2.txt'), url: `http://127.0.0.1:${portOf(server)}/` }
+      },
+      goal: ({ url, out }) => [
+        `A local page is at ${url} .`,
+        'Set the slider on it to 100 by dragging it, not by typing or pressing keys.',
+        'Then drag the small grey block labelled "drag me" onto the dashed drop zone so the zone reads "entered".',
+        `When both are done, write exactly DONE to ${out} .`,
+      ].join(' '),
+      async oracle({ out, server }) {
+        // The page is the judge: it reported what it showed as the state
+        // changed, and the server kept the latest report. Neither a click nor a
+        // scroll can produce these two values.
+        if (!existsSync(out)) return { pass: false, detail: 'the task was not reported finished' }
+        const reported = text(readFileSync(out, 'utf8')).trim()
+        if (reported !== 'DONE') return { pass: false, detail: `wrote ${JSON.stringify(reported.slice(0, 30))}` }
+        const state = server.ldState ?? {}
+        const sliderOk = String(state.slider) === '100'
+        const zoneOk = String(state.zone) === 'entered'
+        return sliderOk && zoneOk
+          ? { pass: true, detail: `page reported slider=${state.slider} zone=${state.zone}` }
+          : { pass: false, detail: `page reported slider=${state.slider} zone=${JSON.stringify(state.zone)}` }
+      },
+      async teardown({ server }) {
+        killByName(['chrome', 'msedge'])
+        await sleep(500)
+        await new Promise((resolve) => server.close(resolve))
       },
     },
   ]
