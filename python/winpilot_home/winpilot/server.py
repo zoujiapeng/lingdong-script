@@ -70,6 +70,7 @@ from .orchestrator.agent_threads import (
 from .orchestrator.projection import RUN_PROJECTIONS
 from .orchestrator.runtime import ARP_RUNS, ArpExecution
 from .tasking.artifacts import ArtifactStore
+from .desktop_observe import router as desktop_observe_router
 
 _RECIPE_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 CONTROL_TOKEN = os.environ.get("WINPILOT_CONTROL_TOKEN", "").strip()
@@ -133,6 +134,10 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None, lifespan=_lifespan)
+
+# Read-only observation surface for external agent hosts. Registered before the
+# middleware block so the same token guard in _protected_path applies to it.
+app.include_router(desktop_observe_router)
 
 # The server binds to loopback and accepts only the production renderer's null
 # origin plus the two Vite development origins. Every non-ping request still

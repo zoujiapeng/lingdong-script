@@ -39,7 +39,7 @@ try {
 
   // 1) Tool surface is well formed for the DeepSeek function-name contract.
   const tools = buildTools({ client, sidecar, settings })
-  check('tool count', tools.length === 8, `${tools.length}`)
+  check('tool count', tools.length === 13, `${tools.length}`)
   const names = new Set()
   for (const tool of tools) {
     check(`tool name ${tool.name}`, TOOL_NAME.test(tool.name))
@@ -50,7 +50,21 @@ try {
     check(`tool description ${tool.name}`, typeof tool.description === 'string' && tool.description.length > 20)
   }
 
-  // 2) The generated graph must pass the runtime's own canonical validator.
+  // 2) The observation surface answers and is bounded.
+  const screen = await client.get('/api/v2/desktop/screen', { timeoutMs: 30_000 })
+  check(
+    'GET /api/v2/desktop/screen',
+    screen?.ok === true && screen.virtual?.width > 0 && screen.virtual?.height > 0,
+    JSON.stringify(screen?.virtual ?? screen),
+  )
+  const cursor = await client.get('/api/v2/desktop/cursor', { timeoutMs: 30_000 })
+  check('GET /api/v2/desktop/cursor', cursor?.ok === true, JSON.stringify(cursor))
+  const windows = await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 })
+  check('GET /api/v2/desktop/windows', Boolean(windows) && typeof windows === 'object', `keys=${Object.keys(windows ?? {}).join('|')}`)
+  const apps = await client.get('/api/v2/desktop/apps?max_results=5', { timeoutMs: 180_000 })
+  check('GET /api/v2/desktop/apps', apps?.ok === true, `count=${apps?.count ?? '?'}`)
+
+  // 3) The generated graph must pass the runtime's own canonical validator.
   const observeGraph = actionBatchGraph({
     actions: [{ action: 'screenshot', managed_artifact: true, scope: 'screen', purpose: 'user_output', sendable: true }],
     name: 'smoke observe',

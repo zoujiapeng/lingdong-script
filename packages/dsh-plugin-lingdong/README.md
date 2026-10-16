@@ -37,13 +37,18 @@ dsh --profile web --patch "C:/Users/zou/Desktop/claude/packages/dsh-plugin-lingd
 
 ## 3. 能力面
 
-### 3.1 桌面原语（覆盖 Cua Driver 的输入能力）
+### 3.1 桌面原语与观测（覆盖 Cua Driver 的输入与观测能力）
 
 | 工具 | 作用 |
 | --- | --- |
 | `lingdong_status` | 运行时可达性、构建标识、已加载配置 |
 | `lingdong_observe` | 抓当前真实桌面并**返回图像**（模型直接看屏） |
 | `lingdong_desktop` | 一次有序批处理执行 canonical 动作：click / click_element / type_text / hotkey / scroll / move_mouse / drag / hold_key / launch / focus_window / wait / read_text / zoom / screenshot / clipboard_* |
+| `lingdong_windows` | 可见窗口 + 后台应用枚举（用来取**精确窗口标题**，而不是猜） |
+| `lingdong_screen` | 虚拟屏幕原点与尺寸（物理像素），即坐标的边界 |
+| `lingdong_cursor` | 当前物理光标位置 |
+| `lingdong_apps` | 按名称发现已安装应用，或列出有界索引 |
+| `lingdong_elements` | 单个窗口的无障碍元素（UIA 可用时） |
 | `lingdong_run_goal` | 把自然语言目标交给视觉 Agent 实时操控电脑（步骤未知时用） |
 
 ### 3.2 DSH 及其 Cua provider 没有的部分
@@ -70,7 +75,7 @@ dsh --profile web --patch "C:/Users/zou/Desktop/claude/packages/dsh-plugin-lingd
 
 - **目标窗口是插件侧纪律，不是后端规则**。已核实：`POST /api/v2/arp/validate` 不会因为没有 `focus_window` 就拒绝一个坐标动作——"空间动作前必须建立目标"是**流程图编辑器**的守卫。所以 `lingdong_desktop` 传 `window` 时由插件自己前置 `focus_window`；坐标是屏幕绝对像素，命名目标才让动作确定。
 - `lingdong_run_flow` 接受 `automation-ir/1`；`wps_replay` 类型走 Replayer，`arp_graph` 类型走 ARP。
-- **观测面还不是 Cua 的严格超集**：窗口枚举、应用列表、屏幕尺寸、光标位置、无障碍树在 Python 侧已实现（`winpilot/perception/`），但尚未暴露成 REST —— 见第 6 节 v2。
+- **观测面已补齐到只读枚举层**：窗口、应用、屏幕、光标、UIA 元素都已暴露为只读 REST 并被插件工具覆盖（见 [desktop_observe.py](<../../python/winpilot_home/winpilot/desktop_observe.py>)）。仍未覆盖的是 Cua 的**状态快照**类工具（`get_window_state` 式的窗口级 UIA+截图联合快照）、`verify_state` 断言和浏览器工具族。
 - **前端界面尚未迁移**（v1）。
 
 ## 5. 验证
@@ -95,12 +100,15 @@ node packages/dsh-plugin-lingdong/scripts/smoke.mjs
 | `--dump-config` 叠加 overlay | `computer-use-cua-driver-native → disabled: true`，`lingdong` 行插入，exit 0，未改任何 DSH 文件 |
 | 从 profile 上下文 import 本插件 | 导出 `Config, PROVIDER_NAME, apply, inject, name` 正确 |
 | 冒烟：运行时可达 + `/api/ping` | 通过（子进程启动与 SIGTERM 回收均正常） |
-| 冒烟：8 个工具名称/唯一性/schema/handler/描述 | 全部通过 |
+| 冒烟：13 个工具名称/唯一性/schema/handler/描述 | 全部通过 |
+| 冒烟：`/api/v2/desktop/screen` / `cursor` / `windows` / `apps` | 通过（1920x1080；光标 887,112；窗口枚举；发现 625 个应用）|
+| **真实 DSH 启动中挂载** | 通过：临时实例（3099）启动后 `apply()` 执行并拉起 Python 运行时（8790 监听）；3080 上的原实例全程未受影响 |
 | 冒烟：observe 图与带目标的空间图过真实 ARP 校验 | 通过 |
 | 冒烟：`window` 前置 `focus_window`、不传则不动 | 通过 |
 
 ## 6. 后续阶段
 
-1. **v0（本次）**：host 插件 + 桌面/录制/重放/流程工具 + overlay patch + 冒烟脚本。
-2. **v1**：把 `src/renderer` 的流程工作台迁成 DSH client plugin（`dsh.client` + `./client` 入口 + `tsdown`），注册进 Web GUI。
-3. **v2**：补齐观测面（窗口枚举、应用列表、屏幕尺寸、光标位置、无障碍树），做到 Cua 的逐项超集。
+1. **v0 ✅**：host 插件 + overlay patch + 冒烟脚本；已在真实 DSH 启动中证明挂载。
+2. **v2（进行中 ✅ 大部分）**：只读观测面已补齐（屏幕/光标/窗口/应用/UIA 元素）。
+3. **v1（未开始）**：把 `src/renderer` 的流程工作台迁成 DSH client plugin（`dsh.client` + `./client` 入口 + `tsdown`），注册进 Web GUI。
+4. **v2 余项**：窗口级状态快照（UIA + 截图联合）、`verify_state` 式断言、浏览器工具族。

@@ -133,6 +133,84 @@ export function buildTools({ client, sidecar, settings }) {
     },
 
     {
+      name: 'lingdong_windows',
+      description:
+        'List the visible windows and background applications the runtime can target. Use it to discover the exact ' +
+        'window title to pass to lingdong_desktop, instead of guessing one.',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+      async handler() {
+        return toolResult(await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))
+      },
+    },
+
+    {
+      name: 'lingdong_screen',
+      description:
+        'Report the virtual-screen origin and size in physical pixels. Coordinates accepted by lingdong_desktop are ' +
+        'physical screen pixels, so this is the frame that bounds them.',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+      async handler() {
+        return toolResult(await client.get('/api/v2/desktop/screen', { timeoutMs: 30_000 }))
+      },
+    },
+
+    {
+      name: 'lingdong_cursor',
+      description: 'Report the current physical cursor position.',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+      async handler() {
+        return toolResult(await client.get('/api/v2/desktop/cursor', { timeoutMs: 30_000 }))
+      },
+    },
+
+    {
+      name: 'lingdong_apps',
+      description:
+        'Discover installed applications by human name, or list the bounded index. Use it before lingdong_desktop ' +
+        'launches anything, so the launch target is one the runtime can actually resolve.',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          query: { type: 'string', description: 'Human application name. Empty lists the index instead.' },
+          max_results: { type: 'number', description: 'Bound on returned entries (1-200, default 20).' },
+          refresh: { type: 'boolean', description: 'Rebuild the discovery index instead of using its cache.' },
+        },
+      },
+      async handler(args) {
+        const params = new URLSearchParams()
+        if (args.query) params.set('query', String(args.query))
+        if (args.max_results != null) params.set('max_results', String(args.max_results))
+        if (args.refresh) params.set('refresh', 'true')
+        const suffix = params.toString()
+        return toolResult(
+          await client.get(`/api/v2/desktop/apps${suffix ? `?${suffix}` : ''}`, { timeoutMs: 120_000 }),
+        )
+      },
+    },
+
+    {
+      name: 'lingdong_elements',
+      description:
+        'Read the accessibility elements of one window, when the UIA backend is available. Prefer this over pixel ' +
+        'guessing for standard controls; fall back to lingdong_observe when the window is custom-drawn.',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['hwnd'],
+        properties: {
+          hwnd: { type: 'number', description: 'Window handle from lingdong_windows.' },
+          limit: { type: 'number', description: 'Bound on returned elements (1-200, default 200).' },
+        },
+      },
+      async handler(args) {
+        const params = new URLSearchParams({ hwnd: String(args.hwnd) })
+        if (args.limit != null) params.set('limit', String(args.limit))
+        return toolResult(await client.get(`/api/v2/desktop/elements?${params}`, { timeoutMs: 60_000 }))
+      },
+    },
+
+    {
       name: 'lingdong_observe',
       description:
         'Capture the current real desktop and return the image. Always observe before deciding coordinates, ' +
