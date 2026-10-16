@@ -1,0 +1,31 @@
+# Lingdong computer-use provider — standalone overlay for the `web` profile.
+#
+# Apply WITHOUT editing any file DSH ships or any existing profile file:
+#
+#   dsh --profile web --patch "C:/Users/zou/Desktop/claude/packages/dsh-plugin-lingdong/dsh.patch.yml"
+#
+# The overlay is applied after the profile's own layer, so it can disable the
+# shipped Cua Driver provider rows and insert this provider in one step.
+# Nothing here mutates DSH's installation; removing the --patch flag restores
+# the original composition exactly.
+
+# 1) Release the exclusive computer-use slot held by the shipped Cua provider.
+#    Comment this block out to run both providers side by side (only one can
+#    own the slot; the Lingdong tools still register and report the condition).
+- id: computer-use-cua-driver-native
+  name: '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native'
+  disabled: true
+
+# 2) Insert the Lingdong provider and its desktop tool surface.
+- insert:
+    - id: lingdong
+      name: '@lingdong/dsh-plugin-lingdong'
+      config:
+        # Absolute path to the repository that owns python/ and python-runtime/.
+        repoRoot: 'C:/Users/zou/Desktop/claude'
+        # Private loopback port for this plugin's own runtime instance.
+        port: 8790
+        # Attach to an already-running runtime on that port instead of spawning.
+        autoStart: true
+        # Claim the exclusive computer-use provider slot.
+        registerComputerUse: true
