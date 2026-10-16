@@ -88,6 +88,9 @@ dsh --profile web --patch "C:/Users/zou/Desktop/claude/packages/dsh-plugin-lingd
 | `POST /lingdong/api/flows/<file>/run` | 运行已保存的文档 |
 | `GET /lingdong/api/runs/<id>?kind=replay\|arp` | 轮询运行状态与逐步结果 |
 | `POST /lingdong/api/runs/<id>/cancel` | 取消 |
+| `POST /lingdong/api/fragments` | 一句话生成流程片段（转发给运行时自己的 `FlowFragmentProposer`） |
+| `GET /lingdong/api/fragments/<job_id>` | 轮询片段生成任务 |
+| `POST /lingdong/api/fragments/<job_id>/cancel` | 取消片段生成 |
 
 设计要点：
 
@@ -99,6 +102,9 @@ dsh --profile web --patch "C:/Users/zou/Desktop/claude/packages/dsh-plugin-lingd
   `sec-fetch-site: cross-site`）。所以把 web server 绑到 `0.0.0.0` 供手机访问时，
   判定仍由操作者配置的可信主机名单决定，插件不会比 GUI 的其它 `/api` 更宽松。
 - **组合里没有 web server 时不是失败**：工具面照常挂载，只是没有工作台可服务。
+- **片段生成不重建第二套模型管线**。一句话生成片段转发给运行时既有的
+  `/api/v2/flow-fragments/proposals`（`FlowFragmentProposer`）：一次用户主动触发的
+  可选调用，不观察桌面、不读会话、没有执行权限。桥这边不拼提示词、不碰模型。
 
 ## 4. 已知边界（v0）
 
@@ -146,9 +152,10 @@ codec** 生成一份文档，交给运行时校验、保存并真的跑完——
 | **真实 DSH 启动中挂载** | 通过：临时实例（3099）启动后 `apply()` 执行并拉起 Python 运行时（8790 监听）；3080 上的原实例全程未受影响 |
 | 冒烟：observe 图与带目标的空间图过真实 ARP 校验 | 通过 |
 | 冒烟：`window` 前置 `focus_window`、不传则不动 | 通过 |
-| 数据通道：真实 server + 真实 runtime 全链路 51 项 | 全部通过（含准入拒绝、路径穿越拒绝、非法文档拒绝、运行轮询、逐步结果） |
+| 数据通道：真实 server + 真实 runtime 全链路 60 项 | 全部通过（含准入拒绝、路径穿越拒绝、非法文档拒绝、运行轮询、逐步结果、片段生成路由与请求形状） |
 | 数据通道：画布 codec 产物被运行时接受并真的执行 | 通过：`ctrl.if` 条件求值为真、`2.1` 步骤执行、索引→节点映射与画布一致 |
-| 工作台：bundle 求值 + 48 项 codec/渲染断言 | 全部通过 |
+| 片段生成：运行时的校验发生在任何 provider 调用之前 | 通过：画布构建的 `document` 摘要通过运行时逐字段检查，被改坏的 catalog 由运行时自己的校验器拒绝 |
+| 工作台：bundle 求值 + 71 项 codec/渲染断言 | 全部通过 |
 
 ## 6. 后续阶段
 
@@ -158,5 +165,7 @@ codec** 生成一份文档，交给运行时校验、保存并真的跑完——
    —— [packages/dsh-client-ui-lingdong](<../dsh-client-ui-lingdong>)。关键结论：DSH 客户端插件是
    `window.__ModuleLoader__.load(...)` 包装，`require` 由宿主注入，**不需要 tsdown 或任何打包器**，
    改完即生效。画布与宿主之间走本插件自己的 `/lingdong/api` 同源路由（§3.4）。
-4. **v1 余项**：多选、撤销重做、一句话生成片段。
+4. **v1 ✅ 交互补齐**：多选（Shift/Ctrl 点击 + 框选 + 整块移动）、撤销重做（手势级检查点、
+   `Ctrl+Z`/`Ctrl+Shift+Z`/`Ctrl+Y`）、一句话生成片段（运行时既有 proposal 通道，预览后
+   作为**一个** undo 检查点插入）。
 5. **v2 余项**：窗口级状态快照（UIA + 截图联合）、`verify_state` 式断言、浏览器工具族。

@@ -246,6 +246,49 @@ export function createBridgeHandler({ client, sidecar, settings, log = console, 
     return { ok: true, kind: 'replay', id, ...(await runtime(`/api/replay/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: {}, timeoutMs: 60_000 })) }
   }
 
+  /**
+   * Ask the runtime's own editor helper for one inert flow fragment.
+   *
+   * The request body is the runtime's own contract - a sentence, a summary of
+   * the current document, and the node catalog the model may choose from - and
+   * the runtime answers with a job identity. Nothing here decides what is
+   * proposed: the bridge never builds a prompt and never touches the model, so
+   * this stays one opt-in editor call, exactly as the standalone Studio has it.
+   */
+  async function proposeFragment(body) {
+    const goal = String(body?.goal ?? '').trim()
+    if (!goal) throw new BridgeError(400, 'goal is required')
+    const started = await runtime('/api/v2/flow-fragments/proposals', {
+      method: 'POST',
+      body: { goal, document: body.document, catalog: body.catalog },
+      timeoutMs: 60_000,
+    })
+    if (!started?.proposal_job_id) {
+      throw new BridgeError(502, 'runtime accepted the request but returned no proposal job', started)
+    }
+    return { ok: true, job_id: started.proposal_job_id }
+  }
+
+  async function fragmentStatus(jobId) {
+    const answer = await runtime(`/api/v2/jobs/${encodeURIComponent(jobId)}`, { timeoutMs: 60_000 })
+    const job = answer?.job ?? answer
+    return {
+      ok: true,
+      job_id: jobId,
+      status: String(job?.status ?? ''),
+      error: String(job?.error ?? ''),
+      proposal: job?.result ?? null,
+    }
+  }
+
+  async function fragmentCancel(jobId) {
+    return {
+      ok: true,
+      job_id: jobId,
+      ...(await runtime(`/api/v2/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', body: {}, timeoutMs: 60_000 })),
+    }
+  }
+
   async function status() {
     const ping = await runtime('/api/ping', { timeoutMs: 15_000 })
     return { ok: true, base_url: sidecar.baseUrl, attached: sidecar.external, ping }
@@ -278,6 +321,16 @@ export function createBridgeHandler({ client, sidecar, settings, log = console, 
       if (rest.length === 1 && method === 'GET') return runStatus(kind, id)
       if (rest.length === 2 && rest[1] === 'cancel' && method === 'POST') return cancelRun(kind, id)
       throw new BridgeError(404, 'unknown run operation')
+    }
+    if (head === 'fragments') {
+      if (rest.length === 0) {
+        if (method !== 'POST') throw new BridgeError(405, 'fragment proposal is POST')
+        return proposeFragment(await readJsonBody(req))
+      }
+      const jobId = rest[0]
+      if (rest.length === 1 && method === 'GET') return fragmentStatus(jobId)
+      if (rest.length === 2 && rest[1] === 'cancel' && method === 'POST') return fragmentCancel(jobId)
+      throw new BridgeError(404, 'unknown fragment operation')
     }
     if (head === 'flows') {
       if (rest.length === 0) {

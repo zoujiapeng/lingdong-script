@@ -286,6 +286,142 @@ let badFormat = null
 try { codec.fromDocument({ format: 'something/else' }) } catch (error) { badFormat = error }
 check('an unknown format is refused', badFormat !== null)
 
+// ---- the fragment helper's request and draft handling ----------------------
+const fragmentNodes = codec.layoutNodes([
+  { kind: 'click', params: { x: 10, y: 20, button: 'left', double: false, window: 'Notepad' } },
+  { kind: 'wait', params: { seconds: 1 } },
+])
+const context = codec.fragmentContext(fragmentNodes)
+
+check(
+  'the fragment request summarizes the document with the runtime\'s exact field set',
+  Object.keys(context.document).sort().join(',') === 'edge_count,node_count,node_types'
+    && context.document.node_count === 4
+    && context.document.edge_count === 3
+    && context.document.node_types.join(',') === 'click,end,start,wait',
+  canonical(context.document),
+)
+check(
+  'every catalog entry carries the runtime\'s exact field set',
+  context.catalog.length === 7
+    && context.catalog.every((entry) => Object.keys(entry).sort().join(',') === 'label,output_ports,params,type'),
+  context.catalog.map((entry) => entry.type).join(','),
+)
+check(
+  'the catalog offers one successor branch per node, because the canvas is one pipeline',
+  context.catalog.every((entry) => entry.output_ports.length === 1 && entry.output_ports[0] === 'next'),
+  JSON.stringify(context.catalog[0] && context.catalog[0].output_ports),
+)
+check(
+  'the catalog never offers the opaque recorded fragment to the model',
+  context.catalog.every((entry) => entry.type !== 'replay_step'),
+  context.catalog.map((entry) => entry.type).join(','),
+)
+check(
+  'each catalog entry names only parameters this editor owns',
+  context.catalog.every((entry) => Object.keys(entry.params).every((key) => codec.FRAGMENT_PARAM_KEYS[entry.type].indexOf(key) !== -1)),
+  JSON.stringify(context.catalog.map((entry) => Object.keys(entry.params))),
+)
+
+const draft = {
+  format: 'flow-fragment-proposal/1',
+  summary: 'click then type',
+  proposal_usage: { model_calls: 1, tokens: 120 },
+  nodes: [
+    { local_id: 'a', type: 'click', label: '点一下', params: { x: 420, y: 300 } },
+    { local_id: 'b', type: 'input_text', label: '输入', params: { text: 'hello' } },
+  ],
+  edges: [{ source: 'a', target: 'b', source_port: 'next' }],
+}
+const normalizedDraft = codec.normalizeFragment(draft)
+check('a well-formed draft normalizes', normalizedDraft.nodes.length === 2 && normalizedDraft.edges.length === 1)
+check('the draft keeps the model-call count it cost', normalizedDraft.usage.model_calls === 1, canonical(normalizedDraft.usage))
+check(
+  'the draft linearizes to the order its edges express',
+  codec.linearizeFragment(normalizedDraft).map((entry) => entry.kind).join(',') === 'click,input_text',
+  codec.linearizeFragment(normalizedDraft).map((entry) => entry.kind).join(','),
+)
+
+// A join (two predecessors into one node) is still exactly expressible: with one
+// output branch per node every edge only means "before", and a topological order
+// satisfies all of them.
+const joinDraft = {
+  format: 'flow-fragment-proposal/1',
+  summary: 'join',
+  nodes: [
+    { local_id: 'a', type: 'wait', label: '', params: { seconds: 1 } },
+    { local_id: 'b', type: 'wait', label: '', params: { seconds: 2 } },
+    { local_id: 'c', type: 'screenshot', label: '', params: {} },
+  ],
+  edges: [
+    { source: 'a', target: 'c', source_port: 'next' },
+    { source: 'b', target: 'c', source_port: 'next' },
+  ],
+}
+const joinOrder = codec.linearizeFragment(codec.normalizeFragment(joinDraft)).map((entry) => entry.kind)
+check(
+  'a join linearizes so every predecessor still runs before its target',
+  joinOrder.indexOf('screenshot') === 2 && joinOrder.length === 3,
+  joinOrder.join(','),
+)
+
+const fragmentRefusals = [
+  ['a draft node of an unavailable type', { format: 'flow-fragment-proposal/1', summary: '', nodes: [{ local_id: 'a', type: 'agent_goal', label: '', params: {} }], edges: [] }],
+  ['a draft node using an unopened parameter', { format: 'flow-fragment-proposal/1', summary: '', nodes: [{ local_id: 'a', type: 'wait', params: { seconds: 1, shell: 'x' } }], edges: [] }],
+  ['a duplicate draft node id', { format: 'flow-fragment-proposal/1', summary: '', nodes: [{ local_id: 'a', type: 'wait', params: {} }, { local_id: 'a', type: 'wait', params: {} }], edges: [] }],
+  ['an edge leaving the draft', { format: 'flow-fragment-proposal/1', summary: '', nodes: [{ local_id: 'a', type: 'wait', params: {} }], edges: [{ source: 'a', target: 'zz', source_port: 'next' }] }],
+  ['an edge on a branch the catalog does not offer', { format: 'flow-fragment-proposal/1', summary: '', nodes: [{ local_id: 'a', type: 'wait', params: {} }, { local_id: 'b', type: 'wait', params: {} }], edges: [{ source: 'a', target: 'b', source_port: 'fail' }] }],
+  ['a draft with the wrong format', { format: 'something/else', summary: '', nodes: [{ local_id: 'a', type: 'wait', params: {} }], edges: [] }],
+]
+for (const [label, value] of fragmentRefusals) {
+  let caught = null
+  try { codec.normalizeFragment(value) } catch (error) { caught = error }
+  check('a draft is refused: ' + label, caught !== null, caught ? String(caught.message) : 'no error')
+}
+
+// A cyclic draft is refused by the linearization, not silently reordered.
+let cyclic = null
+try {
+  const normalizedCycle = codec.normalizeFragment({
+    format: 'flow-fragment-proposal/1',
+    summary: '',
+    nodes: [
+      { local_id: 'a', type: 'wait', label: '', params: {} },
+      { local_id: 'b', type: 'wait', label: '', params: {} },
+    ],
+    edges: [
+      { source: 'a', target: 'b', source_port: 'next' },
+      { source: 'b', target: 'a', source_port: 'next' },
+    ],
+  })
+  codec.linearizeFragment(normalizedCycle)
+} catch (error) { cyclic = error }
+check('a draft that cannot be ordered is refused', cyclic !== null, cyclic ? String(cyclic.message) : 'no error')
+
+// A draft whose node cannot compile exactly is refused instead of inserted.
+let uncompilable = null
+try {
+  codec.linearizeFragment(codec.normalizeFragment({
+    format: 'flow-fragment-proposal/1',
+    summary: '',
+    nodes: [{ local_id: 'a', type: 'keyboard', label: '', params: { keys: '' } }],
+    edges: [],
+  }))
+} catch (error) { uncompilable = error }
+check('a draft step that cannot compile is refused', uncompilable !== null, uncompilable ? String(uncompilable.message) : 'no error')
+
+// A condition draft must use a predicate the replayer really evaluates.
+let badPredicate = null
+try {
+  codec.linearizeFragment(codec.normalizeFragment({
+    format: 'flow-fragment-proposal/1',
+    summary: '',
+    nodes: [{ local_id: 'a', type: 'condition', label: '', params: { key: 'variable_equals', value: 'x' } }],
+    edges: [],
+  }))
+} catch (error) { badPredicate = error }
+check('a draft condition outside the replayer\'s predicates is refused', badPredicate !== null, badPredicate ? String(badPredicate.message) : 'no error')
+
 // ---- render the registered pane with the real React ------------------------
 const paneEntry = seen.slotRegister.find((entry) => entry.name === 'sidebar.right.pane.tab')
 let markup = ''
@@ -305,8 +441,13 @@ check('agent-semantic nodes are absent', markup.indexOf('data-lingdong-palette="
 check('canvas surface rendered', markup.indexOf('data-lingdong-canvas') !== -1)
 check('the flow library panel rendered', markup.indexOf('data-lingdong-canvas') !== -1 && markup.indexOf('\u6d41\u7a0b\u5e93') !== -1)
 check('the run control is present', markup.indexOf('data-lingdong-run="1"') !== -1)
+check('the undo and redo controls are present and start disabled', markup.indexOf('data-lingdong-undo="1"') !== -1 && markup.indexOf('data-lingdong-redo="1"') !== -1)
+check('the status bar reports an empty undo depth at rest', markup.indexOf('data-lingdong-undo-depth="0"') !== -1)
+check('the fragment helper has an entry point', markup.indexOf('data-lingdong-fragment-open="1"') !== -1)
+check('the fragment panel starts closed', markup.indexOf('data-lingdong-fragment=') === -1)
 check('the file name field is present', markup.indexOf('data-lingdong-field="file"') !== -1)
 check('the canvas never claims a model call', markup.indexOf('0 \u6a21\u578b\u8c03\u7528') !== -1, 'expected the model-call counter in the status bar')
+check('the status bar separates offline runs from the fragment helper', markup.indexOf('\u79bb\u7ebf\u8fd0\u884c 0 \u6a21\u578b\u8c03\u7528') !== -1)
 check('the status bar reports the resting run state', markup.indexOf('data-lingdong-run-state="idle"') !== -1)
 check('the inspector starts empty', markup.indexOf('\u9009\u4e2d\u4e00\u4e2a\u8282\u70b9') !== -1)
 

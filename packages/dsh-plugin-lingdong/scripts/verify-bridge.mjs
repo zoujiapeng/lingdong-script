@@ -388,6 +388,57 @@ try {
     JSON.stringify(mapped),
   )
 
+  // ---- 8) the opt-in fragment helper's plumbing ---------------------------
+  // The model call itself belongs to the user, so this exercises everything up
+  // to it: the route, the request the canvas builds, and the runtime's own
+  // validation of that request. A catalog the runtime rejects fails the job
+  // before any provider work, which is what makes the check cost nothing.
+  const noGoal = await api('POST', '/fragments', { body: {} })
+  check('a fragment request without a sentence is refused', noGoal.status === 400, `status=${noGoal.status}`)
+
+  const fragmentWrongMethod = await api('PUT', '/fragments', { body: {} })
+  check('the fragment route is POST only', fragmentWrongMethod.status === 405, `status=${fragmentWrongMethod.status}`)
+
+  const unknownJob = await api('GET', '/fragments/flow-fragment-does-not-exist')
+  check('an unknown fragment job keeps the runtime\'s 404', unknownJob.status === 404, `status=${unknownJob.status}`)
+
+  const canvasContext = codec.fragmentContext(codec.layoutNodes([
+    { kind: 'wait', params: { seconds: 1 } },
+  ]))
+  // Corrupt one catalog entry so the runtime's own validator, not the model,
+  // is what answers; everything else is the request the canvas really builds.
+  canvasContext.catalog[0] = Object.assign({}, canvasContext.catalog[0], { output_ports: [] })
+  const badCatalog = await api('POST', '/fragments', {
+    body: { goal: 'bridge verification', document: canvasContext.document, catalog: canvasContext.catalog },
+  })
+  check('the fragment route accepts a request shaped like the canvas builds it', badCatalog.status === 200 && Boolean(badCatalog.body?.job_id), JSON.stringify(badCatalog.body ?? {}).slice(0, 120))
+
+  let fragmentJob = null
+  if (badCatalog.body?.job_id) {
+    const deadline = Date.now() + 60_000
+    while (Date.now() < deadline) {
+      const answer = await api('GET', `/fragments/${encodeURIComponent(badCatalog.body.job_id)}`)
+      const status = String(answer.body?.status ?? '')
+      if (['done', 'failed', 'canceled'].includes(status)) {
+        fragmentJob = answer.body
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+  }
+  check(
+    'a catalog the runtime rejects fails before any provider call',
+    fragmentJob?.status === 'failed' && String(fragmentJob.error).includes('output ports'),
+    `status=${fragmentJob?.status} error=${JSON.stringify(fragmentJob?.error ?? '')}`,
+  )
+  check(
+    'the canvas document summary passed the runtime\'s exact-field-set check',
+    fragmentJob !== null
+      && String(fragmentJob.error).includes('catalog')
+      && !String(fragmentJob.error).includes('document summary'),
+    'the error names the catalog, so the document summary was accepted first',
+  )
+
   dispose?.()
 } catch (error) {
   check('bridge verification run', false, error?.stack ?? String(error))
