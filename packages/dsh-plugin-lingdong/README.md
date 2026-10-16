@@ -110,5 +110,5 @@ node packages/dsh-plugin-lingdong/scripts/smoke.mjs
 
 1. **v0 ✅**：host 插件 + overlay patch + 冒烟脚本；已在真实 DSH 启动中证明挂载。
 2. **v2（进行中 ✅ 大部分）**：只读观测面已补齐（屏幕/光标/窗口/应用/UIA 元素）。
-3. **v1（未开始）**：把 `src/renderer` 的流程工作台迁成 DSH client plugin（`dsh.client` + `./client` 入口 + `tsdown`），注册进 Web GUI。
+3. **v1（进行中）**：流程工作台的客户端插件骨架已完成 —— [packages/dsh-client-ui-lingdong](<../dsh-client-ui-lingdong>)。关键结论：DSH 客户端插件是 `window.__ModuleLoader__.load(...)` 包装，`require` 由宿主注入，**不需要 tsdown 或任何打包器**，改完即生效。当前注册了 locale 字典、`sidebarRightTabs` 标签类型与两个 pane 座位；画布本体下一步迁移。
 4. **v2 余项**：窗口级状态快照（UIA + 截图联合）、`verify_state` 式断言、浏览器工具族。

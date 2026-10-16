@@ -16,7 +16,8 @@
   name: '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native'
   disabled: true
 
-# 2) Insert the Lingdong provider and its desktop tool surface.
+# 2) Insert the Lingdong provider, its desktop tool surface, and the Web GUI
+#    flow-workbench client plugin.
 - insert:
     - id: lingdong
       name: '@lingdong/dsh-plugin-lingdong'
@@ -29,3 +30,7 @@
         autoStart: true
         # Claim the exclusive computer-use provider slot.
         registerComputerUse: true
+
+    # Browser-only flow workbench (packages/dsh-client-ui-lingdong).
+    - id: lingdong-client-ui
+      name: '@lingdong/dsh-client-ui-lingdong'
