@@ -97,9 +97,14 @@ const ACTION_BATCH_SCHEMA = {
       minItems: 1,
       description:
         'Canonical desktop actions executed in order. Supported action names: ' +
-        'observe, click, click_element, type_into_element, type_text, hotkey, scroll, move_mouse, ' +
-        'hold_key, drag, draw_strokes, focus_window, launch, wait, wait_change, wait_for_visual_change, ' +
-        'wait_stable, read_text, zoom, screenshot, clipboard_read, clipboard_write, clipboard_paste.',
+        'observe, click, click_element, type_into_element, type_text, set_value, hotkey, scroll, ' +
+        'move_mouse, hold_key, drag, draw_strokes, focus_window, set_window_frame, launch, wait, ' +
+        'wait_change, wait_for_visual_change, wait_stable, read_text, zoom, screenshot, ' +
+        'clipboard_read, clipboard_write, clipboard_paste. ' +
+        'set_value replaces a control\'s value through its accessibility value pattern: nothing is ' +
+        'clicked, no keystroke is synthesized, and the target does not have to be in front. Address it ' +
+        'with automation_id, x/y, element_id or a label. set_window_frame moves and resizes one window ' +
+        'without activating it; give any of x, y, width, height and the rest is kept.',
       items: { type: 'object', additionalProperties: true },
     },
   },

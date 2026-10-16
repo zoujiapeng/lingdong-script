@@ -1,6 +1,7 @@
 """Shared contract for actions accepted by the low-latency controller."""
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterator
 
@@ -11,6 +12,7 @@ ALLOWED_BATCH_ACTIONS = {
     "click_element",
     "type_into_element",
     "type_text",
+    "set_value",
     "hotkey",
     "scroll",
     "move_mouse",
@@ -18,6 +20,7 @@ ALLOWED_BATCH_ACTIONS = {
     "drag",
     "draw_strokes",
     "focus_window",
+    "set_window_frame",
     "launch",
     "wait",
     "wait_change",
@@ -36,6 +39,7 @@ BATCH_MUTATING_ACTIONS = {
     "click_element",
     "type_into_element",
     "type_text",
+    "set_value",
     "hotkey",
     "scroll",
     "move_mouse",
@@ -43,6 +47,7 @@ BATCH_MUTATING_ACTIONS = {
     "drag",
     "draw_strokes",
     "focus_window",
+    "set_window_frame",
     "launch",
     "clipboard_paste",
 }
@@ -375,6 +380,35 @@ def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
         return "requires label, text_query, fallback_text, or anchor"
     if name in {"type_text", "type_into_element", "clipboard_write"} and "text" not in args:
         return "requires text"
+    if name == "set_value":
+        if "text" not in args and "value" not in args:
+            return "requires text"
+        # A value write is addressed, never aimed: it replaces what a control
+        # holds, so the caller must say which control.
+        if not (
+            (args.get("x") is not None and args.get("y") is not None)
+            or args.get("element_id") is not None
+            or str(args.get("automation_id") or "").strip()
+            or any(
+                str(args.get(key) or "").strip()
+                for key in ("label", "text_query", "anchor")
+            )
+        ):
+            return "requires x and y, element_id, automation_id, or a label"
+    if name == "set_window_frame":
+        if not any(args.get(key) is not None for key in ("x", "y", "width", "height")):
+            return "requires at least one of x, y, width, height"
+        for key in ("x", "y", "width", "height"):
+            if args.get(key) is None:
+                continue
+            if isinstance(args.get(key), bool) or not isinstance(args.get(key), (int, float)):
+                return f"{key} must be a number"
+            if not math.isfinite(float(args[key])):
+                return f"{key} must be finite"
+        if args.get("width") is not None and float(args["width"]) <= 0:
+            return "width must be positive"
+        if args.get("height") is not None and float(args["height"]) <= 0:
+            return "height must be positive"
     if name == "hotkey" and not (args.get("keys") or args.get("value")):
         return "requires keys"
     if name == "hold_key" and not (args.get("keys") or args.get("value")):

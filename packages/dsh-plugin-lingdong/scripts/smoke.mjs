@@ -199,10 +199,70 @@ try {
       unsupported ? String(unsupported.message).slice(0, 120) : 'no error',
     )
 
-    // Close the window this run opened, through the same canonical input path
-    // every other action uses. An empty Notepad has nothing to save. The count
-    // is what is asserted, not one identity: two empty Notepads share a title,
-    // and which of them the close lands on is not the property under test.
+    // The two primitives the shipped driver has and this one did not: a value
+    // write that never clicks, and a frame change that never takes focus. Both
+    // are confirmed through a different surface than the one that performed
+    // them, so neither result is the action's own word for it.
+    const FRAME = { x: 150, y: 120, width: 700, height: 460 }
+    const framed = await client.post('/api/v2/arp/runs', {
+      graph: actionBatchGraph({
+        actions: [{ action: 'set_window_frame', hwnd: notepad.hwnd, ...FRAME }],
+        name: 'smoke frame',
+      }),
+      inputs: {},
+    }, { timeoutMs: 60_000 })
+    const frameRunId = framed.run?.run_id ?? framed.run_id
+    if (frameRunId) await client.waitForRun(frameRunId, { timeoutMs: 60_000 })
+    const readBack = await client.get(`/api/v2/desktop/window?hwnd=${notepad.hwnd}`, { timeoutMs: 30_000 })
+    const got = readBack?.window?.rect ?? []
+    check(
+      'set_window_frame moved the window, confirmed by an independent window read',
+      frameRunId
+        && Math.abs(got[0] - FRAME.x) <= 1 && Math.abs(got[1] - FRAME.y) <= 1
+        && Math.abs((got[2] - got[0]) - FRAME.width) <= 1 && Math.abs((got[3] - got[1]) - FRAME.height) <= 1,
+      `requested ${JSON.stringify(FRAME)} read back [${got.join(',')}]`,
+    )
+
+    const MARK = 'LINGDONG-SMOKE-VALUE'
+    const wrote = await client.post('/api/v2/arp/runs', {
+      graph: actionBatchGraph({
+        actions: [{ action: 'set_value', hwnd: notepad.hwnd, automation_id: '15', text: MARK }],
+        name: 'smoke value',
+      }),
+      inputs: {},
+    }, { timeoutMs: 60_000 })
+    const valueRunId = wrote.run?.run_id ?? wrote.run_id
+    if (valueRunId) await client.waitForRun(valueRunId, { timeoutMs: 60_000 })
+    // The perception collector renders an element that holds a value as
+    // "name=value", so reading the window back shows what the control holds.
+    const afterWrite = await client.get(`/api/v2/desktop/snapshot?hwnd=${notepad.hwnd}&limit=60`, { timeoutMs: 60_000 })
+    check(
+      'set_value wrote the control, confirmed by an independent tree read',
+      valueRunId && JSON.stringify(afterWrite?.elements ?? []).includes(MARK),
+      `elements=${afterWrite?.elements?.length ?? '?'}`,
+    )
+
+    // Undo the write so the document is clean again and the close below cannot
+    // raise a save prompt in whatever language this machine runs.
+    if (valueRunId) {
+      const undone = await client.post('/api/v2/arp/runs', {
+        graph: actionBatchGraph({
+          actions: [
+            { action: 'focus_window', hwnd: notepad.hwnd },
+            { action: 'hotkey', keys: ['ctrl', 'z'] },
+          ],
+          name: 'smoke undo',
+        }),
+        inputs: {},
+      }, { timeoutMs: 60_000 })
+      const undoRunId = undone.run?.run_id ?? undone.run_id
+      if (undoRunId) await client.waitForRun(undoRunId, { timeoutMs: 60_000 })
+    }
+
+    // Close the window this run opened. The canonical close is attempted first;
+    // a window that still refuses to go is terminated by pid through the
+    // offline flow, because leaving litter on someone's desktop is not an
+    // acceptable way for a smoke test to end. The count is what is asserted.
     const closeGraph = actionBatchGraph({
       actions: [
         { action: 'focus_window', title: notepad.title },
@@ -214,10 +274,30 @@ try {
     const closeRunId = closed.run?.run_id ?? closed.run_id
     if (closeRunId) await client.waitForRun(closeRunId, { timeoutMs: 60_000 })
     await new Promise((resolve) => setTimeout(resolve, 800))
-    const after = ((await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))?.windows ?? [])
+    let after = ((await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))?.windows ?? [])
       .filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
+    if (after.length !== before.size && notepad.pid) {
+      await client.post('/api/v2/automation-ir/runs', {
+        automation: {
+          format: 'automation-ir/1',
+          id: 'air-smoke-cleanup',
+          name: 'smoke cleanup',
+          created: Math.floor(Date.now() / 1000),
+          source: { kind: 'wps', format: 'wps/2', source: 'smoke', source_run: '', task: '' },
+          conditions: {},
+          evidence: { required: [] },
+          variables: {},
+          runtime: { kind: 'wps_replay' },
+          steps: [{ tool: 'run_shell', command: `taskkill /PID ${notepad.pid} /F`, shell: 'powershell', timeout_s: 20 }],
+        },
+        inputs: {},
+      }, { timeoutMs: 60_000 })
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      after = ((await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))?.windows ?? [])
+        .filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
+    }
     check(
-      'the window this run opened is closed again',
+      'the window this run opened is gone again',
       after.length === before.size,
       `notepad windows: before=${before.size} after=${after.length}`,
     )

@@ -18,6 +18,7 @@ import time
 from typing import Any, Callable
 
 from PIL import Image
+import win32con
 import win32gui
 
 from ..action import executor as action_executor
@@ -64,6 +65,7 @@ from .watcher import ScreenWatcher
 _SENSITIVE_TRACE_ACTIONS = frozenset({
     "type_text",
     "type_into_element",
+    "set_value",
     "clipboard_read",
     "clipboard_write",
     "clipboard_paste",
@@ -99,8 +101,8 @@ def _redact_action_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
     """
 
     projected = dict(args or {})
-    if name in {"type_text", "type_into_element", "clipboard_write"}:
-        text = projected.pop("text", projected.pop("text_input", ""))
+    if name in {"type_text", "type_into_element", "set_value", "clipboard_write"}:
+        text = projected.pop("text", projected.pop("text_input", projected.pop("value", "")))
         projected.update(_text_metadata(text))
         projected["text_redacted"] = True
     if name in {"clipboard_read", "clipboard_paste"}:
@@ -127,8 +129,8 @@ def _safe_event_preview(name: str, data: dict[str, Any], args: dict[str, Any]) -
         "outcome": data.get("outcome"),
         "error_kind": data.get("error_kind"),
         **(
-            _text_metadata(args.get("text", args.get("text_input", "")))
-            if name in {"type_text", "type_into_element", "clipboard_write"}
+            _text_metadata(args.get("text", args.get("text_input", args.get("value", ""))))
+            if name in {"type_text", "type_into_element", "set_value", "clipboard_write"}
             else {}
         ),
     }
@@ -433,6 +435,295 @@ class FastGuiController:
             "locator": located.to_dict(),
             "click_receipt": click.get("outcome"),
             "type_receipt": typed.get("outcome"),
+        }
+
+    def _resolve_action_hwnd(self, args: dict[str, Any]) -> tuple[int, str]:
+        """Resolve the window an action acts on, preferring an explicit handle."""
+        raw_hwnd = args.get("hwnd")
+        try:
+            hwnd = int(raw_hwnd) if raw_hwnd not in (None, "") else 0
+        except (TypeError, ValueError):
+            hwnd = 0
+        if hwnd and win32gui.IsWindow(hwnd):
+            return hwnd, "hwnd"
+        query = str(args.get("title") or args.get("window") or "").strip()
+        if query:
+            match = win32.find_window(query)
+            if match:
+                return int(match.get("hwnd") or 0), "title"
+        current = int(self.hwnd or 0)
+        if current and win32gui.IsWindow(current):
+            return current, "target_window"
+        return 0, ""
+
+    def _uia_value_target(
+        self,
+        args: dict[str, Any],
+        hwnd: int,
+    ) -> tuple[Any | None, str]:
+        """Find the live accessibility control whose value a write should replace.
+
+        The perception collector is the owner of "what controls does this window
+        have"; this only chooses one of them, and it never guesses: an
+        ``automation_id`` must match exactly, a point must fall inside the
+        control, a label must appear in its text.
+        """
+        from ..perception import uia
+
+        try:
+            controls = uia.collect(int(hwnd))
+        except Exception as exc:
+            return None, f"accessibility collection failed: {exc}"
+        if not controls:
+            return None, "no accessibility elements were readable for the target window"
+
+        wanted_id = str(args.get("automation_id") or "").strip()
+        if wanted_id:
+            for item in controls:
+                if str((item.extra or {}).get("automation_id") or "") == wanted_id:
+                    return item, "automation_id"
+            return None, f"no element carries automation_id {wanted_id!r}"
+
+        if args.get("x") is not None and args.get("y") is not None:
+            try:
+                x, y = int(args["x"]), int(args["y"])
+            except (TypeError, ValueError):
+                return None, "x and y must be integers"
+            inside = [
+                item for item in controls
+                if item.left <= x < item.left + item.width
+                and item.top <= y < item.top + item.height
+            ]
+            if inside:
+                smallest = min(inside, key=lambda item: item.width * item.height)
+                return smallest, "point"
+
+        needle = str(args.get("label") or args.get("text_query") or "").strip().casefold()
+        if needle:
+            for item in controls:
+                if needle in str(item.text or "").casefold():
+                    return item, "label"
+            return None, f"no element text contains {needle!r}"
+
+        return None, "no value-capable target matched"
+
+    def _set_value(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Replace a control's value through its accessibility value pattern.
+
+        This is deliberately not a click-and-type: nothing is aimed, nothing is
+        synthesized, and the target never has to be in front. It applies where a
+        control exposes a value pattern and refuses by name where it does not, so
+        a caller can fall back to ``type_into_element`` instead of wondering
+        whether a keystroke went somewhere unexpected.
+        """
+        text = args.get("text")
+        if text is None:
+            text = args.get("value")
+        text = str(text if text is not None else "")
+
+        if args.get("element_id") is not None and args.get("x") is None:
+            snapshot = self._fresh_snapshot()
+            try:
+                element = snapshot.by_id(int(args["element_id"]))
+            except (TypeError, ValueError):
+                element = None
+            if element is None:
+                return {"ok": False, "error": "element_id is not present in the fresh target observation"}
+            args = {**args, "x": int(element.cx), "y": int(element.cy)}
+
+        hwnd, resolved_by = self._resolve_action_hwnd(args)
+        if not hwnd:
+            return {"ok": False, "error": "set_value requires an hwnd, a matching title, or a focused target window"}
+
+        element, how = self._uia_value_target(args, hwnd)
+        if element is None:
+            return {"ok": False, "error": how, "hwnd": hwnd, "resolved_by": resolved_by}
+        control = (element.extra or {}).get("uia_ctrl")
+        if control is None:
+            return {"ok": False, "error": "the matched element carries no live accessibility control", "target": element.to_dict()}
+        try:
+            pattern = control.GetValuePattern()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"the matched element exposes no value pattern: {exc}",
+                "target": element.to_dict(),
+                "resolved_by": how,
+            }
+        try:
+            before = str(pattern.Value or "")
+        except Exception:
+            before = ""
+        try:
+            pattern.SetValue(text)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"value write failed: {exc}",
+                "target": element.to_dict(),
+                "resolved_by": how,
+                "before_length": len(before),
+            }
+        try:
+            after = str(control.GetValuePattern().Value or "")
+        except Exception as exc:
+            return {
+                "ok": False,
+                "verified": False,
+                "error": f"the value was written but could not be read back: {exc}",
+                "target": element.to_dict(),
+                "resolved_by": how,
+            }
+        matched = after == text
+        return {
+            "ok": matched,
+            "verified": matched,
+            "value_matches": matched,
+            "before_length": len(before),
+            "read_back_length": len(after),
+            "target": element.to_dict(),
+            "resolved_by": how,
+            "hwnd": hwnd,
+            **_text_metadata(text),
+        }
+
+    @staticmethod
+    def _window_placement_state(hwnd: int) -> str:
+        """Report minimized / maximized / normal, or ``unknown`` when unreadable.
+
+        pywin32 exposes no ``IsZoomed``, and a maximized window silently refuses
+        a frame change, so this reads the placement through the API that does
+        report it. Returning ``unknown`` rather than assuming ``normal`` keeps a
+        failed read visible in the result instead of changing behaviour quietly.
+        """
+        try:
+            if win32gui.IsIconic(hwnd):
+                return "minimized"
+            if int(win32gui.GetWindowPlacement(hwnd)[1]) == win32con.SW_SHOWMAXIMIZED:
+                return "maximized"
+            return "normal"
+        except Exception:
+            return "unknown"
+
+    def _set_window_frame(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Move and resize one window, then read the result back independently.
+
+        The frame is set without activating and without changing z-order, so the
+        window someone is looking at stays where it is. A window is only restored
+        out of a minimized or maximized placement when it actually refuses the
+        request - Windows reports a remembered placement for windows that are
+        already normal, and restoring one of those would move a window nobody
+        asked to move.
+        """
+        hwnd, resolved_by = self._resolve_action_hwnd(args)
+        if not hwnd:
+            return {"ok": False, "error": "set_window_frame requires an hwnd, a matching title, or a focused target window"}
+
+        def rect() -> tuple[int, int, int, int] | None:
+            try:
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            except Exception:
+                return None
+            return int(left), int(top), int(right), int(bottom)
+
+        def restore(placement: str) -> str:
+            """Return "" when the window is normal afterwards, else the reason."""
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            except Exception as exc:
+                return f"could not restore a {placement} window: {exc}"
+            # Restoring is asynchronous; wait for a normal placement rather than
+            # sleeping a fixed amount and hoping.
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if self._window_placement_state(hwnd) == "normal":
+                    return ""
+                time.sleep(0.05)
+            return f"the window stayed {placement} after a restore request"
+
+        def attempt(base: tuple[int, int, int, int]) -> dict[str, Any]:
+            base_left, base_top, base_right, base_bottom = base
+            x = int(args["x"]) if args.get("x") is not None else base_left
+            y = int(args["y"]) if args.get("y") is not None else base_top
+            width = int(args["width"]) if args.get("width") is not None else base_right - base_left
+            height = int(args["height"]) if args.get("height") is not None else base_bottom - base_top
+            if width < 1 or height < 1:
+                return {"error": "requested frame has a non-positive size"}
+            # pywin32's SetWindowPos returns None, not the Win32 BOOL, so its
+            # return value says nothing; the readback below is the only claim.
+            try:
+                win32gui.SetWindowPos(
+                    hwnd,
+                    0,
+                    x,
+                    y,
+                    width,
+                    height,
+                    win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE,
+                )
+            except Exception as exc:
+                return {"error": f"frame change failed: {exc}"}
+            after = rect()
+            if after is None:
+                return {"error": "the frame changed but could not be read back"}
+            # A one-pixel tolerance absorbs the rounding a scaled display adds.
+            verified = (
+                abs(after[0] - x) <= 1 and abs(after[1] - y) <= 1
+                and abs((after[2] - after[0]) - width) <= 1
+                and abs((after[3] - after[1]) - height) <= 1
+            )
+            return {
+                "requested": {"x": x, "y": y, "width": width, "height": height},
+                "after": {"left": after[0], "top": after[1], "width": after[2] - after[0], "height": after[3] - after[1]},
+                "verified": verified,
+            }
+
+        foreground_before = int(win32gui.GetForegroundWindow() or 0)
+        before = rect()
+        if before is None:
+            return {"ok": False, "error": "target window has no readable rectangle", "hwnd": hwnd}
+        placement = self._window_placement_state(hwnd)
+
+        restored_from = ""
+        # A minimized window has no frame to change until it is restored, so
+        # that one is restored up front rather than discovered by failure.
+        if placement == "minimized":
+            failure = restore("minimized")
+            if failure:
+                return {"ok": False, "error": failure, "hwnd": hwnd, "restored_from": "minimized"}
+            restored_from = "minimized"
+            before = rect() or before
+
+        outcome = attempt(before)
+        if "error" not in outcome and outcome["verified"] is not True and placement == "maximized":
+            # It really is maximized: the request landed on the restored
+            # geometry while the window kept its maximized frame.
+            failure = restore("maximized")
+            if failure:
+                return {"ok": False, "error": failure, "hwnd": hwnd, "restored_from": "maximized"}
+            restored_from = "maximized"
+            before = rect() or before
+            outcome = attempt(before)
+        if "error" in outcome:
+            return {"ok": False, "error": outcome["error"], "hwnd": hwnd, "restored_from": restored_from or None}
+
+        foreground_after = int(win32gui.GetForegroundWindow() or 0)
+        self.snapshot = None
+        self.cache.clear()
+        return {
+            "ok": outcome["verified"],
+            "verified": outcome["verified"],
+            "hwnd": hwnd,
+            "resolved_by": resolved_by,
+            "title": str(win32._window_text(hwnd) or ""),
+            "requested": outcome["requested"],
+            "before": {"left": before[0], "top": before[1], "width": before[2] - before[0], "height": before[3] - before[1]},
+            "after": outcome["after"],
+            "restored_from": restored_from or None,
+            "placement_unknown": placement == "unknown",
+            "foreground_before": foreground_before,
+            "foreground_after": foreground_after,
+            "activated": foreground_after != foreground_before,
         }
 
     def _scroll(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -878,6 +1169,7 @@ class FastGuiController:
             "click_element": self._click_element,
             "type_into_element": self._type_into_element,
             "type_text": self._type_text,
+            "set_value": self._set_value,
             "hotkey": self._hotkey,
             "scroll": self._scroll,
             "move_mouse": self._move_mouse,
@@ -885,6 +1177,7 @@ class FastGuiController:
             "drag": self._drag,
             "draw_strokes": self._draw_strokes,
             "focus_window": self._focus_window,
+            "set_window_frame": self._set_window_frame,
             "launch": self._launch,
             "wait": lambda value: self._wait_condition(value) if isinstance(value.get("condition"), dict) else self._pause(value),
             "wait_change": self._wait_change,
@@ -954,6 +1247,12 @@ class FastGuiController:
             return {"tool": "input_sequence", "events": data.get("events") or []}
         if name == "focus_window" and self.target_title:
             return {"tool": "focus_window", "title": self.target_title}
+        # ``set_window_frame`` is a live action today. Its offline step shape is
+        # not emitted here on purpose: the replay vocabulary would have to learn
+        # the tool first, and a step the replayer cannot execute is worse than no
+        # step at all. Add it there, then return the shape below.
+        if name == "set_window_frame":
+            return None
         if name == "wait" and isinstance(args.get("condition"), dict):
             return {
                 "tool": "wait",

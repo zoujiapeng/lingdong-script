@@ -43,7 +43,7 @@ dsh --profile web --patch "C:/Users/zou/Desktop/claude/packages/dsh-plugin-lingd
 | --- | --- |
 | `lingdong_status` | 运行时可达性、构建标识、已加载配置 |
 | `lingdong_observe` | 抓当前真实桌面并**返回图像**（模型直接看屏） |
-| `lingdong_desktop` | 一次有序批处理执行 canonical 动作：click / click_element / type_text / hotkey / scroll / move_mouse / drag / hold_key / launch / focus_window / wait / read_text / zoom / screenshot / clipboard_* |
+| `lingdong_desktop` | 一次有序批处理执行 canonical 动作：click / click_element / type_text / **set_value** / hotkey / scroll / move_mouse / drag / hold_key / launch / focus_window / **set_window_frame** / wait / read_text / zoom / screenshot / clipboard_* |
 | `lingdong_windows` | 可见窗口 + 后台应用枚举（用来取**精确窗口标题**，而不是猜） |
 | `lingdong_screen` | 虚拟屏幕原点与尺寸（物理像素），即坐标的边界 |
 | `lingdong_cursor` | 当前物理光标位置 |
@@ -53,9 +53,21 @@ dsh --profile web --patch "C:/Users/zou/Desktop/claude/packages/dsh-plugin-lingd
 | `lingdong_verify` | **状态断言**：用运行时自己的判定器评估一组谓词，回答成立/不成立 |
 | `lingdong_run_goal` | 把自然语言目标交给视觉 Agent 实时操控电脑（步骤未知时用） |
 
-#### 窗口级联合快照与状态断言
+#### 两个不是合成输入的动作
 
-`lingdong_snapshot` 对应 Cua 的 `get_window_state`：分别读树和读图会让模型看到两帧，
+`set_value` 与 `set_window_frame` 是 canonical 动作词汇表里仅有的两个**不经过物理输入**的变更动作，
+它们补的是相对 Cua 实测出来的差距（见 §7）：
+
+- **`set_value`** 通过控件的 UIA value pattern 直接替换它的值：不点、不合成按键、目标不必在前台。
+  用 `automation_id` / `x,y` / `element_id` / `label` 定位；写完后**独立回读**，回读不一致就是失败，
+  控件没有 value pattern 就按名字拒绝（调用方可以退回 `type_into_element`，而不是猜按键去了哪里）。
+  写入的文本与 `type_text` 同级脱敏，不会进 trace，也不会变成可重放步骤。
+- **`set_window_frame`** 用 `SWP_NOACTIVATE | SWP_NOZORDER` 移动/改尺寸，**不抢焦点**，并且把
+  `foreground_before/after` 一起报出来，所以"没抢焦点"是可核对的而不是承诺的。它**独立回读**窗口
+  矩形来判定成功；只有当窗口**真的**拒绝了这次改动且 placement 是最大化时才还原重试一次——Windows
+  会给一个其实已经正常的窗口报告"上次是最大化"，无脑还原会把没人要求移动的窗口挪走。
+
+#### 窗口级联合快照与状态断言`lingdong_snapshot` 对应 Cua 的 `get_window_state`：分别读树和读图会让模型看到两帧，
 第一帧算出的坐标在第二帧可能已经过期；联合快照把两者钉在同一帧上，并带上窗口标识
 （标题、类名、进程、矩形、是否最小化、是否前台）。图像是窗口自身矩形按长边上限编码的
 JPEG；最小化的窗口没有有意义的像素，所以它返回 `image: null` 并说明原因，而不是给一张
@@ -221,7 +233,29 @@ codec** 生成一份文档，交给运行时校验、保存并真的跑完——
 | 浏览器：真实 Chrome 端到端 34 项 | 全部通过（无会话即拒绝、`connect` 不隐式起浏览器、导航/读取/JS/查找/点击/输入/按键/等待/截图/标签页、关闭后端口消失且 profile 被删除） |
 | 工作台：bundle 求值 + 71 项 codec/渲染断言 | 全部通过 |
 
-## 6. 后续阶段
+## 6. 与 DSH 自带 computer use 的实测对照
+
+对手是原生二进制 `cua-driver 0.28.0`（经 MCP 暴露 56 个工具）。同机、同窗口、同一时刻实测：
+
+| 项目 | Cua 0.28.0 | 本插件 |
+| --- | --- | --- |
+| 启动 `notepad` | ❌ 解析成 **Notepad++**（错应用） | ✅ `notepad.exe`（PATH 裸命令优先） |
+| 窗口级联合快照（同一 hwnd） | 11 个元素、层级树、带 UIA `actions=[invoke,expand]`；1568×833 PNG | 25 个元素、**精确坐标 + bbox + control type**；1120×600 JPEG；137ms；树与图同帧 |
+| 状态断言 | 92ms；词汇表只有 `window`/`element`，**无法**表达文件/进程/Shell 谓词（实测被拒） | 8ms（窗口）/ 244ms（ground truth）；**能**判 `file_exists`+`process_running` |
+| 值写入（不点、不抢焦点） | `set_value` | ✅ 已补，实测回读一致 |
+| 窗口几何 | `set_window_frame` | ✅ 已补，实测位移精确、未抢焦点 |
+| 结束进程 | `kill_app` 一等工具 | 无一等工具；经离线流程 `run_shell` 可达（实测 exit 0、0 模型调用） |
+| 按路径点应用菜单 | `invoke_menu` | ❌ 未做（一级菜单可达，二级子项需换 Win32 遍历） |
+| 浏览器 | 10 个工具（含 dialog、file input） | 1 个工具 22 个动作（含 upload）；缺 dialog、pointer drag |
+| 给人看的 UX | agent cursor 覆盖层、视频录制、session 生命周期 | 无（与能力无关） |
+| 录制 → 重放 → 离线执行 | 仅录像 + tool-call 轨迹回放 | 人类演示录制 → `.automation.json` → **离线 0 模型调用**执行（变量/条件/循环）+ GUI 编辑 |
+
+结论：**不是全方面更强**。强在启动解析、能触达 ground truth 的断言、录制/重放/流程编排、自带视觉
+Agent、可审计运行；本轮已把值写入与窗口几何两项补齐。仍缺 `invoke_menu`、`kill_app` 一等工具、
+浏览器 dialog/drag。**不建议同挂两个 provider**：那会出现两个独立的物理输入写入者，静默破坏本项目
+唯一不可削弱的那条机械边界，而且它的动作进不了我们的录制/重放格式。
+
+## 7. 后续阶段
 
 1. **v0 ✅**：host 插件 + overlay patch + 冒烟脚本；已在真实 DSH 启动中证明挂载。
 2. **v2（进行中 ✅ 大部分）**：只读观测面已补齐（屏幕/光标/窗口/应用/UIA 元素）。
