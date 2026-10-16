@@ -1,0 +1,31 @@
+# Cua Driver native provider — E2E arm B (the shipped driver).
+#
+# Mounts the shipped computer-use provider into a scratch profile created from
+# the headless template, so an end-to-end run can be compared against this
+# plugin under the same model, the same machine and the same tasks:
+#
+#   dsh --profile cua-e2e --patch ".../e2e/cua.patch.yml" "<task>"
+#
+# The headless template ships no computer-use provider, so this arm has exactly
+# one desktop driver: the shipped one.
+
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+    defaultPreset: danger-full-access
+
+- insert:
+    - id: computer-use
+      name: '@deepseek-ai/dsh-computer-use'
+    - id: computer-use-cua-driver-native
+      name: '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native'

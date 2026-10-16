@@ -1,0 +1,36 @@
+# Lingdong computer-use provider — E2E arm A (the plugin under test).
+#
+# Mounts this provider into a scratch profile created from the headless
+# template, so an end-to-end run can be compared against the shipped driver
+# without touching the `web` profile or the instance serving the GUI:
+#
+#   dsh --profile ld-e2e --patch ".../e2e/lingdong.patch.yml" "<task>"
+#
+# The headless template ships no computer-use provider at all, so this arm has
+# exactly one desktop driver: this one.
+
+# Desktop work needs a run that does not stop to ask permission; the headless
+# app has nobody to ask.
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+    defaultPreset: danger-full-access
+
+- insert:
+    - id: lingdong
+      name: '@lingdong/dsh-plugin-lingdong'
+      config:
+        repoRoot: 'C:/Users/zou/Desktop/claude'
+        port: 8790
+        autoStart: true
+        registerComputerUse: true

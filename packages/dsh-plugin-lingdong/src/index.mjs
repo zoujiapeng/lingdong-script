@@ -19,8 +19,17 @@ import { registerBridge } from './bridge.mjs'
 /** Cordis plugin identity. */
 export const name = 'lingdong'
 
-/** Services required before the provider can publish anything. */
-export const inject = ['computerUse', 'tools', 'systemPrompt']
+/**
+ * Services required before the plugin can do anything at all.
+ *
+ * The computer-use registry is deliberately NOT here. Claiming that slot is a
+ * capability this provider offers when the harness has the slot to offer; it is
+ * not a precondition for having desktop tools. Requiring it meant a composition
+ * without `computer-use` - the headless app, for one - left this plugin
+ * "pending (waiting for service: computerUse)" and the model got no desktop
+ * tools at all, with nothing but a startup warning to explain it.
+ */
+export const inject = ['tools', 'systemPrompt']
 
 export { Config }
 
@@ -43,18 +52,6 @@ export async function apply(ctx, config = {}) {
   const browser = settings.browserEnabled ? new BrowserSession(settings, log) : null
 
   ctx.effect(function* () {
-    if (settings.registerComputerUse) {
-      try {
-        yield ctx.computerUse.register(ComputerUseProviderName(PROVIDER_NAME))
-      } catch (error) {
-        // The slot is exclusive by design. A taken slot must not brick the
-        // harness, so the tools still mount and the condition is reported.
-        log.warn?.(
-          `[lingdong] computer-use provider slot is occupied (${error?.message ?? error}); ` +
-          'the desktop tools are still registered. Disable the other provider to replace it.',
-        )
-      }
-    }
     yield () => sidecar.stop()
     if (browser) yield () => browser.dispose()
     const child = ctx.plugin({
@@ -64,6 +61,24 @@ export async function apply(ctx, config = {}) {
     })
     yield child.dispose
   }, 'lingdong.runtime')
+
+  // Claiming the harness's exclusive computer-use slot is optional: it exists
+  // only in compositions that ship the computer-use registry. The slot being
+  // taken is a condition to report, never a reason to withhold the tools.
+  if (settings.registerComputerUse) {
+    ctx.inject(['computerUse'], (scope) => {
+      scope.effect(function* () {
+        try {
+          yield scope.computerUse.register(ComputerUseProviderName(PROVIDER_NAME))
+        } catch (error) {
+          log.warn?.(
+            `[lingdong] computer-use provider slot is occupied (${error?.message ?? error}); ` +
+            'the desktop tools are still registered. Disable the other provider to replace it.',
+          )
+        }
+      }, 'lingdong.computer-use-slot')
+    })
+  }
 
   // The flow workbench is a browser client plugin, so it reaches this process
   // through a same-origin route on DSH's own web server instead of holding the

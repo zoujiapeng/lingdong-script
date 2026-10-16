@@ -101,8 +101,17 @@ try {
 
   const windowList = await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 })
   const notepadWindows = (windowList?.windows ?? []).filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
-  const notepad = notepadWindows.find((item) => !before.has(item.hwnd))
-  check('the launched window is enumerable', Boolean(notepad), notepad ? `hwnd=${notepad.hwnd} pid=${notepad.pid}` : 'no new notepad window')
+  const adopted = notepadWindows.find((item) => !before.has(item.hwnd))
+  // Launching an application that is already running may adopt the window that
+  // is already there instead of creating another one, and that is correct
+  // behaviour - so the check is "there is a Notepad to work with", not "a new
+  // window appeared". Cleanup below only closes what this run added.
+  const notepad = adopted ?? notepadWindows[0]
+  check(
+    'the launch left a usable Notepad window',
+    Boolean(notepad),
+    notepad ? `hwnd=${notepad.hwnd} pid=${notepad.pid} ${adopted ? '(new)' : '(adopted an existing window)'}` : 'no notepad window',
+  )
 
   if (notepad) {
     const windowInfo = await client.get(`/api/v2/desktop/window?hwnd=${notepad.hwnd}`, { timeoutMs: 30_000 })
@@ -262,44 +271,48 @@ try {
     // Close the window this run opened. The canonical close is attempted first;
     // a window that still refuses to go is terminated by pid through the
     // offline flow, because leaving litter on someone's desktop is not an
-    // acceptable way for a smoke test to end. The count is what is asserted.
-    const closeGraph = actionBatchGraph({
-      actions: [
-        { action: 'focus_window', title: notepad.title },
-        { action: 'hotkey', keys: ['alt', 'f4'] },
-      ],
-      name: 'smoke close',
-    })
-    const closed = await client.post('/api/v2/arp/runs', { graph: closeGraph, inputs: {} })
-    const closeRunId = closed.run?.run_id ?? closed.run_id
-    if (closeRunId) await client.waitForRun(closeRunId, { timeoutMs: 60_000 })
-    await new Promise((resolve) => setTimeout(resolve, 800))
-    let after = ((await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))?.windows ?? [])
-      .filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
-    if (after.length !== before.size && notepad.pid) {
-      await client.post('/api/v2/automation-ir/runs', {
-        automation: {
-          format: 'automation-ir/1',
-          id: 'air-smoke-cleanup',
-          name: 'smoke cleanup',
-          created: Math.floor(Date.now() / 1000),
-          source: { kind: 'wps', format: 'wps/2', source: 'smoke', source_run: '', task: '' },
-          conditions: {},
-          evidence: { required: [] },
-          variables: {},
-          runtime: { kind: 'wps_replay' },
-          steps: [{ tool: 'run_shell', command: `taskkill /PID ${notepad.pid} /F`, shell: 'powershell', timeout_s: 20 }],
-        },
-        inputs: {},
-      }, { timeoutMs: 60_000 })
-      await new Promise((resolve) => setTimeout(resolve, 1500))
+    // acceptable way for a smoke test to end. When the launch adopted a window
+    // that was already there, nothing is closed at all: it is not this run's.
+    let after = notepadWindows
+    if (adopted) {
+      const closeGraph = actionBatchGraph({
+        actions: [
+          { action: 'focus_window', title: adopted.title },
+          { action: 'hotkey', keys: ['alt', 'f4'] },
+        ],
+        name: 'smoke close',
+      })
+      const closed = await client.post('/api/v2/arp/runs', { graph: closeGraph, inputs: {} })
+      const closeRunId = closed.run?.run_id ?? closed.run_id
+      if (closeRunId) await client.waitForRun(closeRunId, { timeoutMs: 60_000 })
+      await new Promise((resolve) => setTimeout(resolve, 800))
       after = ((await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))?.windows ?? [])
         .filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
+      if (after.length !== before.size && adopted.pid) {
+        await client.post('/api/v2/automation-ir/runs', {
+          automation: {
+            format: 'automation-ir/1',
+            id: 'air-smoke-cleanup',
+            name: 'smoke cleanup',
+            created: Math.floor(Date.now() / 1000),
+            source: { kind: 'wps', format: 'wps/2', source: 'smoke', source_run: '', task: '' },
+            conditions: {},
+            evidence: { required: [] },
+            variables: {},
+            runtime: { kind: 'wps_replay' },
+            steps: [{ tool: 'run_shell', command: `taskkill /PID ${adopted.pid} /F`, shell: 'powershell', timeout_s: 20 }],
+          },
+          inputs: {},
+        }, { timeoutMs: 60_000 })
+        await new Promise((resolve) => setTimeout(resolve, 1500))
+        after = ((await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))?.windows ?? [])
+          .filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
+      }
     }
     check(
-      'the window this run opened is gone again',
+      'the smoke left the desktop as it found it',
       after.length === before.size,
-      `notepad windows: before=${before.size} after=${after.length}`,
+      `notepad windows: before=${before.size} after=${after.length}${adopted ? '' : ' (nothing was opened)'}`,
     )
   }
 
@@ -358,7 +371,7 @@ function runEffect(fn) {
 }
 
 /** A host context carrying exactly the services this plugin injects. */
-function fakeHost({ withWebServer }) {
+function fakeHost({ withWebServer, withComputerUse = true }) {
   const seen = { tools: [], sections: [], routes: [], plugins: [], computerUse: [] }
   const ctx = {
     logger: { info() {}, warn() {}, error() {} },
@@ -372,13 +385,20 @@ function fakeHost({ withWebServer }) {
     computerUse: { register(name) { seen.computerUse.push(String(name)); return () => {} } },
     tools: { register(tool) { seen.tools.push(tool) } },
     systemPrompt: { section(section) { seen.sections.push(section) }, getSectionOrder() { return 100 } },
+    // Optional injection: the callback runs only for a service this host has.
     inject(names, callback) {
-      if (withWebServer && names.indexOf('webServer') !== -1) callback(ctx)
+      const satisfied = names.every((service) => (
+        service === 'webServer' ? withWebServer
+          : service === 'computerUse' ? withComputerUse
+            : true
+      ))
+      if (satisfied) callback(ctx)
     },
   }
   if (withWebServer) {
     ctx.webServer = { register(route) { seen.routes.push(route); return () => {} } }
   }
+  if (!withComputerUse) delete ctx.computerUse
   return { ctx, seen }
 }
 
@@ -470,6 +490,29 @@ async function checkActivation() {
     'a headless composition still gets the full tool surface',
     headless.seen.tools.length === 16 && headless.seen.routes.length === 0,
     `tools=${headless.seen.tools.length} routes=${headless.seen.routes.length}`,
+  )
+
+  // The regression an end-to-end run found: requiring the computer-use service
+  // left this plugin pending forever in a composition that ships no
+  // computer-use registry, so the model got no desktop tools at all.
+  const noSlot = fakeHost({ withWebServer: false, withComputerUse: false })
+  let noSlotThrew = null
+  try {
+    await plugin.apply(noSlot.ctx, config)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  } catch (error) {
+    noSlotThrew = error
+  }
+  check('apply() completes without a computer-use registry', noSlotThrew === null, noSlotThrew ? String(noSlotThrew.message ?? noSlotThrew) : '')
+  check(
+    'a composition without the computer-use slot still gets every tool',
+    noSlot.seen.tools.length === 16 && noSlot.seen.computerUse.length === 0,
+    `tools=${noSlot.seen.tools.length} slot=${noSlot.seen.computerUse.length}`,
+  )
+  check(
+    'the plugin declares only the services it truly requires',
+    Array.isArray(plugin.inject) && plugin.inject.join(',') === 'tools,systemPrompt',
+    JSON.stringify(plugin.inject),
   )
 }
 

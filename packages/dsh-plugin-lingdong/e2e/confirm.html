@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>LD-PENDING</title>
+  <style>
+    body { font: 22px/1.5 Consolas, monospace; padding: 40px; background: #101418; color: #e6edf3; }
+    h1 { font-size: 26px; }
+  </style>
+</head>
+<body>
+  <h1>A confirmation is required</h1>
+  <p id="state">waiting for the dialog answer…</p>
+  <script>
+    // The page's own answer is the artifact under test: it is only reachable if
+    // the confirmation was actually accepted, so a browser that silently
+    // dismisses dialogs cannot produce it.
+    var accepted = window.confirm('Accept this confirmation to reveal the code?');
+    document.title = accepted ? '__TOKEN__' : 'LD-DECLINED';
+    document.getElementById('state').textContent = accepted
+      ? 'accepted: the code is __TOKEN__'
+      : 'declined';
+  </script>
+</body>
+</html>
