@@ -126,6 +126,68 @@ def capture_screen_backend(*, path: str, window: bool) -> dict[str, Any]:
     return result
 
 
+def _window_record(hwnd: int) -> dict[str, Any] | None:
+    """Read one top-level window's live facts, or None when it is not one.
+
+    Returns None for a zero handle, a window with no title, a tool window (the
+    runtime's own overlays live there), an unreadable rectangle, and anything
+    smaller than 50x50 - the same filters the enumeration applies.
+    """
+    user32 = ctypes.windll.user32
+    handle = int(hwnd or 0)
+    if not handle:
+        return None
+    title_length = user32.GetWindowTextLengthW(handle)
+    title_buffer = ctypes.create_unicode_buffer(max(title_length, 0) + 1)
+    user32.GetWindowTextW(handle, title_buffer, len(title_buffer))
+    title = title_buffer.value
+    if not title:
+        return None
+    ex_style = user32.GetWindowLongW(handle, -20)  # GWL_EXSTYLE
+    if ex_style & 0x00000080:  # WS_EX_TOOLWINDOW
+        return None
+    class_buffer = ctypes.create_unicode_buffer(64)
+    user32.GetClassNameW(handle, class_buffer, 64)
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(handle, ctypes.byref(rect)):
+        return None
+    width = rect.right - rect.left
+    height = rect.bottom - rect.top
+    if width < 50 or height < 50:
+        return None
+    pid = ctypes.c_ulong(0)
+    user32.GetWindowThreadProcessId(handle, ctypes.byref(pid))
+    return {
+        "hwnd": handle,
+        "title": title,
+        "class_name": class_buffer.value,
+        "rect": [rect.left, rect.top, rect.right, rect.bottom],
+        "pid": int(pid.value or 0),
+        "foreground": handle == int(user32.GetForegroundWindow() or 0),
+        "visible": bool(user32.IsWindowVisible(handle)),
+        "minimized": bool(user32.IsIconic(handle)),
+    }
+
+
+def window_info_backend(hwnd: int) -> dict[str, Any]:
+    """Return one named window's live facts, including its process name.
+
+    The enumeration above answers "what is on screen"; this answers "what is
+    this exact handle", so a caller holding a handle from an earlier observation
+    can re-read it without depending on it still being in the first 24 rows.
+    """
+    record = _window_record(int(hwnd))
+    if record is None:
+        return {
+            "format": WINDOWS_FORMAT,
+            "ok": False,
+            "error": "window not found, untitled, or not a top-level application window",
+        }
+    window = dict(record)
+    window["process_name"] = _process_name(int(window.get("pid") or 0))
+    return {"format": WINDOWS_FORMAT, "ok": True, "window": window}
+
+
 def list_windows_backend() -> dict[str, Any]:
     """Return bounded visible windows and background applications.
 
@@ -133,7 +195,6 @@ def list_windows_backend() -> dict[str, Any]:
     not reach into the legacy perception stack.
     """
     user32 = ctypes.windll.user32
-    foreground_hwnd = int(user32.GetForegroundWindow() or 0)
 
     windows: list[dict[str, Any]] = []
     background_windows: list[dict[str, Any]] = []
@@ -143,43 +204,10 @@ def list_windows_backend() -> dict[str, Any]:
     )
 
     def callback(hwnd: ctypes.c_void_p, _param: ctypes.c_void_p) -> bool:
-        handle = int(hwnd or 0)
-        if not handle:
+        item = _window_record(int(hwnd or 0))
+        if item is None:
             return True
-        visible = bool(user32.IsWindowVisible(handle))
-        minimized = bool(user32.IsIconic(handle))
-        title_length = user32.GetWindowTextLengthW(handle)
-        title_buffer = ctypes.create_unicode_buffer(max(title_length, 0) + 1)
-        user32.GetWindowTextW(handle, title_buffer, len(title_buffer))
-        title = title_buffer.value
-        if not title:
-            return True
-        # skip tool windows / our own overlay-style windows
-        ex_style = user32.GetWindowLongW(handle, -20)  # GWL_EXSTYLE
-        if ex_style & 0x00000080:  # WS_EX_TOOLWINDOW
-            return True
-        class_buffer = ctypes.create_unicode_buffer(64)
-        user32.GetClassNameW(handle, class_buffer, 64)
-        rect = wintypes.RECT()
-        if not user32.GetWindowRect(handle, ctypes.byref(rect)):
-            return True
-        width = rect.right - rect.left
-        height = rect.bottom - rect.top
-        if width < 50 or height < 50:
-            return True
-        pid = ctypes.c_ulong(0)
-        user32.GetWindowThreadProcessId(handle, ctypes.byref(pid))
-        item = {
-            "hwnd": handle,
-            "title": title,
-            "class_name": class_buffer.value,
-            "rect": [rect.left, rect.top, rect.right, rect.bottom],
-            "pid": int(pid.value or 0),
-            "foreground": handle == foreground_hwnd,
-            "visible": visible,
-            "minimized": minimized,
-        }
-        if visible and not minimized:
+        if item["visible"] and not item["minimized"]:
             windows.append(item)
         else:
             background_windows.append(item)

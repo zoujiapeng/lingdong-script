@@ -11,8 +11,9 @@ import { ComputerUseProviderName } from '@deepseek-ai/dsh-computer-use/brand'
 import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client'
 import { Config, resolveConfig } from './config.mjs'
 import { WinPilotSidecar } from './sidecar.mjs'
+import { BrowserSession } from './browser.mjs'
 import { createClient } from './client.mjs'
-import { buildTools, GUIDANCE } from './tools.mjs'
+import { buildTools, buildBrowserTool, GUIDANCE, BROWSER_GUIDANCE } from './tools.mjs'
 import { registerBridge } from './bridge.mjs'
 
 /** Cordis plugin identity. */
@@ -37,6 +38,9 @@ export async function apply(ctx, config = {}) {
   const log = ctx.logger ?? console
   const sidecar = new WinPilotSidecar(settings, log)
   const client = createClient(settings, sidecar)
+  // The browser session owns a second process. It is created here but started
+  // lazily: nothing is spawned until a tool call actually asks for a browser.
+  const browser = settings.browserEnabled ? new BrowserSession(settings, log) : null
 
   ctx.effect(function* () {
     if (settings.registerComputerUse) {
@@ -52,10 +56,11 @@ export async function apply(ctx, config = {}) {
       }
     }
     yield () => sidecar.stop()
+    if (browser) yield () => browser.dispose()
     const child = ctx.plugin({
       name: 'lingdong-tools',
       inject: ['tools', 'systemPrompt'],
-      apply: (inner) => mountTools(inner, client, sidecar, settings),
+      apply: (inner) => mountTools(inner, client, sidecar, settings, browser),
     })
     yield child.dispose
   }, 'lingdong.runtime')
@@ -85,10 +90,13 @@ export async function apply(ctx, config = {}) {
  * @param client - runtime REST client.
  * @param sidecar - runtime lifecycle owner.
  * @param settings - resolved plugin settings.
+ * @param browser - the browser session owner, or null when that surface is off.
  */
-function mountTools(inner, client, sidecar, settings) {
+function mountTools(inner, client, sidecar, settings, browser) {
   const registered = []
-  for (const tool of buildTools({ client, sidecar, settings })) {
+  const tools = buildTools({ client, sidecar, settings, browser })
+  if (browser) tools.push(buildBrowserTool(browser))
+  for (const tool of tools) {
     inner.tools.register(createMcpToolDefinition(inner, {
       name: tool.name,
       rawName: tool.name,
@@ -104,7 +112,7 @@ function mountTools(inner, client, sidecar, settings) {
   inner.systemPrompt.section({
     name: 'computer-use:lingdong',
     order: inner.systemPrompt.getSectionOrder('TOOL_COMPUTER_USE'),
-    text: GUIDANCE,
+    text: browser ? `${GUIDANCE} ${BROWSER_GUIDANCE}` : GUIDANCE,
   })
   inner.logger?.info?.(`[lingdong] registered ${registered.length} desktop tools`)
 }

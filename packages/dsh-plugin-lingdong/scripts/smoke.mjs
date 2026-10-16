@@ -11,8 +11,9 @@
  */
 import { resolveConfig } from '../src/config.mjs'
 import { WinPilotSidecar } from '../src/sidecar.mjs'
+import { BrowserSession } from '../src/browser.mjs'
 import { createClient } from '../src/client.mjs'
-import { buildTools, actionBatchGraph, withTargetWindow } from '../src/tools.mjs'
+import { buildTools, buildBrowserTool, actionBatchGraph, withTargetWindow } from '../src/tools.mjs'
 
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/
 const failures = []
@@ -40,8 +41,12 @@ try {
   check('GET /api/ping', Boolean(ping), JSON.stringify(ping).slice(0, 120))
 
   // 1) Tool surface is well formed for the DeepSeek function-name contract.
-  const tools = buildTools({ client, sidecar, settings })
-  check('tool count', tools.length === 13, `${tools.length}`)
+  //    The browser session is constructed but never started: the worker is
+  //    spawned lazily, so building the descriptor here costs nothing.
+  const browserSession = new BrowserSession(settings, console)
+  const tools = buildTools({ client, sidecar, settings, browser: browserSession })
+  tools.push(buildBrowserTool(browserSession))
+  check('tool count', tools.length === 16, `${tools.length}`)
   for (const tool of tools) {
     check(`tool name ${tool.name}`, TOOL_NAME.test(tool.name))
     check(`tool unique ${tool.name}`, !names.has(tool.name))
@@ -73,7 +78,150 @@ try {
   const observeValidation = await client.post('/api/v2/arp/validate', observeGraph)
   check('validate observe graph', observeValidation?.valid === true, JSON.stringify(observeValidation?.errors ?? []))
 
-  // 3) A spatial batch must be accepted when the target window is established first.
+  // 3) The joint window snapshot and the predicate evaluator answer for a real
+  //    window. A Notepad window is launched through the runtime's own canonical
+  //    launch action, so the frame under test is one the runtime can produce.
+  //    Only a process that appears after this launch is ever closed again, and
+  //    it is closed with an ordinary window action rather than a kill.
+  const before = new Set(
+    ((await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))?.windows ?? [])
+      .filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
+      .map((item) => item.pid),
+  )
+  const launchGraph = actionBatchGraph({
+    actions: [{ action: 'launch', command: 'notepad' }],
+    name: 'smoke launch',
+  })
+  const launched = await client.post('/api/v2/arp/runs', { graph: launchGraph, inputs: {} })
+  const launchRunId = launched.run?.run_id ?? launched.run_id
+  if (launchRunId) await client.waitForRun(launchRunId, { timeoutMs: 60_000 })
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+
+  const windowList = await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 })
+  const notepadWindows = (windowList?.windows ?? []).filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
+  const notepad = notepadWindows.find((item) => !before.has(item.pid))
+  check('the launched window is enumerable', Boolean(notepad), notepad ? `hwnd=${notepad.hwnd} pid=${notepad.pid}` : 'no new notepad window')
+
+  if (notepad) {
+    const windowInfo = await client.get(`/api/v2/desktop/window?hwnd=${notepad.hwnd}`, { timeoutMs: 30_000 })
+    check(
+      'GET /api/v2/desktop/window reads one handle',
+      windowInfo?.ok === true && windowInfo.window?.hwnd === notepad.hwnd && windowInfo.window?.process_name === notepad.process_name,
+      JSON.stringify(windowInfo?.window ?? {}).slice(0, 140),
+    )
+
+    const elements = await client.get(`/api/v2/desktop/elements?hwnd=${notepad.hwnd}&limit=50`, { timeoutMs: 60_000 })
+    check(
+      'GET /api/v2/desktop/elements is JSON-serializable, without live control handles',
+      elements?.ok === true
+        && Array.isArray(elements.elements)
+        && elements.returned === elements.elements.length
+        && elements.elements.every((item) => typeof item.role === 'string' && Array.isArray(item.bbox))
+        && elements.elements.every((item) => !('uia_ctrl' in (item.extra || {}))),
+      `${elements?.returned ?? '?'} of ${elements?.count ?? '?'} elements`,
+    )
+
+    const snapshot = await client.get(`/api/v2/desktop/snapshot?hwnd=${notepad.hwnd}&limit=50`, { timeoutMs: 60_000 })
+    check(
+      'GET /api/v2/desktop/snapshot returns window facts and an image together',
+      snapshot?.ok === true
+        && snapshot.window?.hwnd === notepad.hwnd
+        && snapshot.image?.content_type === 'image/jpeg'
+        && snapshot.image.width > 0
+        && snapshot.image.height > 0
+        && typeof snapshot.image.base64 === 'string'
+        && snapshot.image.base64.length > 1000,
+      JSON.stringify({ window: snapshot?.window?.title, image: snapshot?.image && { w: snapshot.image.width, h: snapshot.image.height, bytes: snapshot.image.bytes } }),
+    )
+    check(
+      'the snapshot image really decodes to the size it reports',
+      (() => {
+        const raw = Buffer.from(snapshot?.image?.base64 ?? '', 'base64')
+        if (raw.length < 4 || raw[0] !== 0xff || raw[1] !== 0xd8) return false
+        // JPEG SOF0/SOF2 carries the frame size; read it rather than trusting.
+        let at = 2
+        while (at + 9 < raw.length) {
+          if (raw[at] !== 0xff) { at += 1; continue }
+          const marker = raw[at + 1]
+          const length = raw.readUInt16BE(at + 2)
+          if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+            // Frame header layout: FF, marker, length(2), precision(1), height(2), width(2).
+            return raw.readUInt16BE(at + 5) === snapshot.image.height
+              && raw.readUInt16BE(at + 7) === snapshot.image.width
+          }
+          at += 2 + length
+        }
+        return false
+      })(),
+      JSON.stringify(snapshot?.image && { w: snapshot.image.width, h: snapshot.image.height }),
+    )
+    check(
+      'the snapshot carries the accessibility tree and its own bound',
+      Array.isArray(snapshot?.elements)
+        && snapshot.window.accessibility_returned === snapshot.elements.length
+        && snapshot.window.accessibility_count >= snapshot.elements.length,
+      `${snapshot?.elements?.length ?? '?'} of ${snapshot?.window?.accessibility_count ?? '?'}`,
+    )
+
+    const satisfied = await client.post('/api/v2/desktop/verify', {
+      expect: { window_title: notepad.title.slice(0, 12) },
+      hwnd: notepad.hwnd,
+      timeout_s: 3,
+    }, { timeoutMs: 60_000 })
+    check(
+      'POST /api/v2/desktop/verify confirms a condition that does hold',
+      satisfied?.ok === true && satisfied.satisfied === true,
+      JSON.stringify({ satisfied: satisfied?.satisfied, detail: satisfied?.detail }),
+    )
+
+    const unsatisfied = await client.post('/api/v2/desktop/verify', {
+      expect: { window_title: 'a title that cannot be on this desktop 9f3a1c' },
+      hwnd: notepad.hwnd,
+      timeout_s: 0.5,
+    }, { timeoutMs: 60_000 })
+    check(
+      'POST /api/v2/desktop/verify answers false for a condition that does not hold',
+      unsatisfied?.ok === true && unsatisfied.satisfied === false,
+      JSON.stringify({ satisfied: unsatisfied?.satisfied, detail: unsatisfied?.detail }).slice(0, 140),
+    )
+
+    let unsupported = null
+    try {
+      await client.post('/api/v2/desktop/verify', { expect: { no_such_condition: 1 } }, { timeoutMs: 30_000 })
+    } catch (error) {
+      unsupported = error
+    }
+    check(
+      'an unsupported condition is refused by name instead of answering false',
+      unsupported !== null && /no_such_condition/.test(String(unsupported.message)),
+      unsupported ? String(unsupported.message).slice(0, 120) : 'no error',
+    )
+
+    // Close the window this run opened, through the same canonical input path
+    // every other action uses. An empty Notepad has nothing to save. The count
+    // is what is asserted, not one identity: two empty Notepads share a title,
+    // and which of them the close lands on is not the property under test.
+    const closeGraph = actionBatchGraph({
+      actions: [
+        { action: 'focus_window', title: notepad.title },
+        { action: 'hotkey', keys: ['alt', 'f4'] },
+      ],
+      name: 'smoke close',
+    })
+    const closed = await client.post('/api/v2/arp/runs', { graph: closeGraph, inputs: {} })
+    const closeRunId = closed.run?.run_id ?? closed.run_id
+    if (closeRunId) await client.waitForRun(closeRunId, { timeoutMs: 60_000 })
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const after = ((await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))?.windows ?? [])
+      .filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
+    check(
+      'the window this run opened is closed again',
+      after.length === before.size,
+      `notepad windows: before=${before.size} after=${after.length}`,
+    )
+  }
+
+  // 4) A spatial batch must be accepted when the target window is established first.
   const spatialGraph = actionBatchGraph({
     actions: [
       { action: 'focus_window', title: 'SmokeTarget' },
@@ -98,8 +246,7 @@ try {
   // 6) The plugin's own activation path: mount it against a host context and
   //    assert what it publishes. This runs the code DSH runs in apply(), so a
   //    broken registration fails here rather than at the next harness restart.
-  await checkActivation()
-} catch (error) {
+  await checkActivation()} catch (error) {
   check('smoke run', false, error?.stack ?? String(error))
 } finally {
   await sidecar.stop()
@@ -194,11 +341,11 @@ async function checkActivation() {
     withWeb.seen.plugins.join(',') === 'lingdong-tools',
     withWeb.seen.plugins.join(','),
   )
-  check('apply() registers the 13 tools', withWeb.seen.tools.length === 13, `${withWeb.seen.tools.length}`)
+  check('apply() registers the 16 tools', withWeb.seen.tools.length === 16, `${withWeb.seen.tools.length}`)
   check(
     'the registered tool names match the declared surface',
     withWeb.seen.tools.map((tool) => tool.name).sort().join(',') === [...names].sort().join(','),
-    withWeb.seen.tools.map((tool) => tool.name).join(','),
+    `${withWeb.seen.tools.map((tool) => tool.name).join(',')} vs ${[...names].join(',')}`,
   )
   check(
     'apply() adds exactly one system-prompt section',
@@ -213,6 +360,19 @@ async function checkActivation() {
       && typeof withWeb.seen.routes[0].handler === 'function',
     JSON.stringify(withWeb.seen.routes.map((route) => `${route.kind} ${route.path}`)),
   )
+  check(
+    'the browser tool exposes one stateful action surface',
+    (() => {
+      const tool = withWeb.seen.tools.find((entry) => entry.name === 'lingdong_browser')
+      const actions = tool?.parameters?.properties?.action?.enum ?? []
+      return actions.length === 21
+        && actions.includes('launch')
+        && actions.includes('connect')
+        && actions.includes('screenshot')
+        && (tool.parameters.required ?? []).join(',') === 'action'
+    })(),
+    'expected the declared browser action list',
+  )
 
   const headless = fakeHost({ withWebServer: false })
   let headlessThrew = null
@@ -225,7 +385,7 @@ async function checkActivation() {
   check('apply() completes without a web server', headlessThrew === null, headlessThrew ? String(headlessThrew.message ?? headlessThrew) : '')
   check(
     'a headless composition still gets the full tool surface',
-    headless.seen.tools.length === 13 && headless.seen.routes.length === 0,
+    headless.seen.tools.length === 16 && headless.seen.routes.length === 0,
     `tools=${headless.seen.tools.length} routes=${headless.seen.routes.length}`,
   )
 }

@@ -6,6 +6,10 @@
  * product applies. Nothing here re-implements input.
  * @module dsh-plugin-lingdong/tools
  */
+import os from 'node:os'
+import path from 'node:path'
+import { readFile } from 'node:fs/promises'
+
 /** One canonical action batch expressed as a minimal ARP graph. */
 export function actionBatchGraph({ actions, name = 'DSH action batch', id }) {
   const graphId = id || `dsh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -102,11 +106,33 @@ const ACTION_BATCH_SCHEMA = {
 }
 
 /**
+ * Run one bounded sequence of feature calls and stop at the first failure.
+ *
+ * Several tool actions are really a short ordered sequence - read the title,
+ * then the URL, then the body - and a caller wants one answer with the first
+ * failure located, not three separate round trips it has to reconcile.
+ * @param browser - the browser session.
+ * @param steps - `[featureName, params]` pairs, a falsy name skipping a step.
+ * @returns `{ ok, steps, error }`.
+ */
+export async function browserSteps(browser, steps) {
+  const results = []
+  for (const [name, params] of steps) {
+    if (!name) continue
+    const answer = await browser.call(name, params)
+    results.push({ feature: name, ok: answer.ok, result: answer.result ?? null, error: answer.error || '' })
+    if (!answer.ok) break
+  }
+  const failed = results.find((entry) => !entry.ok)
+  return { ok: !failed, steps: results, error: failed ? failed.error : '' }
+}
+
+/**
  * Build the model-facing tool list.
- * @param options - client, settings and runtime handle.
+ * @param options - client, settings, runtime handle and the browser session.
  * @returns tool descriptors consumed by the Cordis mount.
  */
-export function buildTools({ client, sidecar, settings }) {
+export function buildTools({ client, sidecar, settings, browser = null }) {
   async function submitBatch(args, { name = 'DSH action batch' } = {}) {
     const actions = withTargetWindow(args.actions, args.window)
     const graph = actionBatchGraph({ actions, name })
@@ -193,7 +219,8 @@ export function buildTools({ client, sidecar, settings }) {
       name: 'lingdong_elements',
       description:
         'Read the accessibility elements of one window, when the UIA backend is available. Prefer this over pixel ' +
-        'guessing for standard controls; fall back to lingdong_observe when the window is custom-drawn.',
+        'guessing for standard controls; fall back to lingdong_observe when the window is custom-drawn. ' +
+        'Use lingdong_snapshot instead when you also need to see the window.',
       inputSchema: {
         type: 'object',
         additionalProperties: false,
@@ -207,6 +234,79 @@ export function buildTools({ client, sidecar, settings }) {
         const params = new URLSearchParams({ hwnd: String(args.hwnd) })
         if (args.limit != null) params.set('limit', String(args.limit))
         return toolResult(await client.get(`/api/v2/desktop/elements?${params}`, { timeoutMs: 60_000 }))
+      },
+    },
+
+    {
+      name: 'lingdong_snapshot',
+      description:
+        'Take one window as both an image and an accessibility tree, captured together, and return the image. ' +
+        'This is the window-level view: it tells you exactly which frame the pixels came from, so element ' +
+        'rectangles and the picture agree. One window image may be clearer than the whole screen for small ' +
+        'controls. A minimized window has no meaningful pixels and reports why instead of returning a stale frame.',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['hwnd'],
+        properties: {
+          hwnd: { type: 'number', description: 'Window handle from lingdong_windows.' },
+          limit: { type: 'number', description: 'Bound on returned elements (1-200, default 200).' },
+          max_side: { type: 'number', description: 'Longest edge of the returned image in pixels (64-2048, default 1120).' },
+        },
+      },
+      async handler(args) {
+        const params = new URLSearchParams({ hwnd: String(args.hwnd) })
+        if (args.limit != null) params.set('limit', String(args.limit))
+        if (args.max_side != null) params.set('max_side', String(args.max_side))
+        const snapshot = await client.get(`/api/v2/desktop/snapshot?${params}`, { timeoutMs: 60_000 })
+        const image = snapshot?.image ?? null
+        const meta = image
+          ? {
+              content_type: image.content_type,
+              width: image.width,
+              height: image.height,
+              bytes: image.bytes,
+              sha256: image.sha256,
+            }
+          : null
+        const body = { ...snapshot, image: meta }
+        if (!image?.base64) return toolResult(body)
+        return toolResult(body, [
+          { type: 'image', data: image.base64, mimeType: image.content_type || 'image/jpeg' },
+        ])
+      },
+    },
+
+    {
+      name: 'lingdong_verify',
+      description:
+        'Evaluate a bounded predicate set against the live desktop and report whether it holds. This is the ' +
+        'runtime\'s own evaluator, the same one used before and after an offline step, so its answer is a real ' +
+        'check rather than a restatement of what you asked for. Use it to confirm an outcome instead of assuming ' +
+        'a delivered action worked. Supported conditions: text_appears, text_gone, window_appears, window_gone, ' +
+        'window_title, screen_stable, color_match, file_exists, file_format, file_contains, process_running, ' +
+        'process_gone, shell_true. Note that shell_true runs a command and reads its exit status.',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['expect'],
+        properties: {
+          expect: {
+            type: 'object',
+            description: 'Condition object, for example {"window_appears": "Save as"} or {"file_exists": "C:/tmp/a.txt"}.',
+          },
+          hwnd: { type: 'number', description: 'Window to evaluate visual conditions against, from lingdong_windows.' },
+          timeout_s: { type: 'number', description: 'How long to keep polling before answering false (0.2-120, default 6).' },
+        },
+      },
+      async handler(args) {
+        return toolResult(
+          await client.post(
+            '/api/v2/desktop/verify',
+            { expect: args.expect, ...(args.hwnd != null ? { hwnd: args.hwnd } : {}), ...(args.timeout_s != null ? { timeout_s: args.timeout_s } : {}) },
+            { timeoutMs: 180_000 },
+          ),
+        )
       },
     },
 
@@ -392,4 +492,182 @@ export function buildTools({ client, sidecar, settings }) {
 }
 
 /** Guidance injected into the system prompt while this provider is mounted. */
-export const GUIDANCE = `The Lingdong computer-use tools operate the real Windows desktop through a single physical input queue. Prefer lingdong_desktop when you already know the actions, and lingdong_run_goal when you do not. Observe before choosing coordinates and re-observe after every mutation: a delivered click is not evidence of the intended outcome. Pass the exact window title for any batch that moves the pointer or types. Recordings and exported runs become offline replay segments that can be executed together with script steps through lingdong_run_flow, with no model calls.`
+export const GUIDANCE = `The Lingdong computer-use tools operate the real Windows desktop through a single physical input queue. Prefer lingdong_desktop when you already know the actions, and lingdong_run_goal when you do not. Observe before choosing coordinates and re-observe after every mutation: a delivered click is not evidence of the intended outcome - lingdong_verify is. lingdong_snapshot returns one window's pixels and accessibility tree from the same moment, which is the better view for a small control. Pass the exact window title for any batch that moves the pointer or types. Recordings and exported runs become offline replay segments that can be executed together with script steps through lingdong_run_flow, with no model calls.`
+
+/** Guidance for the browser session, added only when that surface is mounted. */
+export const BROWSER_GUIDANCE = `The Lingdong browser session drives a Chromium-family browser over CDP, with no pixels and no pointer involved: selectors, page text and page state, which is far more reliable than clicking coordinates when the target is a web page. It has no session until you call lingdong_browser with action launch or connect; it never opens a window on its own.`
+
+/**
+ * Build the browser tool descriptor.
+ *
+ * The action surface is deliberately one tool rather than twenty: a browser
+ * session is stateful, and a model that has to remember which of twenty tools
+ * needs a session will eventually call one that does not exist yet.
+ * @param browser - the session owner.
+ * @returns one tool descriptor.
+ */
+export function buildBrowserTool(browser) {
+  return {
+    name: 'lingdong_browser',
+    description:
+      'Drive a Chromium-family browser over CDP: navigate, read the page, find and interact with elements by CSS ' +
+      'selector or text, run JavaScript, wait for conditions, and take page screenshots. This works on the page ' +
+      'itself, not on pixels, so it is the reliable way to operate a web page. Start with action "launch" (the ' +
+      'plugin starts a browser it owns) or action "connect" (attach to a browser you already started with ' +
+      '--remote-debugging-port). Every other action is refused until one of those has succeeded, because this ' +
+      'tool never opens a window on its own.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['action'],
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'status', 'launch', 'connect', 'close', 'open', 'new_tab', 'tabs', 'switch', 'close_tab',
+            'read', 'find', 'click', 'type', 'press', 'select', 'hover', 'scroll', 'wait', 'eval',
+            'screenshot', 'download',
+          ],
+          description: 'Which browser operation to perform.',
+        },
+        url: { type: 'string', description: 'URL for open / new_tab. A bare domain gets https://.' },
+        selector: { type: 'string', description: 'CSS selector for the element actions.' },
+        text: { type: 'string', description: 'Element text to match when no selector is given.' },
+        value: { type: 'string', description: 'Text for type, value for select.' },
+        label: { type: 'string', description: 'Option label for select, when value is not used.' },
+        key: { type: 'string', description: 'Key name for press, for example Enter or Control+a.' },
+        code: { type: 'string', description: 'JavaScript for eval. Use "return ..." to produce a value.' },
+        condition: {
+          type: 'string',
+          description: 'Wait condition for wait: text_visible, text_hidden, element_visible, element_hidden, url_contains, title_contains, page_stable.',
+        },
+        target: { type: 'string', description: 'Target tab for switch: its title or its 1-based index.' },
+        path: { type: 'string', description: 'Absolute path for screenshot or download.' },
+        full_page: { type: 'boolean', description: 'Capture the whole page rather than the viewport.' },
+        timeout: { type: 'number', description: 'Seconds to wait, for click / type / wait.' },
+        port: { type: 'number', description: 'CDP port for launch / connect. Defaults to the configured port.' },
+        headless: { type: 'boolean', description: 'Whether launch starts a headless browser. Defaults to true.' },
+        max_results: { type: 'number', description: 'Bound on elements returned by find (default 20).' },
+        attributes: { type: 'boolean', description: 'Include each found element attribute map in the result.' },
+      },
+    },
+    async handler(args) {
+      const action = String(args.action || '')
+      const timeout = args.timeout != null ? Number(args.timeout) : undefined
+      const element = args.selector ? { selector: String(args.selector) } : { text: String(args.text || '') }
+      if (action === 'status') {
+        return toolResult({ ok: true, ...browser.facts() })
+      }
+      if (action === 'launch') {
+        return toolResult({ ok: true, ...(await browser.launch({ headless: args.headless !== false, ...(args.port != null ? { port: Number(args.port) } : {}) })) })
+      }
+      if (action === 'connect') {
+        return toolResult({ ok: true, ...(await browser.connect(args.port != null ? { port: Number(args.port) } : {})) })
+      }
+      if (action === 'close') {
+        await browser.close()
+        return toolResult({ ok: true, closed: true, ...browser.facts() })
+      }
+      if (action === 'open') {
+        return toolResult(await browserSteps(browser, [
+          ['browser_navigate', { url: String(args.url || ''), wait_until: 'domcontentloaded' }],
+        ]))
+      }
+      if (action === 'new_tab') {
+        // The session tracks one active page, and the helper's own new-tab call
+        // does not move it, so the tab is selected explicitly afterwards.
+        return toolResult(await browserSteps(browser, [
+          ['browser_new_tab', { url: String(args.url || 'about:blank') }],
+          ['browser_switch_tab', { target: '1' }],
+        ]))
+      }
+      if (action === 'tabs') {
+        return toolResult(await browserSteps(browser, [['browser_list_tabs', {}]]))
+      }
+      if (action === 'switch') {
+        return toolResult(await browserSteps(browser, [['browser_switch_tab', { target: String(args.target || '1') }]]))
+      }
+      if (action === 'close_tab') {
+        return toolResult(await browserSteps(browser, [['browser_close_tab', { target: String(args.target || '') }]]))
+      }
+      if (action === 'read') {
+        const steps = [['browser_get_title', {}], ['browser_get_url', {}], ['browser_get_text', { selector: String(args.selector || 'body') }]]
+        const answer = await browserSteps(browser, steps)
+        const [title, url, body] = answer.steps.map((entry) => (entry.ok ? entry.result : null))
+        return toolResult({ ok: answer.ok, title, url, text: body, steps: answer.steps, error: answer.error })
+      }
+      if (action === 'find') {
+        return toolResult(await browserSteps(browser, [['browser_find_elements', {
+          selector: String(args.selector || 'a, button, input'),
+          max_results: args.max_results != null ? Number(args.max_results) : 20,
+        }]]))
+      }
+      if (action === 'click') {
+        return toolResult(await browserSteps(browser, [['browser_click', { ...element, timeout: timeout ?? 10 }]]))
+      }
+      if (action === 'type') {
+        if (!args.selector) throw new Error('type needs a selector for the field to fill')
+        return toolResult(await browserSteps(browser, [['browser_type', {
+          selector: String(args.selector),
+          text: String(args.value ?? ''),
+          clear_first: true,
+        }]]))
+      }
+      if (action === 'press') {
+        return toolResult(await browserSteps(browser, [['browser_press_key', { key: String(args.key || 'Enter') }]]))
+      }
+      if (action === 'select') {
+        return toolResult(await browserSteps(browser, [['browser_select_option', {
+          selector: String(args.selector || 'select'),
+          ...(args.value != null ? { value: String(args.value) } : {}),
+          ...(args.label != null ? { label: String(args.label) } : {}),
+        }]]))
+      }
+      if (action === 'hover') {
+        return toolResult(await browserSteps(browser, [['browser_hover', element]]))
+      }
+      if (action === 'scroll') {
+        return toolResult(await browserSteps(browser, [['browser_scroll_to', { ...element, behavior: 'smooth' }]]))
+      }
+      if (action === 'wait') {
+        return toolResult(await browserSteps(browser, [['browser_wait_for', {
+          condition: String(args.condition || 'element_visible'),
+          target: String(args.target || args.selector || args.text || ''),
+          timeout: timeout ?? 30,
+        }]]))
+      }
+      if (action === 'eval') {
+        return toolResult(await browserSteps(browser, [['browser_execute_js', {
+          code: String(args.code || ''),
+          selector: String(args.selector || ''),
+        }]]))
+      }
+      if (action === 'screenshot') {
+        const target = String(args.path || path.join(os.tmpdir(), `lingdong-page-${Date.now()}.png`))
+        const answer = await browserSteps(browser, [['browser_screenshot', {
+          selector: String(args.selector || ''),
+          full_page: args.full_page === true,
+          path: target,
+        }]])
+        const captured = answer.steps[0]?.result
+        if (!answer.ok || !captured?.path) return toolResult(answer)
+        // The page, as an image: a model that asked to look at the page should
+        // get the page, not only a file name it cannot open.
+        let bytes = null
+        try { bytes = await readFile(String(captured.path)) } catch { bytes = null }
+        if (!bytes) return toolResult({ ...answer, note: 'the capture was written but could not be read back' })
+        return toolResult({ ...answer, image: { ...captured, bytes: bytes.length, content_type: 'image/png' } }, [
+          { type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' },
+        ])
+      }
+      if (action === 'download') {
+        return toolResult(await browserSteps(browser, [['browser_download', {
+          selector: String(args.selector || ''),
+          ...(args.path ? { save_path: String(args.path) } : {}),
+        }]]))
+      }
+      throw new Error(`unsupported browser action: ${action}`)
+    },
+  }
+}
+

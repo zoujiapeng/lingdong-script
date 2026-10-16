@@ -32,6 +32,16 @@ export const Config = Schema.object({
   requestTimeoutMs: Schema.number().step(1000).min(1000).max(3_600_000).default(120_000),
   /** How long to wait for a freshly spawned runtime to answer /api/ping. */
   startupTimeoutMs: Schema.number().step(1000).min(1000).max(600_000).default(60_000),
+  /** Expose the browser session tools. */
+  browserEnabled: Schema.boolean().default(true),
+  /** Chromium-family executable for `launch`. Empty detects the usual locations, then PATH. */
+  browserExecutable: Schema.string().default(''),
+  /** CDP port the browser session attaches to. */
+  browserPort: Schema.number().step(1).min(1).max(65535).default(9222),
+  /** How long a browser feature call may take. */
+  browserTimeoutMs: Schema.number().step(1000).min(1000).max(3_600_000).default(120_000),
+  /** How long to wait for a launched browser, or for the feature worker, to come up. */
+  browserStartupTimeoutMs: Schema.number().step(1000).min(1000).max(600_000).default(60_000),
 })
 
 /**
@@ -58,5 +68,11 @@ export function resolveConfig(config = {}) {
     registerComputerUse: config.registerComputerUse !== false,
     requestTimeoutMs: config.requestTimeoutMs ?? 120_000,
     startupTimeoutMs: config.startupTimeoutMs ?? 60_000,
+    browserEnabled: config.browserEnabled !== false,
+    browserExecutable: config.browserExecutable || '',
+    browserPort: config.browserPort ?? 9222,
+    browserTimeoutMs: config.browserTimeoutMs ?? 120_000,
+    browserStartupTimeoutMs: config.browserStartupTimeoutMs ?? 60_000,
+    featureCallScript: path.join(repoRoot, 'python', 'tools', 'feature_call.py'),
   }
 }
