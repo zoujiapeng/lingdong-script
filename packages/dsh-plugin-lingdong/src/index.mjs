@@ -13,6 +13,7 @@ import { Config, resolveConfig } from './config.mjs'
 import { WinPilotSidecar } from './sidecar.mjs'
 import { createClient } from './client.mjs'
 import { buildTools, GUIDANCE } from './tools.mjs'
+import { registerBridge } from './bridge.mjs'
 
 /** Cordis plugin identity. */
 export const name = 'lingdong'
@@ -58,6 +59,17 @@ export async function apply(ctx, config = {}) {
     })
     yield child.dispose
   }, 'lingdong.runtime')
+
+  // The flow workbench is a browser client plugin, so it reaches this process
+  // through a same-origin route on DSH's own web server instead of holding the
+  // runtime token. A composition without a web server simply has no workbench
+  // to serve and is not a failure.
+  ctx.inject(['webServer'], (scope) => {
+    scope.effect(
+      () => registerBridge(scope, { client, sidecar, settings, log }),
+      'lingdong: flow bridge',
+    )
+  })
 
   // Warm the runtime without blocking activation: a missing interpreter or a
   // slow first import must not prevent DSH from starting.

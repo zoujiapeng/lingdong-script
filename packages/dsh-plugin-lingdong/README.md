@@ -68,15 +68,44 @@ dsh --profile web --patch "C:/Users/zou/Desktop/claude/packages/dsh-plugin-lingd
 | 看屏 | 有 | 有（权威全屏 JPEG + 受管工件） |
 | 录制 → 重放 | **无** | 有 |
 | 流程图编排 | **无** | 有（可视化编辑 + 离线 0-token 执行） |
+| GUI 内编辑流程 | **无** | 有（浏览器工作台，见 §3.4） |
 | 运行审计 | 窗口/元素快照 | 每 run durable trace + SHA-256 工件 |
 | Agent 内核 | 用 DSH 的 | **用 DSH 的**（本插件不替换 DSH 的推理与编排） |
+
+### 3.4 浏览器工作台的数据通道（`/lingdong/api`）
+
+流程工作台跑在浏览器里，既拿不到运行时的控制 token，也不能跨源访问运行时的回环端口。
+本插件因此在 **DSH 自己的 web server** 上注册一条前缀路由，把流程操作转给运行时：
+
+| 路由 | 作用 |
+| --- | --- |
+| `GET /lingdong/api/status` | 运行时可达性与构建标识 |
+| `GET /lingdong/api/flows` | 脚本库列举（沿用运行时的 `list_scripts`） |
+| `GET /lingdong/api/flows/<file>` | 读一份文档 |
+| `PUT /lingdong/api/flows/<file>` | 保存一份文档（校验由运行时做） |
+| `POST /lingdong/api/validate` | 用运行时自己的校验器校验，不落盘 |
+| `POST /lingdong/api/run` | 运行画布上尚未保存的文档 |
+| `POST /lingdong/api/flows/<file>/run` | 运行已保存的文档 |
+| `GET /lingdong/api/runs/<id>?kind=replay\|arp` | 轮询运行状态与逐步结果 |
+| `POST /lingdong/api/runs/<id>/cancel` | 取消 |
+
+设计要点：
+
+- **不是第二个桌面面**。每个写操作都落到运行时的 canonical 端点（`/api/script/*`、
+  `/api/v2/automation-ir/runs`），校验、ARP 管线、物理输入单写入者仍由运行时拥有。
+  本桥只搬 JSON。
+- **不自己发明准入策略**。请求先交给 DSH 自己的 `ctx.connection.requestRejection()`；
+  该服务不在时退回到**更严**的回环兜底（Host 必须是回环、拒绝跨站 `Origin` 与
+  `sec-fetch-site: cross-site`）。所以把 web server 绑到 `0.0.0.0` 供手机访问时，
+  判定仍由操作者配置的可信主机名单决定，插件不会比 GUI 的其它 `/api` 更宽松。
+- **组合里没有 web server 时不是失败**：工具面照常挂载，只是没有工作台可服务。
 
 ## 4. 已知边界（v0）
 
 - **目标窗口是插件侧纪律，不是后端规则**。已核实：`POST /api/v2/arp/validate` 不会因为没有 `focus_window` 就拒绝一个坐标动作——"空间动作前必须建立目标"是**流程图编辑器**的守卫。所以 `lingdong_desktop` 传 `window` 时由插件自己前置 `focus_window`；坐标是屏幕绝对像素，命名目标才让动作确定。
 - `lingdong_run_flow` 接受 `automation-ir/1`；`wps_replay` 类型走 Replayer，`arp_graph` 类型走 ARP。
 - **观测面已补齐到只读枚举层**：窗口、应用、屏幕、光标、UIA 元素都已暴露为只读 REST 并被插件工具覆盖（见 [desktop_observe.py](<../../python/winpilot_home/winpilot/desktop_observe.py>)）。仍未覆盖的是 Cua 的**状态快照**类工具（`get_window_state` 式的窗口级 UIA+截图联合快照）、`verify_state` 断言和浏览器工具族。
-- **前端界面尚未迁移**（v1）。
+- **工作台只编辑线性 `wps_replay` 流程**。`arp_graph` 文档会被明确拒绝而不是压扁成假参数；录制文档里工作台不认识的步骤（如 `ctrl.loop`、带 else 的 `ctrl.if`、`focus_window`）会变成"离线脚本片段"节点**原样**保留。
 
 ## 5. 验证
 
@@ -87,28 +116,47 @@ Get-ChildItem packages/dsh-plugin-lingdong/src -Filter *.mjs | ForEach-Object { 
 # 组合树（只读、不启动服务）
 dsh --profile web --dump-config --patch "C:/Users/zou/Desktop/claude/packages/dsh-plugin-lingdong/dsh.patch.yml" | Select-String lingdong
 
-# 冒烟：拉起真实 Python runtime，校验工具面与生成的图（不碰桌面，只做契约校验）
+# 冒烟：拉起真实 Python runtime，校验工具面、生成的图，并把插件真的挂载一次
 node packages/dsh-plugin-lingdong/scripts/smoke.mjs
+
+# 数据通道端到端：真实 HTTP server + 真实 runtime，跑完 读/写/校验/运行/准入
+node packages/dsh-plugin-lingdong/scripts/verify-bridge.mjs
+
+# 浏览器工作台：bundle 求值 + 画布 codec 往返 + 真实 React 服务端渲染
+node packages/dsh-client-ui-lingdong/scripts/verify-bundle.mjs
 ```
+
+`verify-bridge.mjs` 不是形状检查：它起一个真实 `node:http` server 挂上真实路由，用插件自己的
+sidecar 拉起仓库的 runtime，然后走一遍工作台会走的请求序列，最后**用浏览器 bundle 自己导出的
+codec** 生成一份文档，交给运行时校验、保存并真的跑完——包括 `ctrl.if` 嵌套步骤的索引路径
+（`2.1`）与画布的节点映射逐条对齐。它跑的流程只有一个 `ext.delay`，不碰桌面、不产生物理输入。
 
 已通过的验证（本机实测）：
 
 | 检查 | 结果 |
 | --- | --- |
-| 5 个模块 `node --check` | 通过 |
+| 6 个模块 `node --check` | 通过 |
 | overlay YAML 解析 | 通过 |
 | `--dump-config` 叠加 overlay | `computer-use-cua-driver-native → disabled: true`，`lingdong` 行插入，exit 0，未改任何 DSH 文件 |
 | 从 profile 上下文 import 本插件 | 导出 `Config, PROVIDER_NAME, apply, inject, name` 正确 |
 | 冒烟：运行时可达 + `/api/ping` | 通过（子进程启动与 SIGTERM 回收均正常） |
 | 冒烟：13 个工具名称/唯一性/schema/handler/描述 | 全部通过 |
-| 冒烟：`/api/v2/desktop/screen` / `cursor` / `windows` / `apps` | 通过（1920x1080；光标 887,112；窗口枚举；发现 625 个应用）|
+| 冒烟：`/api/v2/desktop/screen` / `cursor` / `windows` / `apps` | 通过（1920x1080；窗口枚举；发现 625 个应用）|
+| 冒烟：真实 `apply()` 挂载（有/无 web server 两种组合） | 通过：占用 computer-use 槽、注册 13 个工具、1 段提示词、1 条 `/lingdong/api` 前缀路由；无 web server 时工具面不受影响 |
 | **真实 DSH 启动中挂载** | 通过：临时实例（3099）启动后 `apply()` 执行并拉起 Python 运行时（8790 监听）；3080 上的原实例全程未受影响 |
 | 冒烟：observe 图与带目标的空间图过真实 ARP 校验 | 通过 |
 | 冒烟：`window` 前置 `focus_window`、不传则不动 | 通过 |
+| 数据通道：真实 server + 真实 runtime 全链路 51 项 | 全部通过（含准入拒绝、路径穿越拒绝、非法文档拒绝、运行轮询、逐步结果） |
+| 数据通道：画布 codec 产物被运行时接受并真的执行 | 通过：`ctrl.if` 条件求值为真、`2.1` 步骤执行、索引→节点映射与画布一致 |
+| 工作台：bundle 求值 + 48 项 codec/渲染断言 | 全部通过 |
 
 ## 6. 后续阶段
 
 1. **v0 ✅**：host 插件 + overlay patch + 冒烟脚本；已在真实 DSH 启动中证明挂载。
 2. **v2（进行中 ✅ 大部分）**：只读观测面已补齐（屏幕/光标/窗口/应用/UIA 元素）。
-3. **v1（进行中）**：流程工作台的客户端插件骨架已完成 —— [packages/dsh-client-ui-lingdong](<../dsh-client-ui-lingdong>)。关键结论：DSH 客户端插件是 `window.__ModuleLoader__.load(...)` 包装，`require` 由宿主注入，**不需要 tsdown 或任何打包器**，改完即生效。当前注册了 locale 字典、`sidebarRightTabs` 标签类型与两个 pane 座位；画布本体下一步迁移。
-4. **v2 余项**：窗口级状态快照（UIA + 截图联合）、`verify_state` 式断言、浏览器工具族。
+3. **v1 ✅ 数据接通**：流程工作台在 DSH Web GUI 里可读、可写、可运行 `.automation.json`
+   —— [packages/dsh-client-ui-lingdong](<../dsh-client-ui-lingdong>)。关键结论：DSH 客户端插件是
+   `window.__ModuleLoader__.load(...)` 包装，`require` 由宿主注入，**不需要 tsdown 或任何打包器**，
+   改完即生效。画布与宿主之间走本插件自己的 `/lingdong/api` 同源路由（§3.4）。
+4. **v1 余项**：多选、撤销重做、一句话生成片段。
+5. **v2 余项**：窗口级状态快照（UIA + 截图联合）、`verify_state` 式断言、浏览器工具族。
