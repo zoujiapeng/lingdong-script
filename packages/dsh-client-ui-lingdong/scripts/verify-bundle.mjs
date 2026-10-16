@@ -1,16 +1,21 @@
 #!/usr/bin/env node
 /**
- * Structural verification for the hand-written client bundle.
+ * Structural and render verification for the hand-written client bundle.
  *
- * No browser is involved. The script stubs the host module loader, evaluates
- * the real bundle, asserts the export contract, and then drives apply() against
- * a recording fake context to prove every registration actually happens.
+ * No browser is involved, but this is stronger than a shape check: the bundle
+ * is evaluated against a stubbed host module loader with the REAL react and
+ * react/jsx-runtime, then apply() is driven against a recording fake context
+ * and the registered pane component is server-rendered. A component that
+ * cannot render fails here.
  *
  * Usage:  node packages/dsh-client-ui-lingdong/scripts/verify-bundle.mjs
  */
 import { readFileSync } from 'node:fs'
 import { createContext, runInContext } from 'node:vm'
 import { fileURLToPath } from 'node:url'
+import * as React from 'react'
+import * as jsxRuntime from 'react/jsx-runtime'
+import { renderToStaticMarkup } from 'react-dom/server'
 
 const BUNDLE = fileURLToPath(new URL('../lib/client.js', import.meta.url))
 const failures = []
@@ -18,6 +23,16 @@ const failures = []
 function check(label, ok, detail) {
   console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (detail ? ' - ' + detail : ''))
   if (!ok) failures.push(label)
+}
+
+function count(haystack, needle) {
+  let total = 0
+  let at = haystack.indexOf(needle)
+  while (at !== -1) {
+    total += 1
+    at = haystack.indexOf(needle, at + needle.length)
+  }
+  return total
 }
 
 // ---- stub the host module loader -------------------------------------------
@@ -32,13 +47,12 @@ check('bundle calls window.__ModuleLoader__.load', capture !== null)
 check('descriptor id matches package', capture && capture.id === '@lingdong/dsh-client-ui-lingdong', String(capture && capture.id))
 check('descriptor exposes a factory', typeof (capture && capture.factory) === 'function')
 
-// ---- stub require ----------------------------------------------------------
+// ---- real react through the stubbed require --------------------------------
 const required = []
-const element = (type, props) => ({ type, props })
 function fakeRequire(name) {
   required.push(name)
-  if (name === 'react') return { createElement: element, useMemo: (fn) => fn(), useLayoutEffect: () => {} }
-  if (name === 'react/jsx-runtime') return { jsx: element, jsxs: element, Fragment: 'Fragment' }
+  if (name === 'react') return React
+  if (name === 'react/jsx-runtime') return jsxRuntime
   throw new Error('unexpected host module: ' + name)
 }
 
@@ -61,7 +75,7 @@ const fakeCtx = {
   slots: {
     inject(name, fn) { seen.slotInject.push(name); return fn() },
     register(definition, component) {
-      seen.slotRegister.push({ name: definition.name, key: definition.key, kind: typeof component })
+      seen.slotRegister.push({ name: definition.name, key: definition.key, kind: typeof component, component })
     },
   },
 }
@@ -88,7 +102,26 @@ check(
   seen.slotInject.join(','),
 )
 check('two slots registered', seen.slotRegister.length === 2, JSON.stringify(seen.slotRegister.map((s) => s.name)))
-check('both registrations are components', seen.slotRegister.every((s) => s.kind === 'function'))
+
+// ---- render the registered pane with the real React ------------------------
+const paneEntry = seen.slotRegister.find((entry) => entry.name === 'sidebar.right.pane.tab')
+let markup = ''
+let renderError = null
+try {
+  markup = renderToStaticMarkup(React.createElement(paneEntry.component, {}))
+} catch (error) {
+  renderError = error
+}
+check('pane component server-renders', renderError === null, renderError ? String(renderError.message || renderError) : String(markup.length) + ' chars')
+check('workbench root rendered', markup.indexOf('data-lingdong-flow-workbench') !== -1)
+check('edge layer rendered as svg', markup.indexOf('<svg') !== -1 && count(markup, '<path') === 4, count(markup, '<path') + ' paths')
+check('initial nodes rendered', count(markup, 'data-lingdong-node=') === 4, String(count(markup, 'data-lingdong-node=')))
+check('palette offers the offline node vocabulary', count(markup, 'data-lingdong-palette=') === 8, String(count(markup, 'data-lingdong-palette=')))
+check('recorded fragment node is in the palette', markup.indexOf('data-lingdong-palette="replay_step"') !== -1)
+check('agent-semantic nodes are absent', markup.indexOf('data-lingdong-palette="agent_goal"') === -1 && markup.indexOf('data-lingdong-palette="skill_replay"') === -1)
+check('canvas surface rendered', markup.indexOf('data-lingdong-canvas') !== -1)
+check('status bar reports zero model calls', markup.indexOf('0 \u6a21\u578b\u8c03\u7528') !== -1, 'expected the model-call counter in the status bar')
+check('inspector starts empty', markup.indexOf('\u9009\u4e2d\u4e00\u4e2a\u8282\u70b9') !== -1)
 
 console.log('')
 console.log(failures.length === 0 ? 'ALL CHECKS PASSED' : failures.length + ' CHECK(S) FAILED: ' + failures.join(', '))

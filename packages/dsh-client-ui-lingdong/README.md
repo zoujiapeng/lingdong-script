@@ -28,11 +28,27 @@ DSH 客户端插件不是普通 npm 入口，而是一个 module-loader 包装�
 | locale 字典注册（zh/en） | 完成 |
 | sidebarRightTabs 标签类型（dsh-resource://lingdong-flow/**） | 完成 |
 | sidebar.right.pane.tab / .title 座位 | 完成 |
-| 画布本体（从 src/renderer 迁移） | 下一步 |
+| 画布：节点拖动、SVG 连线、缩放、选中、节点库、属性面板、状态栏 | 完成 |
+| 与宿主数据接通（读写 .automation.json、运行流程） | 下一步 |
+| 从 src/renderer 迁移剩余交互（多选、撤销、片段生成） | 下一步 |
+
+## 节点词表
+
+画布只放**确定性、可离线执行**的节点，外加录制产物的唯一入口：
+
+    点击 / 输入文本 / 键盘 / 等待 / 条件 / 截图 / 离线脚本片段 / 运行命令
+
+`离线脚本片段`（replay_step）是 agent 复用能力接入流程图的唯一节点形态；
+`agent_goal` / `skill_replay` / `evidence_gate` / `human_gate` 等 agent 语义节点不在这个词表里。
 
 ## 验证
 
     node packages/dsh-client-ui-lingdong/scripts/verify-bundle.mjs
 
-它用桩 `window.__ModuleLoader__` 与桩 `require` 求值真实 bundle，断言导出契约，
-再用记录型假 ctx 跑 `apply()`，确认四条注册都发生且无异常。
+它做两件事：
+
+1. 用桩 `window.__ModuleLoader__` 求值真实 bundle，断言导出契约与四条注册；
+2. 把捕获到的 pane 组件用**真实 React** 服务端渲染，断言画布结构（节点、连线、节点库、状态栏、
+   以及 agent 语义节点确实不在词表里）。
+
+当前 24/24 通过。React 开发版会就 `key` 的传递位置给出警告，生产构建不触发，也不影响渲染。
