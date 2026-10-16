@@ -174,7 +174,7 @@ npm run e2e:client:mixed
 
 ## 文档
 
-- [AI / Codex 接手入口](CLAUDE.md)
+- [AI / Codex 接手入口](CLAUDE.md)（路由）· [主产品决策与历史](docs/handover/main-product-history.md)
 - [全项目精确讲解与逐文件索引](docs/project-guide/README.md)
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)

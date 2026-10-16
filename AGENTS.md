@@ -1,8 +1,11 @@
 # Repository agent instructions
 
-Before changing this repository, read `CLAUDE.md`. It is the current handoff
-and points to the authoritative architecture, migration, and E2E documents.
+Two unrelated projects live here. Read the one you are working on; do not read both.
 
+- **DSH plugin sub-project** (`packages/dsh-plugin-lingdong`, `packages/dsh-client-ui-lingdong`,
+  branch `feat/dsh-plugin`) -> `packages/dsh-plugin-lingdong/AGENTS.md`. Nothing below applies.
+- **Main product** (灵动脚本 / WinPilot desktop agent, branch `master`) -> this file, then
+  `docs/handover/main-product-history.md`.
 ## Highest principle: Model-first, machinery-minimal
 
 The model is the system. It understands the goal, sees the real screen, picks
