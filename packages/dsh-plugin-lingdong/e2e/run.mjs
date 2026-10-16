@@ -242,6 +242,56 @@ function buildTasks() {
       },
     },
     {
+      id: 'fill_form',
+      // Six interactions of five different kinds, and the result is read from the
+      // application itself: a form that was only looked at cannot pass, because
+      // every default is wrong.
+      async setup() {
+        const value = token('T9')
+        const out = path.join(WORK, 't9.json')
+        rmSync(out, { force: true })
+        const child = spawn('powershell', ['-NoProfile', '-STA', '-File', path.join(HERE, 'form.ps1'), '-Out', out], {
+          stdio: 'ignore',
+          windowsHide: false,
+        })
+        const deadline = Date.now() + 25_000
+        while (Date.now() < deadline) {
+          if (windowRect('LD Form')) break
+          await sleep(400)
+        }
+        return { value, out, child }
+      },
+      goal: ({ value }) => [
+        'A window titled "LD Form" is open on the desktop. Fill it in exactly like this:',
+        `Name must be ${value}.`,
+        'City must be Chengdu.',
+        'The newsletter check box must be ticked.',
+        'Plan B must be selected, not Plan A.',
+        'Then press the Submit button.',
+        'The form writes what it actually received to a file when you submit, so check every field before submitting.',
+      ].join(' '),
+      async oracle({ value, out }) {
+        if (!existsSync(out)) return { pass: false, detail: 'the form was never submitted' }
+        let got = null
+        try {
+          got = JSON.parse(readFileSync(out, 'utf8'))
+        } catch (error) {
+          return { pass: false, detail: `unreadable submission: ${error.message}` }
+        }
+        const wrong = []
+        if (got.name !== value) wrong.push(`name=${JSON.stringify(got.name)}`)
+        if (got.city !== 'Chengdu') wrong.push(`city=${JSON.stringify(got.city)}`)
+        if (got.subscribe !== true) wrong.push(`subscribe=${JSON.stringify(got.subscribe)}`)
+        if (got.plan !== 'B') wrong.push(`plan=${JSON.stringify(got.plan)}`)
+        return wrong.length
+          ? { pass: false, detail: `submitted with ${wrong.join(' ')}` }
+          : { pass: true, detail: 'all five controls submitted correctly' }
+      },
+      async teardown({ child }) {
+        child?.kill()
+      },
+    },
+    {
       id: 'browser_confirm',
       // A page whose answer only exists if its confirmation dialog was really
       // accepted. A browser that silently dismisses dialogs gets a different
@@ -289,6 +339,62 @@ function buildTasks() {
   ]
 }
 
+/**
+ * How to start dsh without a shell.
+ *
+ * Going through the `dsh` shim means going through cmd.exe, where a task text
+ * containing a token that starts with `-` is parsed as a flag - which it was,
+ * and dsh answered "`-` must be the only task argument" instead of running the
+ * task. Spawning the launcher script directly removes that whole class of
+ * accident.
+ */
+function dshLauncher() {
+  if (process.env.LD_DSH_BIN) return { cmd: process.execPath, prefix: [process.env.LD_DSH_BIN] }
+  const root = text(spawnSync('npm', ['root', '-g'], { encoding: 'utf8', shell: true, timeout: 60_000 }).stdout).trim()
+  const bin = root ? path.join(root, '@deepseek-ai', 'dsh', 'lib', 'bin.js') : ''
+  if (bin && existsSync(bin)) return { cmd: process.execPath, prefix: [bin] }
+  return null
+}
+
+/**
+ * What the run cost, read from the machine-readable event stream.
+ *
+ * Wall-clock is a poor comparison: it moves with machine load and with how long
+ * a human takes to read the screen. Model calls and tokens for the same task
+ * are the operational difference, and they are what a repeated task actually
+ * costs.
+ */
+function metricsFrom(stdout) {
+  let steps = 0
+  let turns = 0
+  let input = 0
+  let output = 0
+  let total = 0
+  let finalText = ''
+  const tools = []
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('{')) continue
+    let event
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (event.type === 'status' && event.phase === 'step_end') {
+      steps += 1
+      const usage = event.usage || {}
+      input += usage.inputTokens || 0
+      output += usage.outputTokens || 0
+      total += usage.totalTokens || 0
+    }
+    if (event.type === 'status' && event.phase === 'turn_start') turns += 1
+    if (event.type === 'tool') tools.push(String(event.name || event.tool || ''))
+    if (event.type === 'final') finalText = text(event.text)
+  }
+  return { steps, turns, input_tokens: input, output_tokens: output, total_tokens: total, tools, final: finalText }
+}
+
 /** Run one arm on one task and judge it by the oracle alone. */
 async function runOne(armName, task) {
   const arm = ARMS[armName]
@@ -298,13 +404,15 @@ async function runOne(armName, task) {
   let stdout = ''
   let stderr = ''
   let timedOut = false
+  const launcher = dshLauncher()
+  if (!launcher) throw new Error('could not locate the dsh launcher')
 
   await new Promise((resolve) => {
-    const child = spawn('dsh', ['--profile', arm.profile, '--patch', arm.patch, goal], {
-      cwd: REPO,
-      shell: true,
-      windowsHide: true,
-    })
+    const child = spawn(
+      launcher.cmd,
+      [...launcher.prefix, '--profile', arm.profile, '--patch', arm.patch, '--json', goal],
+      { cwd: REPO, windowsHide: true },
+    )
     const timer = setTimeout(() => {
       timedOut = true
       child.kill()
@@ -316,6 +424,7 @@ async function runOne(armName, task) {
   })
 
   const elapsed = Date.now() - started
+  const metrics = metricsFrom(stdout)
   let verdict
   try {
     verdict = await task.oracle(context)
@@ -332,7 +441,12 @@ async function runOne(armName, task) {
     detail: verdict.detail,
     elapsed_ms: elapsed,
     timed_out: timedOut,
-    said: stdout.trim().split('\n').filter(Boolean).slice(-1)[0]?.slice(0, 200) ?? '',
+    steps: metrics.steps,
+    turns: metrics.turns,
+    input_tokens: metrics.input_tokens,
+    output_tokens: metrics.output_tokens,
+    total_tokens: metrics.total_tokens,
+    said: metrics.final.split('\n').filter(Boolean).slice(-1)[0]?.slice(0, 200) ?? '',
     // What makes a failure diagnosable without re-running it: a claim is not
     // evidence, but which tools were called and what they answered is.
     transcript: stdout.trim().slice(-6000),
@@ -365,7 +479,7 @@ async function main() {
       process.stdout.write(`… ${task.id} / ${arm} `)
       const result = await runOne(arm, task)
       results.push(result)
-      console.log(`${result.pass ? 'PASS' : 'FAIL'}  (${Math.round(result.elapsed_ms / 1000)}s) ${result.detail}`)
+      console.log(`${result.pass ? 'PASS' : 'FAIL'}  ${String(result.steps).padStart(2)} steps  ${Math.round(result.elapsed_ms / 1000)}s  ${result.detail}`)
     }
   }
 
@@ -375,7 +489,10 @@ async function main() {
   for (const arm of arms) {
     const rows = results.filter((row) => row.arm === arm)
     const passed = rows.filter((row) => row.pass).length
-    console.log(`${arm.padEnd(9)} ${passed}/${rows.length}`)
+    const steps = rows.reduce((sum, row) => sum + row.steps, 0)
+    const tokens = rows.reduce((sum, row) => sum + row.total_tokens, 0)
+    const seconds = Math.round(rows.reduce((sum, row) => sum + row.elapsed_ms, 0) / 1000)
+    console.log(`${arm.padEnd(9)} ${passed}/${rows.length} passed   ${String(steps).padStart(3)} model steps   ${String(tokens).padStart(8)} tokens   ${seconds}s`)
   }
   console.log(`report: ${report}`)
 }
