@@ -81,12 +81,14 @@ try {
   // 3) The joint window snapshot and the predicate evaluator answer for a real
   //    window. A Notepad window is launched through the runtime's own canonical
   //    launch action, so the frame under test is one the runtime can produce.
-  //    Only a process that appears after this launch is ever closed again, and
+  //    Only a window that appears after this launch is ever closed again, and
   //    it is closed with an ordinary window action rather than a kill.
+  //    Identity is the window handle, not the pid: Windows reuses pids, so a
+  //    pid set makes this check flaky on a busy machine.
   const before = new Set(
     ((await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 }))?.windows ?? [])
       .filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
-      .map((item) => item.pid),
+      .map((item) => item.hwnd),
   )
   const launchGraph = actionBatchGraph({
     actions: [{ action: 'launch', command: 'notepad' }],
@@ -99,7 +101,7 @@ try {
 
   const windowList = await client.get('/api/v2/desktop/windows', { timeoutMs: 60_000 })
   const notepadWindows = (windowList?.windows ?? []).filter((item) => String(item.process_name || '').toLowerCase().startsWith('notepad'))
-  const notepad = notepadWindows.find((item) => !before.has(item.pid))
+  const notepad = notepadWindows.find((item) => !before.has(item.hwnd))
   check('the launched window is enumerable', Boolean(notepad), notepad ? `hwnd=${notepad.hwnd} pid=${notepad.pid}` : 'no new notepad window')
 
   if (notepad) {
@@ -365,10 +367,11 @@ async function checkActivation() {
     (() => {
       const tool = withWeb.seen.tools.find((entry) => entry.name === 'lingdong_browser')
       const actions = tool?.parameters?.properties?.action?.enum ?? []
-      return actions.length === 21
+      return actions.length === 22
         && actions.includes('launch')
         && actions.includes('connect')
         && actions.includes('screenshot')
+        && actions.includes('upload')
         && (tool.parameters.required ?? []).join(',') === 'action'
     })(),
     'expected the declared browser action list',

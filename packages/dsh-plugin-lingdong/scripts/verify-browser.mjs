@@ -14,7 +14,7 @@
  * Usage:  node packages/dsh-plugin-lingdong/scripts/verify-browser.mjs
  */
 import { existsSync, statSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -60,9 +60,16 @@ const PAGE = `data:text/html;charset=utf-8,${encodeURIComponent(`
   <input id="field" value="" />
   <div id="keys">none</div>
   <ul><li class="item">alpha</li><li class="item">beta</li><li class="item">gamma</li></ul>
+  <input id="upload" type="file" />
+  <div id="uploaded">none</div>
   <script>
     document.getElementById('field').addEventListener('keydown', function (event) {
       if (event.key === 'Enter') document.getElementById('keys').textContent = 'enter';
+    });
+    document.getElementById('upload').addEventListener('change', function (event) {
+      var names = [];
+      for (var i = 0; i < event.target.files.length; i += 1) names.push(event.target.files[i].name);
+      document.getElementById('uploaded').textContent = names.join(',');
     });
   </script>
 </body></html>
@@ -175,6 +182,20 @@ try {
 
   const tabs = await call('tabs')
   check('tabs lists the open page', Array.isArray(stepValue(tabs.parsed, 0)) && stepValue(tabs.parsed, 0).length >= 1, JSON.stringify(stepValue(tabs.parsed, 0)).slice(0, 140))
+
+  // A file input is set directly on the page, so a real upload happens without
+  // opening the desktop's native file picker.
+  const uploadPath = path.join(tmpdir(), `lingdong-upload-${Date.now()}.txt`)
+  await writeFile(uploadPath, 'lingdong upload probe', 'utf8')
+  const uploaded = await call('upload', { selector: '#upload', path: uploadPath })
+  check('upload reports success', uploaded.parsed?.ok === true, JSON.stringify(uploaded.parsed?.steps?.[0] ?? null).slice(0, 140))
+  const uploadName = await call('eval', { code: "return document.getElementById('uploaded').textContent" })
+  check(
+    'the page itself confirms which file it received',
+    String(stepValue(uploadName.parsed, 0)) === path.basename(uploadPath),
+    `${stepValue(uploadName.parsed, 0)} (expected ${path.basename(uploadPath)})`,
+  )
+  await rm(uploadPath, { force: true })
 
   // ---- 4) the tool's own surface refuses what it cannot do ----------------
   const tool = buildBrowserTool(session)

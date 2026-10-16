@@ -526,7 +526,7 @@ export function buildBrowserTool(browser) {
           enum: [
             'status', 'launch', 'connect', 'close', 'open', 'new_tab', 'tabs', 'switch', 'close_tab',
             'read', 'find', 'click', 'type', 'press', 'select', 'hover', 'scroll', 'wait', 'eval',
-            'screenshot', 'download',
+            'screenshot', 'upload', 'download',
           ],
           description: 'Which browser operation to perform.',
         },
@@ -542,7 +542,7 @@ export function buildBrowserTool(browser) {
           description: 'Wait condition for wait: text_visible, text_hidden, element_visible, element_hidden, url_contains, title_contains, page_stable.',
         },
         target: { type: 'string', description: 'Target tab for switch: its title or its 1-based index.' },
-        path: { type: 'string', description: 'Absolute path for screenshot or download.' },
+        path: { type: 'string', description: 'Absolute path for screenshot, upload or download.' },
         full_page: { type: 'boolean', description: 'Capture the whole page rather than the viewport.' },
         timeout: { type: 'number', description: 'Seconds to wait, for click / type / wait.' },
         port: { type: 'number', description: 'CDP port for launch / connect. Defaults to the configured port.' },
@@ -659,6 +659,17 @@ export function buildBrowserTool(browser) {
         return toolResult({ ...answer, image: { ...captured, bytes: bytes.length, content_type: 'image/png' } }, [
           { type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' },
         ])
+      }
+      if (action === 'upload') {
+        if (!args.selector) throw new Error('upload needs the selector of the file input')
+        if (!args.path) throw new Error('upload needs the absolute path of the file to send')
+        // The page's file input is set directly, so no native file picker opens
+        // and the desktop's physical input queue is never involved.
+        return toolResult(await browserSteps(browser, [['browser_upload_file', {
+          selector: String(args.selector),
+          files: JSON.stringify([String(args.path)]),
+          timeout: timeout ?? 30,
+        }]]))
       }
       if (action === 'download') {
         return toolResult(await browserSteps(browser, [['browser_download', {
