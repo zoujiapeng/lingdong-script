@@ -57,6 +57,8 @@ from winpilot.vnext.runtime import (
 )
 
 
+_SUBMIT_W = live_agent._MAX_SUBMITTED_SIDE
+_SUBMIT_H = int(round(_SUBMIT_W * 630 / 1120))
 NOW_MS = 1_900_000_000_000
 HWND = 81234
 PID = 731
@@ -2765,9 +2767,12 @@ def test_fresh_observation_is_auditable_without_pixel_data(
         "frame_scope",
         "authoritative",
         "fresh",
+        "change_ratio_from_previous",
         "parameter_visibility",
     }
     assert observation["execution_medium"] == "control"
+    # 第一帧没有上一帧可比，改动比例就是 None。
+    assert observation["change_ratio_from_previous"] is None
     assert observation["observation_kind"] == (
         "fresh_authoritative_desktop_frame"
     )
@@ -2915,9 +2920,9 @@ def test_screen_first_frame_shows_desktop_without_rebinding_visible_window(
     session, raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
         images=[
-            _jpeg(1120, 630, level=90),
-            _jpeg(1120, 630, level=110),
-            _jpeg(1120, 630, level=150),
+            _jpeg(_SUBMIT_W, _SUBMIT_H, level=90),
+            _jpeg(_SUBMIT_W, _SUBMIT_H, level=110),
+            _jpeg(_SUBMIT_W, _SUBMIT_H, level=150),
         ],
         client=_RawClient(_click_responses()),
         target_reader=reader,
@@ -2967,7 +2972,7 @@ def test_screen_first_observation_survives_missing_old_window(
 ) -> None:
     session, raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
-        images=[_jpeg(1120, 630, level=90)],
+        images=[_jpeg(_SUBMIT_W, _SUBMIT_H, level=90)],
         client=_RawClient(_click_responses()),
         screen_first=True,
     )
@@ -3184,7 +3189,7 @@ def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
     ) -> str:
         assert max_side == live_agent._MAX_SUBMITTED_SIDE
         assert region == Region(0, 0, 1920, 1080)
-        return _jpeg(1120, 630, level=150)
+        return _jpeg(_SUBMIT_W, _SUBMIT_H, level=150)
 
     monkeypatch.setattr(
         live_agent,
@@ -3381,11 +3386,11 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
     session, raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
         images=[
-            _jpeg(1120, 630, level=80),
-            _jpeg(1120, 630, level=100),
-            _jpeg(1120, 630, level=120),
-            _jpeg(1120, 630, level=160),
-            _jpeg(1120, 630, level=180),
+            _jpeg(_SUBMIT_W, _SUBMIT_H, level=80),
+            _jpeg(_SUBMIT_W, _SUBMIT_H, level=100),
+            _jpeg(_SUBMIT_W, _SUBMIT_H, level=120),
+            _jpeg(_SUBMIT_W, _SUBMIT_H, level=160),
+            _jpeg(_SUBMIT_W, _SUBMIT_H, level=180),
         ],
         client=_RawClient(_click_responses() * 2),
         target_reader=reader,
@@ -3778,3 +3783,31 @@ def test_failure_stage_classification_is_explicit() -> None:
     )
     for status, detail, expected in cases:
         assert classify_live_agent_failure_stage(status, detail) == expected
+
+
+def test_screen_change_ratio_separates_noise_from_a_real_change() -> None:
+    """改动比例只用于取证：小噪声在地板以下，真实变化远高于地板。"""
+
+    import base64
+
+    import cv2
+    import numpy as np
+
+    from winpilot.orchestrator.live_agent import _screen_change_ratio
+
+    def jpeg(image: Any) -> str:
+        ok, buffer = cv2.imencode(
+            ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+        )
+        assert ok
+        return base64.b64encode(buffer.tobytes()).decode("ascii")
+
+    base = np.full((1080, 1920, 3), 40, np.uint8)
+    noise = base.copy()
+    noise[540:544, 960:964] = 200  # 4x4 像素的点，模拟光标/时钟这类噪声
+    real = base.copy()
+    real[100:600, 100:900] = 200  # 大块变化，模拟换页/弹窗
+
+    assert _screen_change_ratio(jpeg(base), jpeg(base)) == 0.0
+    assert _screen_change_ratio(jpeg(base), jpeg(noise)) < 0.0025
+    assert _screen_change_ratio(jpeg(base), jpeg(real)) > 0.05

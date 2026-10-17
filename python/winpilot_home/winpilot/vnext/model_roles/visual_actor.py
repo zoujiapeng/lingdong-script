@@ -63,73 +63,59 @@ pointer_held 会保持到你显式松开。
 
 _TOOL_DESCRIPTIONS = {
     "move_mouse": (
-        "Move the real pointer to one point in the current image and leave it "
-        "there. Set duration_ms for smooth hover or game movement."
+        "把真实指针移到当前图片上的一个点并停在那里。"
+        "duration_ms 控制平滑悬停或游戏式移动。"
     ),
     "click": (
-        "Click one point once in the current image with any mouse button. "
-        "press_duration_ms controls how long the button stays down."
+        "在当前图片上的一个点单击一次，可指定鼠标键。"
+        "press_duration_ms 控制按住时长。"
     ),
-    "double_click": (
-        "Double-click one point in the current image with any mouse button."
-    ),
+    "double_click": "在当前图片上的一个点双击，可指定鼠标键。",
     "drag": (
-        "Drag once through ordered points text written as "
-        "`x1,y1 x2,y2 ...`. The first pair is the press point and the final "
-        "pair is the release point; all pairs are submitted-image pixels. "
-        "held_keys are pressed for the same physical gesture; keep_holding "
-        "keeps the pointer pressed for a later turn."
+        "按顺序经过若干点拖拽一次，点写成 `x1,y1 x2,y2 ...`。"
+        "第一对是按下点，最后一对是松手点，坐标都是提交图片的像素。"
+        "held_keys 会在同一手势里按住；keep_holding 保持按下，留到后续回合再松。"
     ),
     "scroll": (
-        "Scroll at one point using a native wheel delta: amount < 0 scrolls "
-        "down, amount > 0 scrolls up, and 120 is one ordinary notch. Typical "
-        "page movement is 360 to 720 in magnitude."
+        "在一个点上滚动，amount 是原生滚轮增量：amount < 0 向下，"
+        "amount > 0 向上，120 是普通的一格。整页滚动通常用 360 到 720。"
     ),
     "type_text": (
-        "Enter the requested literal characters into the focused editable "
-        "control; selected text is replaced."
+        "把指定的字面字符输入到当前获得焦点的可编辑控件；"
+        "已选中的文字会被替换。"
     ),
     "hotkey": (
-        "Press one key or one ordered key chord through the physical keyboard; "
-        "this never enters literal text. Set repeat for repeated presses in one "
-        "mechanically reported action. Standard named keys include volumeup, "
-        "volumedown, volumemute, arrows, function keys, and browser keys. "
-        "Volume keys move relative to the current system level; inspect the "
-        "next screen to judge the resulting level."
+        "通过物理键盘按下一个键或一个有序组合键；它不会输入字面文字。"
+        "repeat 表示同一动作里重复按几次。常见键名有 volumeup、volumedown、"
+        "volumemute、方向键、功能键和浏览器键。音量键是相对当前系统音量调节，"
+        "要看下一张图判断结果。"
     ),
     "input_sequence": (
-        "Run one atomic human-like mouse/keyboard timeline. Use semicolons: "
-        "`move x,y [duration_ms]`; `mouse_down [button] [x,y]`; "
-        "`mouse_up [button] [x,y]`; `click [button] [x,y]`; "
-        "`key_down key`; `key_up key`; `press key`; `type_text \"literal\"`; "
-        "`wheel amount`; "
-        "`hwheel amount`; `wait duration_ms`. "
-        "Wheel amounts are native deltas (120 is one ordinary notch). "
-        "Use `move_by dx,dy duration_ms` for relative raw/game movement. "
-        "Absolute coordinates and relative deltas are from the current image. "
-        "Inputs newly held by this sequence are released automatically. "
-        "An existing pointer_held remains until explicit mouse_up or drag release."
+        "执行一段原子的、接近人手的鼠标/键盘时间线。用分号分隔："
+        "`move x,y [duration_ms]`；`mouse_down [button] [x,y]`；"
+        "`mouse_up [button] [x,y]`；`click [button] [x,y]`；"
+        "`key_down key`；`key_up key`；`press key`；`type_text \"literal\"`；"
+        "`wheel amount`；`hwheel amount`；`wait duration_ms`。"
+        "滚轮量是原生增量（120 是普通一格）。"
+        "整段手势（点输入框再粘贴或输入）用它一次提交，"
+        "不要拆成一回合一步。"
+        "相对原始/游戏移动用 `move_by dx,dy duration_ms`。"
+        "绝对坐标和相对增量都基于当前图片。"
+        "本序列新按下的键会自动释放；已存在的 pointer_held 保持到显式 mouse_up 或拖拽松手。"
     ),
     "launch_application": (
-        "Open or restore one installed application or file/URL association "
-        "by display name, alias, or path; the name the user mentioned can be "
-        "passed directly because the runtime resolves it against a local app "
-        "index that includes desktop shortcuts and Store (UWP) apps, and the "
-        "tool reports its own resolution failure. If it is already running, "
-        "this activates that instance instead of starting another."
+        "按显示名、别名或路径打开/恢复一个已安装的应用或文件、URL 关联；"
+        "用户说的名字可以直接传，runtime 会在本地应用索引（含桌面快捷方式和商店应用）里解析，"
+        "解析失败由工具自己报告。若该应用已在运行，会激活已有实例而不是再开一个。"
     ),
     "observe": (
-        "Request a fresh whole-desktop frame without physical input. Use this "
-        "to leave a repetitive local-tool chain, refresh visual context, and "
-        "reconsider the next step."
+        "在不产生物理输入的情况下取一张新的整桌面画面。"
+        "用于跳出重复的本地工具链、刷新视觉上下文、重新考虑下一步。"
     ),
     "claim_obligation_done": (
-        "Answer the user or finish without further mutation. Put the concise "
-        "answer or completed result in concise_claim."
+        "回复用户或结束，不再做任何改动。把简短回答或完成结果放进 concise_claim。"
     ),
-    "blocked": (
-        "Report an external blocker only when no supplied action can advance."
-    ),
+    "blocked": "只有在任何给定动作都无法推进时才报告外部阻塞。",
 }
 
 _MODEL_TOOL_NAMES = {
@@ -179,6 +165,16 @@ _WRITE_FILE_TOOL = "write_file"
 _LOCAL_UTILITY_TOOLS = frozenset({_DETACHED_SHELL_TOOL, _WRITE_FILE_TOOL})
 _STANDALONE_SHELL_CALL_ALLOWANCE = 4
 _SHELL_MAX_COMMAND_CHARS = 16_384
+# 同一个动作在画面没有任何变化的情况下重复到这一次数，就由 runtime 拒绝执行。
+# 这是机械层的截断，不是给模型的规则：人失败三四次就会换招，runtime 只负责把
+# "这一招已经无效"这件事说清楚，换不换招仍由模型决定。
+_REPEAT_ACTION_LIMIT = 3
+# 连续这么多帧，画面改动比例都低于地板（0.25%），说明这些动作对屏幕没有任何
+# 影响。地板值来自 config 里那条从没被读过的 visual_preflight_change_ratio：
+# 光标闪烁、时钟跳秒都在 0.0005 以下，换页/弹窗在 0.16 以上，中间是真空。
+_NO_PROGRESS_RATIO = 0.0025
+_NO_PROGRESS_LIMIT = 4
+_READ_STATE_TOOL = "read_state"
 _WINDOW_TEXT_TOOL = "read_window_text"
 _STANDALONE_WINDOW_TEXT_ALLOWANCE = 2
 _WINDOW_TEXT_MAX_CHARS = 6000
@@ -690,6 +686,45 @@ def _actor_parameters(
         raw,
         requires_local_intent=tool.requires_local_intent,
     )
+
+
+def _foreground_label_outline(
+    reader: Any,
+    turn: ActorTurnInput,
+) -> list[str] | None:
+    """前台窗口里真实存在的控件文字，压成一份很短的清单。
+
+    QQ 空间那种大图查看器，下载按钮只是一个 16 像素的图标，在整屏截图里
+    认不出来；而它的可访问名字就是"下载图片"。这是事实，不是规则。
+    """
+
+    if reader is None or not callable(reader):
+        return None
+    try:
+        result = reader({"window": "", "turn": turn})
+    except TypeError:
+        try:
+            result = reader(turn)
+        except Exception:
+            return None
+    except Exception:
+        return None
+    if not isinstance(result, Mapping):
+        return None
+    text = result.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    labels: list[str] = []
+    for line in text.splitlines():
+        label = line.strip().lstrip("-*#").strip()
+        if not label or len(label) > 24:
+            continue
+        if label in labels:
+            continue
+        labels.append(label)
+        if len(labels) >= 40:
+            break
+    return labels or None
 
 
 def _foreground_window_fact(inventory: Any) -> dict[str, Any] | None:
@@ -1229,15 +1264,14 @@ def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
                     "type": "string",
                     "default": "",
                     "description": (
-                        "Tool name or capability words. Terms are ranked "
-                        "independently; use an exact tool name when known."
+                        "工具名或能力关键词。多个词各自排序；知道确切工具名就用原名。"
                     ),
                 },
                 "connector": {
                     "type": "string",
                     "default": "",
                     "description": (
-                        "Configured MCP server name, or empty to search all."
+                        "已配置的 MCP 服务器名；留空表示全部搜索。"
                     ),
                 },
             },
@@ -1301,19 +1335,13 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
             "function": {
                 "name": _SHELL_TOOL,
                 "description": (
-                    "Run PowerShell or cmd for code, files, processes, and "
-                    "command output. Every call starts a fresh shell process, "
-                    "so directory changes never persist between calls; pass "
-                    "cwd for project-local commands. A powershell command "
-                    "already runs inside PowerShell, in this process: a nested "
-                    "powershell -Command or -File starts a separate process "
-                    "that inherits none of this one's state - not its "
-                    "variables, and not its DPI awareness, so window "
-                    "coordinates applied from a nested shell are scaled by the "
-                    "display factor. ok and exit_code describe "
-                    "only the child process; they never provide a physical "
-                    "mouse or keyboard receipt. Use the desktop input tools "
-                    "for real input."
+                    "执行 PowerShell 或 cmd，做代码、文件、进程和取命令输出。"
+                    "每次调用都是新的 shell 进程，目录切换不会保留；"
+                    "需要某个目录就传 cwd。powershell 命令本来就在 PowerShell 里跑，"
+                    "再嵌套 powershell -Command/-File 会另起进程，继承不到当前变量，"
+                    "也继承不到 DPI 感知，窗口坐标会被缩放。"
+                    "ok 和 exit_code 只说明子进程，不构成鼠标键盘的物理回执；"
+                    "真实键鼠输入用桌面输入工具。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -1322,7 +1350,7 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
                             "type": "string",
                             "minLength": 1,
                             "maxLength": _SHELL_MAX_COMMAND_CHARS,
-                            "description": "Command line.",
+                            "description": "命令行。",
                         },
                         "shell": {
                             "type": "string",
@@ -1335,7 +1363,7 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
                         "cwd": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "Working directory for this one command.",
+                            "description": "这条命令的工作目录。",
                         },
                     },
                     "required": ["command"],
@@ -1351,10 +1379,9 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
             "function": {
                 "name": _DETACHED_SHELL_TOOL,
                 "description": (
-                    "Start a PowerShell script as an independent background "
-                    "process for GUI apps, servers, or other long-running work. "
-                    "Returns immediately with a launch receipt and pollable "
-                    "log/status paths; it never claims the script completed."
+                    "把一段 PowerShell 脚本作为独立后台进程启动，用于 GUI 程序、"
+                    "服务或其它长时间任务。立刻返回启动回执和可轮询的日志/状态路径，"
+                    "不代表脚本已经跑完。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -1363,12 +1390,12 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
                             "type": "string",
                             "minLength": 1,
                             "maxLength": _SHELL_MAX_COMMAND_CHARS,
-                            "description": "Literal PowerShell script body.",
+                            "description": "字面 PowerShell 脚本内容。",
                         },
                         "name": {
                             "type": "string",
                             "default": "task",
-                            "description": "Short process label.",
+                            "description": "简短的进程标签。",
                         },
                     },
                     "required": ["script"],
@@ -1383,7 +1410,7 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
             "function": {
                 "name": _WRITE_FILE_TOOL,
                 "description": (
-                    "Write literal UTF-8 content to a file without shell escaping."
+                    "把字面 UTF-8 内容写入文件，不需要 shell 转义。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -1391,11 +1418,11 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
                         "path": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "Absolute or current-directory path.",
+                            "description": "绝对路径或当前目录下的路径。",
                         },
                         "content": {
                             "type": "string",
-                            "description": "Complete literal file content.",
+                            "description": "完整的字面文件内容。",
                         },
                     },
                     "required": ["path", "content"],
@@ -1423,12 +1450,10 @@ def _window_text_tool_definitions() -> list[dict[str, Any]]:
             "function": {
                 "name": _WINDOW_TEXT_TOOL,
                 "description": (
-                    "Read the on-screen accessibility text of one window "
-                    "without using the mouse or keyboard. `window` accepts a "
-                    "handle from list_windows or part of a window title; omit "
-                    "it to read the window that currently owns focus. An "
-                    "unresolved name returns the candidate windows instead of "
-                    "guessing."
+                    "读取某个窗口在屏幕上的真实文字，不动鼠标键盘。"
+                    "window 接受 list_windows 的句柄或标题片段；不传则读当前焦点窗口。"
+                    "名字对不上时返回候选窗口而不是乱猜。"
+                    "返回的文字就是真实标签，即使它在截图里小到看不清。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -1461,10 +1486,9 @@ def _copy_current_view_tool_definitions() -> list[dict[str, Any]]:
             "function": {
                 "name": _COPY_CURRENT_VIEW_TOOL,
                 "description": (
-                    "Replace the Windows clipboard with the exact screen image "
-                    "you are seeing in this turn. This copies; it does not "
-                    "paste or recapture. Call it while the screen you want is "
-                    "visible, then focus the destination and press Ctrl+V."
+                    "把这一回合你正在看的画面原样放进系统剪贴板。"
+                    "它只复制，不粘贴、不重新截图。"
+                    "要在目标画面可见时调用，然后切到目标处按 Ctrl+V。"
                 ),
                 "parameters": _actor_parameters_from_schema(
                     _COPY_CURRENT_VIEW_TOOL,
@@ -1497,13 +1521,10 @@ def _activate_window_tool_definitions() -> list[dict[str, Any]]:
             "function": {
                 "name": _ACTIVATE_WINDOW_TOOL,
                 "description": (
-                    "Bring one window to the front: restore it if minimized, "
-                    "raise it above its sibling windows, and try to focus it. "
-                    "`window` is a handle from list_windows or part of a title "
-                    "or process name. Use this when the screen you are looking "
-                    "at belongs to the wrong window of an application - for "
-                    "example a blank full-screen window that shares its title "
-                    "with the real panel."
+                    "把一个窗口提到最前：最小化的先还原，抬到同级窗口之上，并尝试聚焦。"
+                    "window 是 list_windows 的句柄，或标题、进程名的一部分。"
+                    "当眼前的画面属于同一应用的另一个窗口时用它，"
+                    "例如一个和真实面板同名的全屏空白窗口。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -1534,7 +1555,7 @@ def _list_windows_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _LIST_WINDOWS_TOOL,
-                "description": "List visible windows and background applications.",
+                "description": "列出可见窗口和后台应用。",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -1721,6 +1742,137 @@ def _owned_tool_exchange(
     if type(reasoning) is str:
         assistant["reasoning_content"] = reasoning
     return assistant, call_id, name, arguments
+
+
+# 坐标按网格归并后再算签名：模型反复点同一个地方时坐标会在几像素内抖动，
+# 逐字节比较就永远识别不出"这是同一个动作"。
+_SIGNATURE_POINT_GRID = 16
+
+
+def _quantized_argument(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return int(round(float(value) / _SIGNATURE_POINT_GRID)) * _SIGNATURE_POINT_GRID
+    if isinstance(value, Mapping):
+        return {
+            str(key): _quantized_argument(item)
+            for key, item in sorted(value.items(), key=lambda kv: str(kv[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_quantized_argument(item) for item in value]
+    return value
+
+
+def _proposal_signature_value(proposal: Mapping[str, Any]) -> str:
+    """同一动作 + 同一参数（坐标按网格归并）的稳定标识。"""
+
+    return _canonical_json(
+        {
+            "action": str(proposal.get("action") or proposal.get("kind") or ""),
+            "args": _quantized_argument(proposal.get("args") or {}),
+        }
+    )
+
+
+def _clipboard_facts(reader: Any) -> dict[str, Any] | None:
+    """Read the clipboard's formats as plain facts, or None when unavailable."""
+
+    if reader is None:
+        return None
+    try:
+        snapshot = reader()
+    except Exception:
+        return None
+    if not isinstance(snapshot, Mapping) or not snapshot.get("ok"):
+        return None
+    formats = [
+        str(name)[:64]
+        for name in list(snapshot.get("formats") or [])[:12]
+        if str(name).strip()
+    ]
+    if not formats:
+        return {"empty": True}
+    return {
+        "formats": formats,
+        "has_image": bool(snapshot.get("has_image")),
+    }
+
+
+def _with_clipboard_facts(
+    result: dict[str, Any],
+    reader: Any,
+) -> dict[str, Any]:
+    """Attach the post-copy clipboard state to a copy_current_view result."""
+
+    facts = _clipboard_facts(reader)
+    if facts is None or result.get("ok") is False:
+        return result
+    enriched = dict(result)
+    enriched["clipboard"] = facts
+    return enriched
+
+
+def _read_state_tool_definitions() -> list[dict[str, Any]]:
+    """One read-only tool that returns the facts a screen frame cannot show.
+
+    The clipboard and the last few mechanical receipts are state the model
+    needs in order to stop repeating an action that already worked.  It names
+    facts only; it never judges whether the task is done.
+    """
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _READ_STATE_TOOL,
+                "description": (
+                    "读截图看不出来的物理状态：剪贴板现在装着什么，"
+                    "以及本次运行最近三次工具回执。"
+                    "当你拿不准某次复制、粘贴或按键到底有没有生效时用它，"
+                    "不要重复同一个动作。"
+                ),
+                "parameters": _actor_parameters_from_schema(
+                    _READ_STATE_TOOL,
+                    {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    requires_local_intent=False,
+                ),
+                "strict": True,
+            },
+        },
+    ]
+
+
+def _call_read_state(
+    *,
+    clipboard_reader: Any,
+    receipts: Sequence[Mapping[str, Any]],
+    windows_reader: Any,
+) -> dict[str, Any]:
+    """Return clipboard formats, foreground window and recent receipts."""
+
+    result: dict[str, Any] = {"ok": True}
+    facts = _clipboard_facts(clipboard_reader)
+    result["clipboard"] = facts if facts is not None else {"unavailable": True}
+    if windows_reader is not None:
+        try:
+            inventory = windows_reader()
+        except Exception:
+            inventory = None
+        foreground = (
+            _foreground_window_fact(inventory)
+            if isinstance(inventory, Mapping)
+            else None
+        )
+        if foreground is not None:
+            result["foreground_window"] = foreground
+    result["recent"] = [dict(item) for item in list(receipts)[-3:]]
+    return _actionable_tool_result(_READ_STATE_TOOL, result)
 
 
 def _call_copy_current_view(
@@ -2340,6 +2492,7 @@ class LiveVisualActor:
         shell_runner: Any | None = None,
         window_text_reader: Any | None = None,
         copy_current_view_runner: Any | None = None,
+        clipboard_reader: Any | None = None,
         windows_reader: Any | None = None,
         activate_window_runner: Any | None = None,
         history: Sequence[Mapping[str, Any]] = (),
@@ -2386,6 +2539,14 @@ class LiveVisualActor:
             if callable(copy_current_view_runner)
             else None
         )
+        self._clipboard_reader = (
+            clipboard_reader if callable(clipboard_reader) else None
+        )
+        self._recent_receipts: list[dict[str, Any]] = []
+        self._last_proposal_signature = ""
+        self._last_frame_sha = ""
+        self._repeat_count = 1
+        self._no_progress_streak = 0
         self._windows_reader = (
             windows_reader if callable(windows_reader) else None
         )
@@ -2630,6 +2791,14 @@ class LiveVisualActor:
             "message": detail.strip()[:4096],
             "ok": not failed,
         }
+        self._recent_receipts.append(
+            {
+                "tool": _RUNTIME_TOOL_NAMES.get(name, name),
+                "ok": not failed,
+                "detail": detail.strip()[:240],
+            }
+        )
+        del self._recent_receipts[:-3]
         replay_frame = result.get("_replay_frame")
         if name == _COPY_CURRENT_VIEW_TOOL and type(replay_frame) is str:
             activity["arguments"] = {"replay_frame": replay_frame}
@@ -2700,6 +2869,11 @@ class LiveVisualActor:
             if self._activate_window_runner is not None
             else []
         )
+        read_state_tools = (
+            _read_state_tool_definitions()
+            if (self._clipboard_reader is not None or self._windows_reader is not None)
+            else []
+        )
         connector_tools = _connector_tool_definitions(self._connector_gateway)
         turn_context = turn.to_dict()
         turn_context.pop("tools")
@@ -2758,6 +2932,24 @@ class LiveVisualActor:
                 foreground = _foreground_window_fact(window_inventory)
                 if foreground is not None:
                     context["foreground_window"] = foreground
+        clipboard_facts = _clipboard_facts(self._clipboard_reader)
+        if clipboard_facts is not None:
+            context["clipboard"] = clipboard_facts
+        # 这一步的动作有没有让画面变化：用上一帧到这一帧的改动比例判断，
+        # 只累计一个连续计数，供下面把"连续没变化"作为事实说出来。
+        ratio = getattr(turn.frame, "change_ratio_from_previous", None)
+        if isinstance(ratio, (int, float)) and float(ratio) < _NO_PROGRESS_RATIO:
+            self._no_progress_streak += 1
+        else:
+            self._no_progress_streak = 0
+        # 画面真的动了的时候不多花一次 UIA 读取；只有上一步没推动画面，
+        # 才把前台窗口里真实存在的控件文字摆到模型眼前。
+        if self._no_progress_streak and self._window_text_reader is not None:
+            foreground_labels = _foreground_label_outline(
+                self._window_text_reader, turn
+            )
+            if foreground_labels:
+                context["foreground_labels"] = foreground_labels
         previous_action = context.get("previous_action")
         if (
             isinstance(previous_action, dict)
@@ -2864,6 +3056,7 @@ class LiveVisualActor:
                 *shell_tools,
                 *window_text_tools,
                 *copy_current_view_tools,
+                *read_state_tools,
                 *windows_tools,
                 *activate_tools,
                 *connector_tools,
@@ -3003,7 +3196,7 @@ class LiveVisualActor:
                     envelope: tuple[str, str, dict[str, Any]],
                 ) -> dict[str, Any]:
                     _call_id, name, arguments = envelope
-                    return _execute_visual_batch_call(
+                    result = _execute_visual_batch_call(
                         name,
                         arguments,
                         shell_runner=self._shell_runner,
@@ -3017,6 +3210,11 @@ class LiveVisualActor:
                         timeout_s=min(30.0, self._total_timeout_s),
                         stop_event=stop_event,
                     )
+                    if name == _COPY_CURRENT_VIEW_TOOL:
+                        return _with_clipboard_facts(
+                            result, self._clipboard_reader
+                        )
+                    return result
 
                 with ThreadPoolExecutor(
                     thread_name_prefix="visual-actor-tool",
@@ -3145,10 +3343,13 @@ class LiveVisualActor:
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
                 )
-                result = _call_copy_current_view(
-                    self._copy_current_view_runner,
-                    image_b64=image_b64,
-                    decision_id=_decision_id(turn, image_b64),
+                result = _with_clipboard_facts(
+                    _call_copy_current_view(
+                        self._copy_current_view_runner,
+                        image_b64=image_b64,
+                        decision_id=_decision_id(turn, image_b64),
+                    ),
+                    self._clipboard_reader,
                 )
                 self._record_tool_result(name, result)
                 connector_messages = [
@@ -3227,6 +3428,40 @@ class LiveVisualActor:
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
                 continue
+            read_state = None
+            if read_state_tools:
+                try:
+                    read_state = _owned_tool_exchange(
+                        outcome.response,
+                        _READ_STATE_TOOL,
+                        expected_arguments={},
+                    )
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if read_state is not None:
+                assistant, call_id, name, _arguments = read_state
+                self._record_tool_start(
+                    _initial_calls_from_response(outcome.response)[0]
+                )
+                result = _call_read_state(
+                    clipboard_reader=self._clipboard_reader,
+                    receipts=self._recent_receipts,
+                    windows_reader=turn_windows_reader,
+                )
+                self._record_tool_result(name, result)
+                state_messages = [
+                    assistant,
+                    _projected_tool_message(
+                        seen_tool_results,
+                        name=name,
+                        call_id=call_id,
+                        result=result,
+                        model_calls_remaining=model_calls_remaining,
+                    ),
+                ]
+                current_exchange.extend(state_messages)
+                provider_request["messages"].extend(state_messages)
+                continue
             try:
                 connector = _connector_exchange(outcome.response)
             except LiveModelRoleError as exc:
@@ -3250,6 +3485,28 @@ class LiveVisualActor:
                         frozenset(tool.name for tool in turn.tools),
                         pointer_held=turn.pointer_held,
                     )
+                    signature = _proposal_signature_value(decision.proposal)
+                    self._last_proposal_signature = signature
+                    if self._no_progress_streak >= _NO_PROGRESS_LIMIT:
+                        # 连续 4 帧画面没有任何实质变化：这一步不论换成什么
+                        # 动作，都还没证明能推进任务。runtime 不再执行，只把
+                        # 这个事实说清楚；怎么换招仍然是模型自己的事。
+                        stale_message = [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "runtime 没有执行这次调用：最近连续 "
+                                    f"{self._no_progress_streak} 次动作之后，"
+                                    "画面没有任何实质变化（改动低于 0.25%）。"
+                                    "这条路目前是死的，换一个不同的动作、"
+                                    "工具或目标。"
+                                ),
+                            }
+                        ]
+                        current_exchange.extend(stale_message)
+                        provider_request["messages"].extend(stale_message)
+                        self._no_progress_streak = 0
+                        continue
                     self._record_tool_start(
                         _initial_calls_from_response(outcome.response)[0]
                     )

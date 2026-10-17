@@ -481,19 +481,19 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         tool["function"]["name"]: tool["function"]["description"]
         for tool in actor_request["tools"]
     }
-    assert "once" in descriptions["click"]
-    assert "Double-click" in descriptions["double_click"]
-    assert "through ordered points text" in descriptions["drag"]
-    assert "amount < 0 scrolls" in descriptions["scroll"]
-    assert "120 is one ordinary notch" in descriptions["scroll"]
-    assert "selected text is replaced" in descriptions["type_text"]
-    assert "one key or one ordered key chord" in descriptions["press_key"]
+    assert "单击一次" in descriptions["click"]
+    assert "双击" in descriptions["double_click"]
+    assert "第一对是按下点" in descriptions["drag"]
+    assert "amount < 0 向下" in descriptions["scroll"]
+    assert "120 是普通的一格" in descriptions["scroll"]
+    assert "已选中的文字会被替换" in descriptions["type_text"]
+    assert "有序组合键" in descriptions["press_key"]
     assert "repeat" in descriptions["press_key"]
     assert "volumedown" in descriptions["press_key"]
-    assert "relative to the current system level" in descriptions["press_key"]
+    assert "相对当前系统音量调节" in descriptions["press_key"]
     assert "PrintScreen" not in descriptions["press_key"]
-    assert "Answer the user" in descriptions["reply_to_user"]
-    assert "external blocker" in descriptions["blocked"]
+    assert "回复用户" in descriptions["reply_to_user"]
+    assert "外部阻塞" in descriptions["blocked"]
     assert "response_format" not in actor_request
     strict_schemas = [
         tool["function"]["parameters"]
@@ -2063,10 +2063,8 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
         for tool in tools
         if tool["function"]["name"] == "run_shell"
     )
-    assert "never provide a physical mouse or keyboard receipt" in (
-        shell_description
-    )
-    assert "directory changes never persist" in shell_description
+    assert "不构成鼠标键盘的物理回执" in shell_description
+    assert "目录切换不会保留" in shell_description
 
 
 def test_visual_turn_can_run_shell_before_gui_action() -> None:
@@ -3695,3 +3693,202 @@ def test_activate_window_ambiguity_reaches_the_model_as_candidates() -> None:
     assert result["ok"] is False
     assert len(result["matching_windows"]) == 2
     assert "pass one handle" in result["error"]
+
+
+def test_copy_current_view_result_names_the_clipboard_formats() -> None:
+    """A paste loop starts when the model cannot tell a copy succeeded."""
+
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="copy_screen_to_clipboard",
+                arguments={},
+                call_id="copy-call",
+            ),
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        copy_current_view_runner=_RecordingCurrentViewRunner(),
+        clipboard_reader=lambda: {
+            "ok": True,
+            "formats": ["PNG", "CF_8"],
+            "has_image": True,
+        },
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    tool_messages = [
+        message
+        for message in clients[0].requests[1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    copy_result = json.loads(tool_messages[-1]["content"])
+    assert copy_result["ok"] is True
+    assert copy_result["clipboard"] == {
+        "formats": ["PNG", "CF_8"],
+        "has_image": True,
+    }
+
+
+def test_read_state_names_clipboard_and_recent_receipts() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="copy_screen_to_clipboard",
+                arguments={},
+                call_id="copy-call",
+            ),
+            _tool_response(name="read_state", arguments={}, call_id="state-call"),
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        copy_current_view_runner=_RecordingCurrentViewRunner(),
+        clipboard_reader=lambda: {
+            "ok": True,
+            "formats": ["PNG"],
+            "has_image": True,
+        },
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    tool_messages = [
+        message
+        for message in clients[0].requests[2]["messages"]
+        if message.get("role") == "tool"
+    ]
+    state_result = json.loads(tool_messages[-1]["content"])
+    assert state_result["ok"] is True
+    assert state_result["clipboard"]["has_image"] is True
+    assert state_result["clipboard"]["formats"] == ["PNG"]
+    assert [item["tool"] for item in state_result["recent"]] == [
+        "copy_current_view"
+    ]
+
+
+def test_read_state_tool_is_hidden_without_a_state_reader() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    names = {
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    }
+    assert "read_state" not in names
+
+
+def test_no_progress_turns_are_refused_by_the_runtime() -> None:
+    """连续 4 帧画面没实质变化后，runtime 拒绝下一步并说清事实。"""
+
+    click = _tool_response(
+        name="click",
+        arguments={
+            "image_x": 100,
+            "image_y": 200,
+            "local_intent": "click somewhere on the photo",
+        },
+        call_id="click-call",
+    )
+    _, clients = _build_clients(
+        [
+            click,
+            deepcopy(click),
+            deepcopy(click),
+            deepcopy(click),
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    stale = replace(
+        _actor_turn(),
+        frame=replace(_actor_turn().frame, change_ratio_from_previous=0.0),
+    )
+
+    for _ in range(3):
+        decision = actor.propose(
+            stale,
+            image_b64=_JPEG_B64,
+            image_media_type="image/jpeg",
+            submitted_size=(640, 480),
+        )
+        assert decision.proposal["action"] == "click"
+
+    fourth = actor.propose(
+        stale,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert fourth.proposal["action"] == "type_text"
+    nudges = [
+        message
+        for message in clients[0].requests[4]["messages"]
+        if message.get("role") == "user"
+        and "画面没有任何实质变化" in str(message.get("content"))
+    ]
+    assert nudges, "runtime must report the no-progress streak as a fact"

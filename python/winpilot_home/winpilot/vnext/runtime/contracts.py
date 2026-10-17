@@ -347,6 +347,9 @@ class RuntimeFrame:
     submitted_size: tuple[int, int]
     image_b64: str
     image_sha256: str
+    # 上一张权威帧到这一帧的改动比例（0..1）。只作为事实带给模型，
+    # 让"连续几步画面没动"这件事在对话里可见；runtime 不据此判断对错。
+    change_ratio_from_previous: float | None = None
     media_type: str = "image/jpeg"
     format: str = RUNTIME_FRAME_FORMAT
 
@@ -659,6 +662,7 @@ class ActorFrameView:
     fresh: bool
     coordinate_space: str = "submitted_image_pixels"
     window_hwnd: int | None = None
+    change_ratio_from_previous: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("image_available", "authoritative", "fresh"):
@@ -679,6 +683,7 @@ class ActorFrameView:
             "authoritative": self.authoritative,
             "fresh": self.fresh,
             "coordinate_space": self.coordinate_space,
+            "change_ratio_from_previous": self.change_ratio_from_previous,
         }
 
 
@@ -845,6 +850,9 @@ def project_actor_turn_input(
             authoritative=True,
             fresh=True,
             window_hwnd=snapshot.frame.hwnd,
+            change_ratio_from_previous=(
+                snapshot.frame.change_ratio_from_previous
+            ),
         ),
         tools=tools,
         task_state=task_state,

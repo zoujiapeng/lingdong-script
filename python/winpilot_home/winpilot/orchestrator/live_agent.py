@@ -94,7 +94,7 @@ from .runtime import ArpExecution, NodeResult
 
 _RUNTIME_VERSION = "vnext"
 _OBLIGATION_ID = "full-goal"
-_MAX_SUBMITTED_SIDE = 1120
+_MAX_SUBMITTED_SIDE = 1568
 _MAX_REJECTION_FEEDBACK_CHARS = 512
 _NON_WHITESPACE_PATTERN = r"\S"
 _BLOCKER_KIND_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
@@ -632,6 +632,7 @@ def _activate_window_runner_factory() -> Any:
             import win32gui
 
             user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
             minimized_before = bool(win32gui.IsIconic(hwnd))
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             # Raise above siblings first: a full-screen placeholder of the same
@@ -679,6 +680,51 @@ def _activate_window_runner_factory() -> Any:
                 except Exception:
                     pass
                 focused = int(user32.GetForegroundWindow() or 0) == int(hwnd)
+            if not focused:
+                # The foreground lock only yields to a thread that shares the
+                # current foreground thread's input queue.  Measured need: a
+                # full-screen image viewer kept the foreground for minutes and
+                # every plain SetForegroundWindow silently failed, so the
+                # runtime reported became_foreground=false and the model had no
+                # mechanical way back to its own window.
+                try:
+                    current = int(user32.GetForegroundWindow() or 0)
+                    current_thread = (
+                        int(user32.GetWindowThreadProcessId(current, None))
+                        if current
+                        else 0
+                    )
+                    own_thread = int(kernel32.GetCurrentThreadId())
+                    attached = False
+                    if current_thread and current_thread != own_thread:
+                        attached = bool(
+                            user32.AttachThreadInput(
+                                current_thread, own_thread, True
+                            )
+                        )
+                    try:
+                        user32.BringWindowToTop(hwnd)
+                        user32.SetForegroundWindow(hwnd)
+                        user32.SetActiveWindow(hwnd)
+                    finally:
+                        if attached:
+                            user32.AttachThreadInput(
+                                current_thread, own_thread, False
+                            )
+                except Exception:
+                    pass
+                focused = int(user32.GetForegroundWindow() or 0) == int(hwnd)
+            foreground_now = int(user32.GetForegroundWindow() or 0)
+            blocked_by = None
+            if not focused and foreground_now and foreground_now != int(hwnd):
+                ex_style = int(
+                    user32.GetWindowLongW(foreground_now, -20) or 0
+                )
+                blocked_by = {
+                    "hwnd": foreground_now,
+                    "title": _window_title(foreground_now),
+                    "topmost": bool(ex_style & 0x00000008),
+                }
             return {
                 "format": _ACTIVATE_FORMAT,
                 "ok": True,
@@ -687,6 +733,11 @@ def _activate_window_runner_factory() -> Any:
                 "was_minimized": minimized_before,
                 "became_foreground": focused,
                 "previous_foreground_hwnd": previous or None,
+                "foreground_hwnd": foreground_now or None,
+                "foreground_title": (
+                    _window_title(foreground_now) if foreground_now else None
+                ),
+                "blocked_by": blocked_by,
             }
         except Exception as exc:
             return {
@@ -891,6 +942,62 @@ def _clipboard_text_factory() -> Any:
         }
 
     return write
+
+
+_IMAGE_CLIPBOARD_FORMAT_IDS = frozenset({2, 8, 17})  # CF_BITMAP/CF_DIB/CF_DIBV5
+
+
+def _clipboard_formats_factory() -> Any:
+    """Report what the OS clipboard currently holds, without reading its bytes.
+
+    Facts only. The clipboard is the one piece of state a screen frame cannot
+    show: a model that copied an image, pasted it and then cannot tell whether
+    the paste landed will paste again, and again. Naming the formats is the
+    cheapest way to stop that retry loop without adding a verifier.
+    """
+
+    def read() -> dict[str, Any]:
+        try:
+            import win32clipboard
+        except Exception as exc:  # pragma: no cover - Windows only
+            return {"ok": False, "error": str(exc)}
+        try:
+            win32clipboard.OpenClipboard()
+        except Exception as exc:
+            return {"ok": False, "error": f"clipboard is busy: {exc}"}
+        formats: list[str] = []
+        try:
+            identifier = 0
+            for _ in range(64):
+                identifier = win32clipboard.EnumClipboardFormats(identifier)
+                if not identifier:
+                    break
+                try:
+                    name = win32clipboard.GetClipboardFormatName(identifier)
+                except Exception:
+                    name = ""
+                if name:
+                    formats.append(str(name))
+                elif identifier in _IMAGE_CLIPBOARD_FORMAT_IDS:
+                    formats.append(f"CF_{identifier}")
+        except Exception:
+            pass
+        finally:
+            try:
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+        has_image = any(
+            "png" in name.casefold() or name.startswith("CF_")
+            for name in formats
+        ) or any(name.casefold().startswith("image/") for name in formats)
+        return {
+            "ok": True,
+            "formats": formats[:24],
+            "has_image": bool(has_image),
+        }
+
+    return read
 
 
 def _read_win32_foreground_root() -> int | None:
@@ -1355,9 +1462,8 @@ def _actor_tools() -> tuple[ActorToolView, ...]:
                     "minLength": 1,
                     "maxLength": 512,
                     "description": (
-                        "Display name, alias, or path as the user mentioned "
-                        "it; resolved against the local app index (desktop "
-                        "shortcuts and Store apps included)."
+                        "用户怎么说的就怎么传：显示名、别名或路径；"
+                        "runtime 会在本地应用索引里解析（含桌面快捷方式和商店应用）。"
                     ),
                 },
                 "arguments": {
@@ -1462,6 +1568,50 @@ def _jpeg_payload(image_b64: str) -> bytes | None:
     ):
         return None
     return payload
+
+
+def _screen_change_ratio(
+    previous_b64: str,
+    current_b64: str,
+) -> float | None:
+    """两帧之间"真正变了多少"的比例（0..1），只作为证据记录。
+
+    只统计灰阶差大于 12 的像素，并先降到 1/4 尺寸：光标闪烁、时钟跳秒这类
+    小噪声被过滤掉，换页、弹窗、滚动这类真实变化仍然明显。这个数不参与任何
+    判断，也不拦截任何动作。
+    """
+
+    try:
+        import base64
+
+        import cv2
+        import numpy as np
+    except Exception:
+        return None
+    try:
+        before = cv2.imdecode(
+            np.frombuffer(base64.b64decode(previous_b64), np.uint8),
+            cv2.IMREAD_GRAYSCALE,
+        )
+        after = cv2.imdecode(
+            np.frombuffer(base64.b64decode(current_b64), np.uint8),
+            cv2.IMREAD_GRAYSCALE,
+        )
+        if before is None or after is None or before.shape != after.shape:
+            return None
+        before = cv2.resize(
+            before, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA
+        )
+        after = cv2.resize(
+            after, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA
+        )
+        delta = cv2.absdiff(before, after)
+        return round(
+            float((delta > 12).sum()) / max(1, int(delta.size)),
+            6,
+        )
+    except Exception:
+        return None
 
 
 def _jpeg_dimensions(image_b64: str) -> tuple[int, int] | None:
@@ -1630,6 +1780,7 @@ class _LiveRuntimeState:
         self._observer = observer
         self._pause_controller = pause_controller
         self._pointer_state_reader: Callable[[], PointerLeaseState] | None = None
+        self._last_change_ratio: float | None = None
 
     def bind_pointer_state_reader(
         self,
@@ -1679,6 +1830,12 @@ class _LiveRuntimeState:
             != captured.submitted_size
         ):
             raise RuntimeError("fresh full-desktop JPEG capture failed")
+        change_ratio = (
+            _screen_change_ratio(previous.image_b64, captured.image_b64)
+            if previous is not None
+            else None
+        )
+        self._last_change_ratio = change_ratio
         committed = self._observer.commit(captured)
         BUS.publish(
             "vnext_gui_observation",
@@ -1695,6 +1852,8 @@ class _LiveRuntimeState:
             frame_scope=committed.scope,
             authoritative=True,
             fresh=True,
+            # 上个权威帧到这一帧的改动比例：只记录，不判断。
+            change_ratio_from_previous=change_ratio,
             parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
         )
         return committed
@@ -1709,6 +1868,7 @@ class _LiveRuntimeState:
             submitted_size=state.submitted_size,
             image_b64=state.image_b64,
             image_sha256=state.image_sha256,
+            change_ratio_from_previous=self._last_change_ratio,
         )
 
     def _snapshot(self, state: FrameState) -> RuntimeSnapshot:
@@ -2424,6 +2584,7 @@ def _build_actor_resources(
             role_kwargs["copy_current_view_runner"] = (
                 _copy_current_view_runner_factory(run_id)
             )
+            role_kwargs["clipboard_reader"] = _clipboard_formats_factory()
             role_kwargs["windows_reader"] = _windows_reader_factory()
             role_kwargs["activate_window_runner"] = (
                 _activate_window_runner_factory()
