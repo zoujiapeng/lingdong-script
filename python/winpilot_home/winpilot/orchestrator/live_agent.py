@@ -512,15 +512,226 @@ def _process_executable_identity(process_id: int) -> str:
         kernel32.CloseHandle(handle)
 
 
+def _window_inventory_rows(include_background: bool) -> list[dict[str, Any]]:
+    """Current top-level windows, optionally including minimized ones."""
+
+    from ..action.clipboard_ops import list_windows_backend
+
+    inventory = list_windows_backend()
+    if not isinstance(inventory, Mapping):
+        return []
+    rows: list[dict[str, Any]] = []
+    for key in ("windows", "background_applications") if include_background else ("windows",):
+        items = inventory.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, Mapping):
+                row = dict(item)
+                if not row.get("hwnd"):
+                    continue
+                rows.append(row)
+    return rows
+
+
+def _resolve_window_selector(
+    selector: str,
+    *,
+    include_background: bool,
+    format_name: str,
+) -> tuple[int | None, dict[str, Any] | None]:
+    """Return (hwnd, None) or (None, explanatory result with candidates).
+
+    A handle is accepted directly.  A name matches the title or the process name
+    across the requested window set; ambiguity returns every candidate instead of
+    silently picking one - the caller's model chooses.
+    """
+
+    text = str(selector or "").strip()
+    if not text:
+        return _read_win32_foreground_root(), None
+    rows = _window_inventory_rows(include_background)
+    if text.isdigit():
+        hwnd = int(text)
+        if any(int(row.get("hwnd") or 0) == hwnd for row in rows):
+            return hwnd, None
+        from ..action.clipboard_ops import window_info_backend
+
+        info = window_info_backend(hwnd)
+        if isinstance(info, Mapping) and info.get("ok") is True:
+            return hwnd, None
+        return None, {
+            "format": format_name,
+            "ok": False,
+            "error": f"no top-level window has handle {hwnd}",
+            "available_windows": _window_choices(rows),
+        }
+    needle = text.casefold()
+    matched = [
+        row
+        for row in rows
+        if needle in str(row.get("title") or "").casefold()
+        or needle in str(row.get("process_name") or "").casefold()
+    ]
+    if len(matched) == 1:
+        return int(matched[0].get("hwnd") or 0), None
+    if len(matched) > 1:
+        return None, {
+            "format": format_name,
+            "ok": False,
+            "error": f"{len(matched)} windows match {text!r}; pass one handle",
+            "matching_windows": _window_choices(matched),
+        }
+    return None, {
+        "format": format_name,
+        "ok": False,
+        "error": f"no window title or process name contains {text!r}",
+        "available_windows": _window_choices(rows),
+    }
+
+
+def _activate_window_runner_factory() -> Any:
+    """Restore, raise and focus one named window.
+
+    Measured need: an application can own several top-level windows with the
+    same title, and the wrong one can be a full-screen placeholder that renders
+    black over the real panel (QQ does exactly this: its "blank" renderer is a
+    second window titled "QQ").  Every click then lands on the placeholder,
+    nothing changes, and the only human move - switch to the other window -
+    had no equivalent in the model's tool surface.
+
+    Raising is a fact about z-order, not a policy: the window is restored,
+    placed above its siblings, and the focus attempt is reported honestly
+    (``became_foreground`` may be false when another process holds the
+    foreground lock; the raise still makes clicks land on this window).
+    """
+
+    _ACTIVATE_FORMAT = "activate-window/1"
+
+    def activate(request: Any) -> dict[str, Any]:
+        selector = ""
+        if isinstance(request, Mapping):
+            selector = str(request.get("window") or "")
+        hwnd, failure = _resolve_window_selector(
+            selector,
+            include_background=True,
+            format_name=_ACTIVATE_FORMAT,
+        )
+        if failure is not None:
+            return failure
+        if not hwnd:
+            return {
+                "format": _ACTIVATE_FORMAT,
+                "ok": False,
+                "error": "no window was named and no foreground window is available",
+            }
+        try:
+            import ctypes
+
+            import win32con
+            import win32gui
+
+            user32 = ctypes.windll.user32
+            minimized_before = bool(win32gui.IsIconic(hwnd))
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            # Raise above siblings first: a full-screen placeholder of the same
+            # app can own the top of the z-order without being restorable by a
+            # plain activation call.
+            win32gui.SetWindowPos(
+                hwnd,
+                win32con.HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+            )
+            previous = int(user32.GetForegroundWindow() or 0)
+            focused = False
+            if previous == int(hwnd):
+                focused = True
+            else:
+                # The documented topmost bounce makes the focus request legal
+                # when another process currently owns the foreground.
+                try:
+                    win32gui.SetWindowPos(
+                        hwnd,
+                        win32con.HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE,
+                    )
+                    win32gui.SetWindowPos(
+                        hwnd,
+                        win32con.HWND_NOTOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE,
+                    )
+                except Exception:
+                    pass
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+                focused = int(user32.GetForegroundWindow() or 0) == int(hwnd)
+            return {
+                "format": _ACTIVATE_FORMAT,
+                "ok": True,
+                "hwnd": int(hwnd),
+                "title": _window_title(int(hwnd)),
+                "was_minimized": minimized_before,
+                "became_foreground": focused,
+                "previous_foreground_hwnd": previous or None,
+            }
+        except Exception as exc:
+            return {
+                "format": _ACTIVATE_FORMAT,
+                "ok": False,
+                "hwnd": int(hwnd),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    return activate
+
+
 def _window_text_reader_factory() -> Any:
-    """Read-only UIA text from the window that owns focus when called."""
+    """Read-only UIA text of the window the model names, else of the focus.
+
+    The reader used to answer only "the window that owns focus", so reading a
+    value that lived in a second window required activating it first - a focus
+    change the model never asked for and a hidden constraint on which windows
+    it may read.  A named handle or title fragment is now honoured, and an
+    ambiguous or unknown name comes back with the candidates instead of a
+    guess.
+    """
     _WINDOW_TEXT_FORMAT = "window-text/1"
     _WINDOW_TEXT_MAX_CHARS = 6000
 
-    def read(turn: Any) -> dict[str, Any]:
-        # A full-desktop frame has no owner.  Read the live focus surface
-        # instead of treating the frame's compatibility anchor as authority.
-        hwnd = _read_win32_foreground_root()
+    def resolve_window(selector: str) -> tuple[int | None, dict[str, Any] | None]:
+        # Background windows are included: an application can own a visible
+        # placeholder plus the real panel that is minimized behind it (measured
+        # on QQ), and a focus-only list would hide the one worth reading.
+        return _resolve_window_selector(
+            selector,
+            include_background=True,
+            format_name=_WINDOW_TEXT_FORMAT,
+        )
+
+    def read(request: Any) -> dict[str, Any]:
+        # A full-desktop frame has no owner.  A named window is read directly;
+        # otherwise the live focus surface is read instead of treating the
+        # frame's compatibility anchor as authority.
+        selector = ""
+        if isinstance(request, Mapping):
+            selector = str(request.get("window") or "")
+        hwnd, failure = resolve_window(selector)
+        if failure is not None:
+            return failure
         if not hwnd:
             return {
                 "format": _WINDOW_TEXT_FORMAT,
@@ -550,11 +761,41 @@ def _window_text_reader_factory() -> Any:
         return {
             "format": _WINDOW_TEXT_FORMAT,
             "window_hwnd": int(hwnd),
+            "window_title": _window_title(int(hwnd)),
             "element_count": len(lines),
             "text": joined[:_WINDOW_TEXT_MAX_CHARS],
         }
 
     return read
+
+
+def _window_choices(rows: Any, limit: int = 8) -> list[dict[str, Any]]:
+    """Bounded handle-only choices so a failed lookup stays actionable."""
+
+    if not isinstance(rows, list):
+        return []
+    choices: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        if not isinstance(row, Mapping):
+            continue
+        hwnd = int(row.get("hwnd") or 0)
+        title = str(row.get("title") or "")[:120]
+        if hwnd:
+            choice: dict[str, Any] = {"hwnd": hwnd, "title": title}
+            process_name = str(row.get("process_name") or "").strip()
+            if process_name:
+                choice["process_name"] = process_name[:80]
+            choices.append(choice)
+    return choices
+
+
+def _window_title(hwnd: int) -> str:
+    try:
+        import win32gui
+
+        return str(win32gui.GetWindowText(int(hwnd)) or "")[:200]
+    except Exception:
+        return ""
 
 
 def _copy_current_view_runner_factory(run_id: str) -> Any:
@@ -589,6 +830,67 @@ def _windows_reader_factory() -> Any:
     from ..vnext.desktop_ops import list_windows
 
     return lambda: list_windows(list_windows_backend)
+
+
+def _window_facts_factory() -> Any:
+    """Name one handle's window for a press receipt (title/class/pid)."""
+
+    from ..action.clipboard_ops import window_info_backend
+
+    return lambda hwnd: window_info_backend(int(hwnd))
+
+
+def _clipboard_text_factory() -> Any:
+    """Write one text value to the OS clipboard, returning what was there.
+
+    Used by ``type_text`` when an application ignores synthesized character
+    events: the text then travels as a paste. The previous clipboard text is
+    handed back so the runtime can restore it.
+    """
+
+    def write(text: str) -> dict[str, Any]:
+        import time
+
+        import win32clipboard
+        import win32con
+
+        last_error: Exception | None = None
+        for _attempt in range(6):
+            try:
+                win32clipboard.OpenClipboard()
+            except Exception as exc:  # clipboard is held by another process
+                last_error = exc
+                time.sleep(0.03)
+                continue
+            try:
+                previous: str | None
+                try:
+                    raw = win32clipboard.GetClipboardData(
+                        win32con.CF_UNICODETEXT
+                    )
+                    previous = raw if isinstance(raw, str) else None
+                except Exception:
+                    previous = None
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(
+                    win32con.CF_UNICODETEXT,
+                    str(text),
+                )
+                return {"ok": True, "previous": previous}
+            except Exception as exc:
+                last_error = exc
+                return {"ok": False, "error": str(exc)}
+            finally:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+        return {
+            "ok": False,
+            "error": f"clipboard is busy: {last_error}",
+        }
+
+    return write
 
 
 def _read_win32_foreground_root() -> int | None:
@@ -2058,6 +2360,17 @@ def _build_actor_resources(
                 content=str(activity.get("message") or "")[:4096],
                 command=str(activity.get("command") or "")[:16_384],
                 task_state=str(activity.get("task_state") or "")[:8192],
+                task_state_scratchpad=str(
+                    activity.get("task_state_scratchpad") or ""
+                )[:8192],
+                task_state_todos=[
+                    {
+                        "content": str(item.get("content") or "")[:256],
+                        "status": str(item.get("status") or ""),
+                    }
+                    for item in activity.get("task_state_todos") or []
+                    if isinstance(item, Mapping)
+                ][:32],
                 **(
                     {"arguments": replay_arguments}
                     if replay_arguments is not None
@@ -2085,6 +2398,7 @@ def _build_actor_resources(
                 deadline=deadline,
                 configured_timeout_s=model.total_timeout_s,
             ),
+            "max_output_tokens": _actor_max_output_tokens(model.api),
             "on_attempt": _model_attempt_trace(
                 run_id=run_id,
                 mission_id=mission_id,
@@ -2111,6 +2425,9 @@ def _build_actor_resources(
                 _copy_current_view_runner_factory(run_id)
             )
             role_kwargs["windows_reader"] = _windows_reader_factory()
+            role_kwargs["activate_window_runner"] = (
+                _activate_window_runner_factory()
+            )
         actor = _BudgetedActor(role_factory(**role_kwargs), counter)
         return PreparedLiveActor(
             raw_client=raw_client,
@@ -2383,6 +2700,8 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
         receipt_trace_sink=_RawReceiptTrace(),
         launcher=_launch_application_primitive,
         desktop_shell=build.target.desktop_shell,
+        window_facts=_window_facts_factory(),
+        clipboard_text=_clipboard_text_factory(),
     )
     state.bind_pointer_state_reader(controller.pointer_state)
     try:
@@ -2520,12 +2839,14 @@ def _followup_result(
     detail: str,
 ) -> tuple[str, dict[str, Any]]:
     scratchpad = str(progress.get("scratchpad") or "").strip()[:8192]
-    raw_remaining = progress.get("remaining_items")
+    raw_todos = progress.get("todos")
     remaining = [
-        str(item).strip()[:256]
-        for item in raw_remaining
-        if str(item).strip()
-    ][:32] if isinstance(raw_remaining, (list, tuple)) else []
+        str(item.get("content") or "").strip()[:256]
+        for item in raw_todos
+        if isinstance(item, Mapping)
+        and str(item.get("status") or "") != "completed"
+        and str(item.get("content") or "").strip()
+    ][:32] if isinstance(raw_todos, (list, tuple)) else []
     lines: list[str] = []
     for text in (narration.strip(), scratchpad):
         if text and text not in lines:
@@ -2543,6 +2864,35 @@ def _followup_result(
         "next_action": "continue_in_thread",
     }
     return "\n\n".join(lines)[:16_384], continuation
+
+
+def _progress_note(
+    narration: str,
+    progress: Mapping[str, Any],
+) -> str:
+    """Keep the model's own progress text for any non-resumable stop.
+
+    Unlike ``_followup_result`` this does not advertise resumability; it only
+    preserves the last narration, scratchpad and remaining checklist so a
+    follow-up turn (or a post-restart history) still sees what was attempted
+    instead of a bare "the previous attempt did not complete".
+    """
+    scratchpad = str(progress.get("scratchpad") or "").strip()[:8192]
+    raw_todos = progress.get("todos")
+    remaining = [
+        str(item.get("content") or "").strip()[:256]
+        for item in raw_todos
+        if isinstance(item, Mapping)
+        and str(item.get("status") or "") != "completed"
+        and str(item.get("content") or "").strip()
+    ][:32] if isinstance(raw_todos, (list, tuple)) else []
+    lines: list[str] = []
+    for text in (narration.strip(), scratchpad):
+        if text and text not in lines:
+            lines.append(text)
+    if remaining:
+        lines.append("Remaining work: " + "; ".join(remaining))
+    return "\n\n".join(lines)[:16_384]
 
 
 def classify_live_agent_failure_stage(
@@ -3215,13 +3565,14 @@ class _PreparedHandler:
                     if session is not None
                     else ""
                 )
-                if narration:
-                    runtime_state["user_result"] = narration[:16_384]
+                note = _progress_note(narration, progress)
+                if note:
+                    runtime_state["user_result"] = note[:16_384]
                     if (
                         terminal_status is not RuntimeStatus.MISSION_VERIFIED
                         and not detail
                     ):
-                        detail = narration[:500]
+                        detail = note[:500]
             public_status = (
                 "waiting_for_followup"
                 if followup_reason
@@ -3310,6 +3661,28 @@ def _configured_max_attempts(api: Mapping[str, Any]) -> int:
     except (TypeError, ValueError):
         return 1
     return max(1, min(5, retries + 1))
+
+
+def _actor_max_output_tokens(
+    api: Mapping[str, Any],
+    *,
+    default: int = 4096,
+) -> int:
+    """Resolve the Actor completion budget from config.api.
+
+    ``api.max_tokens`` is reused as the single operator-facing knob so a
+    reasoning provider can be given enough headroom that ``reasoning_content``
+    plus one tool call both fit within the completion budget.  Values are
+    clamped to the live-model ceiling; unset/zero falls back to the historical
+    default so behavior is unchanged for existing configs.
+    """
+    raw = api.get("max_tokens")
+    if type(raw) is not int or raw <= 0:
+        return default
+    # 16384 mirrors the live-model output ceiling enforced by
+    # ``vnext.model_roles.common``; clamp locally to avoid a new static
+    # ``winpilot.vnext`` binding in this composition root.
+    return max(1, min(int(raw), 16_384))
 
 
 def _shell_runner_factory() -> Any | None:

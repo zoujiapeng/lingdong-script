@@ -437,16 +437,28 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         {"role": "user", "content": "Type the requested greeting"},
     ]
     actor_contract = " ".join(VISUAL_ACTOR_SYSTEM_CONTRACT.split())
-    assert len(actor_contract.split()) < 100
-    assert "current JPEG" in actor_contract
-    assert "exact submitted-image pixels" in actor_contract
-    assert "Chat and act naturally" in actor_contract
-    assert "runtime does not classify or route" in actor_contract
-    assert "goal complete with none remaining" in actor_contract
-    assert "call reply_to_user" in actor_contract
-    assert "external condition no tool can change" in actor_contract
-    assert "pointer_held persists" in actor_contract
-    assert "only authoritative visual state" in actor_contract
+    # What this guards is that every load-bearing invariant is still stated, not
+    # the English wording that used to state it. Pinning whole sentences made the
+    # contract unmaintainable and language-locked; pinning the invariants keeps
+    # the same protection while letting the prompt be rewritten or translated.
+    # The character cap is what stops it growing into a manual - the point of the
+    # contract is that it stays short, not that it covers every tool.
+    assert len(actor_contract) < 900
+    for invariant in (
+        "original_goal",
+        "截图",
+        "权威",
+        "像素",
+        "launch_application",
+        "copy_screen_to_clipboard",
+        "todos",
+        "pointer_held",
+        "reply_to_user",
+        "blocked",
+        "分类",
+        "路由",
+    ):
+        assert invariant in actor_contract, invariant
     assert actor_request["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in actor_request
     assert "n" not in actor_request
@@ -491,7 +503,8 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         state = schema["properties"]["task_state_update"]
         assert state["default"] == {"scratchpad": None}
         assert state["properties"]["scratchpad"]["default"] is None
-        assert state["properties"]["remaining_items"]["default"] is None
+        assert state["properties"]["todos"]["default"] is None
+        assert "remaining_items" not in state["properties"]
         assert "local_intent" not in schema["properties"]
     for schema in strict_schemas:
         assert {
@@ -516,7 +529,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     )
     assert actor_context_value["task_state"] == {
         "scratchpad": "",
-        "remaining_items": [],
+        "todos": [],
     }
     assert "data:image/jpeg;base64," in (
         actor_request["messages"][4]["content"][0]["image_url"]["url"]
@@ -690,7 +703,13 @@ def test_visual_actor_can_use_a_connector_before_one_gui_action() -> None:
                     "arguments_json": '{"number":7}',
                     "task_state_update": {
                         "scratchpad": "Loaded issue 7 from GitHub.",
-                        "remaining_items": ["Enter the issue value"],
+                        "todos": [
+                            {
+                                "content": "Enter the issue value",
+                                "activeForm": "Entering the issue value",
+                                "status": "pending",
+                            }
+                        ],
                     },
                 },
                 call_id="visual-call",
@@ -738,7 +757,13 @@ def test_visual_actor_can_use_a_connector_before_one_gui_action() -> None:
     }
     assert actor.task_progress == {
         "scratchpad": "Loaded issue 7 from GitHub.",
-        "remaining_items": ["Enter the issue value"],
+        "todos": [
+            {
+                "content": "Enter the issue value",
+                "activeForm": "Entering the issue value",
+                "status": "pending",
+            }
+        ],
     }
 
 
@@ -1049,10 +1074,6 @@ def test_rejection_feedback_discards_the_unexecuted_native_action() -> None:
                     }
                 ]
             },
-            "exactly one tool call",
-        ),
-        (
-            _tool_response(count=2),
             "exactly one tool call",
         ),
         (_tool_response(name="observe"), "unapproved tool"),
@@ -1946,6 +1967,23 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
             "command": "python -m pytest -q",
             "task_state_update": {
                 "scratchpad": "Phase: verify\n- run focused tests\n- revise if needed",
+                "todos": [
+                    {
+                        "content": "implement the change",
+                        "activeForm": "implementing the change",
+                        "status": "completed",
+                    },
+                    {
+                        "content": "run focused tests",
+                        "activeForm": "running focused tests",
+                        "status": "in_progress",
+                    },
+                    {
+                        "content": "revise if needed",
+                        "activeForm": "revising if needed",
+                        "status": "pending",
+                    },
+                ],
             },
         },
         content="I have implemented the change; now I am checking it.",
@@ -1984,6 +2022,24 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
         "I have implemented the change; now I am checking it."
     )
     assert activities[1]["task_state"].startswith("Phase: verify")
+    assert activities[1]["task_state_scratchpad"].startswith("Phase: verify")
+    assert activities[1]["task_state_todos"] == [
+        {
+            "content": "implement the change",
+            "activeForm": "implementing the change",
+            "status": "completed",
+        },
+        {
+            "content": "run focused tests",
+            "activeForm": "running focused tests",
+            "status": "in_progress",
+        },
+        {
+            "content": "revise if needed",
+            "activeForm": "revising if needed",
+            "status": "pending",
+        },
+    ]
     assert activities[2] == {
         "kind": "tool_start",
         "tool": "run_shell",
@@ -2150,7 +2206,7 @@ def test_visual_turn_executes_independent_query_batch_in_parallel_and_order() ->
     ]
 
 
-def test_visual_batch_with_gui_uses_existing_single_call_failure_path() -> None:
+def test_visual_batch_with_gui_is_rejected_in_band_without_running_anything() -> None:
     invalid_batch = {
         "choices": [{
             "message": {
@@ -2189,7 +2245,13 @@ def test_visual_batch_with_gui_uses_existing_single_call_failure_path() -> None:
         shell_runner=runner,
     )
 
-    with pytest.raises(InvalidActorProposal, match="exactly one tool call"):
+    # A GUI call mixed into a batch is no longer fatal: the same model is fed
+    # the exact error in band and gets to resend it alone.  With the finite
+    # standalone allowance the turn still ends, but via the model-call
+    # allowance, not via an invalid-proposal hard failure.
+    with pytest.raises(
+        LiveModelRoleError, match="exhausted its model-call allowance"
+    ):
         actor.propose(
             _actor_turn(),
             image_b64=_JPEG_B64,
@@ -2198,7 +2260,15 @@ def test_visual_batch_with_gui_uses_existing_single_call_failure_path() -> None:
         )
 
     assert runner.calls == []
-    assert len(clients[0].requests) == 1
+    assert len(clients[0].requests) >= 2
+    rejection_tools = [
+        message
+        for request in clients[0].requests
+        for message in request["messages"]
+        if message.get("role") == "tool"
+        and "not an independent non-GUI query" in str(message.get("content"))
+    ]
+    assert len(rejection_tools) >= 2
 
 
 def test_visual_turn_marks_repeated_tool_output_without_hiding_it() -> None:
@@ -2426,7 +2496,7 @@ def test_next_visual_turn_keeps_thread_context_and_gui_action() -> None:
     )
     assert current_context["task_state"] == {
         "scratchpad": "latest state",
-        "remaining_items": [],
+        "todos": [],
     }
     assert current_context["previous_action"] == previous_action.to_dict()
 
@@ -2879,6 +2949,72 @@ def test_visual_turn_can_copy_current_view_before_gui_action() -> None:
     }
 
 
+def test_visual_turn_executes_copy_screen_batched_with_query() -> None:
+    batch = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "copy-call",
+                        "type": "function",
+                        "function": {
+                            "name": "copy_screen_to_clipboard",
+                            "arguments": "{}",
+                        },
+                    },
+                    {
+                        "id": "windows-call",
+                        "type": "function",
+                        "function": {
+                            "name": "list_windows",
+                            "arguments": "{}",
+                        },
+                    },
+                ],
+            },
+        }],
+    }
+    _, clients = _build_clients([batch, _tool_response(call_id="gui-call")])
+    runner = _RecordingCurrentViewRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        copy_current_view_runner=runner,
+        windows_reader=_RecordingWindowsReader(),
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["image_b64"] == _JPEG_B64
+    assert len(clients[0].requests) == 2
+    messages = clients[0].requests[1]["messages"]
+    batch_results = [
+        message
+        for message in messages
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") in {"copy-call", "windows-call"}
+    ]
+    assert [message["tool_call_id"] for message in batch_results] == [
+        "copy-call",
+        "windows-call",
+    ]
+    copy_payload = json.loads(batch_results[0]["content"])
+    assert copy_payload["ok"] is True
+    assert copy_payload["source"] == "current_model_view"
+    assert "_replay_frame" not in copy_payload
+
+
+
 def test_copy_current_view_result_remains_in_this_run_without_old_image() -> None:
     replay_path = "run/view_frame_decision.jpg"
     _, clients = _build_clients([
@@ -3118,8 +3254,298 @@ def test_online_image_tool_has_no_path_or_recapture_surface() -> None:
     }
 
 
+def test_window_text_tool_forwards_the_model_window_selector() -> None:
+    """The model names the window it wants read; focus is only a fallback.
+
+    Reading a value that lives in a second window used to require activating
+    that window first, so a cross-window task had to pay a focus change it never
+    asked for. The selector now reaches the reader unchanged.
+    """
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="read_window_text",
+                arguments={"window": "LD Target"},
+            ),
+            _tool_response(name="click", arguments={"image_x": 10, "image_y": 10}),
+        ]
+    )
+    seen: list[dict[str, Any]] = []
+
+    def reader(request: dict[str, Any]) -> dict[str, Any]:
+        seen.append(dict(request))
+        return {
+            "format": "window-text/1",
+            "window_hwnd": 4242,
+            "window_title": "LD Target",
+            "element_count": 1,
+            "text": "LD-T11-ABC123",
+        }
+
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        window_text_reader=reader,
+    )
+
+    actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert seen and seen[0]["window"] == "LD Target"
+    tool_results = [
+        json.loads(message["content"])
+        for message in clients[0].requests[-1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert tool_results[0]["text"] == "LD-T11-ABC123"
+
+
+def test_window_text_tool_offers_the_selector_in_its_schema() -> None:
+    """A capability the model cannot see is one it will not use."""
+    from winpilot.vnext.model_roles.visual_actor import (
+        _window_text_tool_definitions,
+    )
+
+    definition = _window_text_tool_definitions()[0]["function"]
+    properties = definition["parameters"]["properties"]
+    assert "window" in properties
+    assert properties["window"]["type"] == "string"
+    assert definition["parameters"]["required"] == []
+
+
+def test_call_window_text_still_accepts_a_one_argument_reader() -> None:
+    """An earlier reader contract keeps working; the selector is advisory."""
+    from winpilot.vnext.model_roles.visual_actor import _call_window_text
+
+    def legacy_reader(_turn: ActorTurnInput) -> dict[str, Any]:
+        return {
+            "format": "window-text/1",
+            "window_hwnd": 7,
+            "element_count": 1,
+            "text": "legacy",
+        }
+
+    result = _call_window_text(
+        legacy_reader,
+        _actor_turn(),
+        {"window": "ignored"},
+    )
+
+    assert result["text"] == "legacy"
+
+
+def test_completed_gui_action_carries_the_focused_window_text() -> None:
+    """A GUI action's result includes what the window now says, bounded.
+
+    At 1120px a calculator display or a form field can be unreadable in the
+    frame while the application publishes the same text through accessibility.
+    The fact is attached to the action result so the model does not have to
+    spend a turn asking for text it cannot see.
+    """
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="click",
+                arguments={"image_x": 10, "image_y": 10},
+                call_id="calc-1",
+            ),
+            _tool_response(call_id="calc-2"),
+        ]
+    )
+    long_text = "Expression is 36 × 54=\nDisplay is 1,944\n" + "y" * 900
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        window_text_reader=lambda _request: {
+            "format": "window-text/1",
+            "window_hwnd": 4654844,
+            "window_title": "Calculator",
+            "element_count": 3,
+            "text": long_text,
+        },
+    )
+    turn = _actor_turn()
+
+    actor.propose(
+        turn,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    actor.propose(
+        replace(
+            turn,
+            previous_action=ActorPreviousActionView(
+                action="click",
+                input_completed=True,
+                visible_effect="changed",
+            ),
+        ),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    tool_results = [
+        json.loads(message["content"])
+        for message in clients[0].requests[-1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert tool_results, "the completed action result is missing"
+    fact = tool_results[0]["window_text"]
+    assert fact["window_title"] == "Calculator"
+    assert fact["window_hwnd"] == 4654844
+    assert fact["text"].startswith("Expression is 36 × 54=")
+    assert fact["truncated"] is True
+    assert len(fact["text"]) <= 600
+
+
+def test_unreadable_window_text_never_fails_a_completed_action() -> None:
+    """An unreadable window omits the fact; physical input already happened."""
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="click",
+                arguments={"image_x": 10, "image_y": 10},
+                call_id="calc-1",
+            ),
+            _tool_response(call_id="calc-2"),
+        ]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        window_text_reader=lambda _request: {
+            "format": "window-text/1",
+            "window_hwnd": 1,
+            "element_count": 0,
+            "text": "",
+        },
+    )
+    turn = _actor_turn()
+
+    actor.propose(
+        turn,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    actor.propose(
+        replace(
+            turn,
+            previous_action=ActorPreviousActionView(
+                action="click",
+                input_completed=True,
+                visible_effect="changed",
+            ),
+        ),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    tool_results = [
+        json.loads(message["content"])
+        for message in clients[0].requests[-1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert tool_results
+    assert "window_text" not in tool_results[0]
+
+
+def test_turn_context_names_the_foreground_window() -> None:
+    """A bare desktop JPEG has no caption; the runtime already knows the app.
+
+    Measured failure: a click that raised another app left the model clicking the
+    old coordinates for dozens of turns while still narrating "the QQ chat is
+    open". The foreground row is already in the inventory the turn fetches.
+    """
+    from winpilot.vnext.model_roles.visual_actor import _foreground_window_fact
+
+    inventory = {
+        "windows": [
+            {
+                "hwnd": 2035800,
+                "title": "QQ",
+                "class_name": "Chrome_WidgetWin_1",
+                "process_name": "QQ.exe",
+                "foreground": False,
+            },
+            {
+                "hwnd": 3279604,
+                "title": "灵动脚本",
+                "class_name": "Chrome_WidgetWin_1",
+                "process_name": "electron.exe",
+                "foreground": True,
+            },
+        ],
+        "background_applications": [],
+    }
+
+    assert _foreground_window_fact(inventory) == {
+        "title": "灵动脚本",
+        "process_name": "electron.exe",
+        "class_name": "Chrome_WidgetWin_1",
+        "hwnd": 3279604,
+    }
+    assert _foreground_window_fact({"windows": []}) is None
+    assert _foreground_window_fact(None) is None
+
+
+def test_inventory_without_a_foreground_row_omits_the_fact() -> None:
+    """An unreadable foreground is left out, never guessed and never an error."""
+    from winpilot.vnext.model_roles.visual_actor import _foreground_window_fact
+
+    assert _foreground_window_fact({"windows": [{"hwnd": 5, "title": "x"}]}) is None
+    assert _foreground_window_fact({"windows": "not-a-list"}) is None
+
+
+def test_actor_payload_carries_the_foreground_window_fact() -> None:
+    """The fact reaches the model in the same turn JSON as the frame."""
+    _, clients = _build_clients([_tool_response(call_id="gui-call")])
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        windows_reader=lambda: {
+            "format": "windows-list/1",
+            "ok": True,
+            "windows": [
+                {
+                    "hwnd": 11,
+                    "title": "网易云音乐",
+                    "class_name": "OrpheusBrowserHost",
+                    "process_name": "cloudmusic.exe",
+                    "foreground": True,
+                }
+            ],
+            "count": 1,
+            "background_applications": [],
+        },
+    )
+
+    actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    user_message = clients[0].requests[-1]["messages"][-1]
+    payload = json.loads(user_message["content"][1]["text"])
+    assert payload["foreground_window"]["title"] == "网易云音乐"
+    assert payload["foreground_window"]["hwnd"] == 11
+
+
 def test_read_window_text_ignores_extra_arguments() -> None:
-    """A no-arg read tool must not reject the model for passing extra keys."""
+    """A read tool must not reject the model for passing surplus keys."""
     _, clients = _build_clients(
         [
             _tool_response(
@@ -3181,3 +3607,91 @@ def test_owned_utility_tool_tolerates_unknown_fields() -> None:
     )
     assert exchange is not None
     assert exchange[3] == {}
+
+
+
+def test_activate_window_tool_exposes_its_selector() -> None:
+    """A capability the model cannot see is one it will never use."""
+    from winpilot.vnext.model_roles.visual_actor import (
+        _activate_window_tool_definitions,
+    )
+
+    definition = _activate_window_tool_definitions()[0]["function"]
+    assert definition["name"] == "activate_window"
+    assert "window" in definition["parameters"]["properties"]
+    assert definition["parameters"]["required"] == ["window"]
+
+
+def test_activate_window_forwards_the_handle_and_reports_the_result() -> None:
+    """The model names one window; the runtime reports what actually happened.
+
+    Measured need: QQ owns a blank full-screen placeholder whose title is also
+    "QQ"; every click landed on it. The only human move - switch windows - had
+    no equivalent tool.
+    """
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="activate_window",
+                arguments={"window": "2035800"},
+                call_id="activate-1",
+            ),
+            _tool_response(name="click", arguments={"image_x": 10, "image_y": 10}),
+        ]
+    )
+    seen: list[dict[str, Any]] = []
+
+    def runner(request: dict[str, Any]) -> dict[str, Any]:
+        seen.append(dict(request))
+        return {
+            "format": "activate-window/1",
+            "ok": True,
+            "hwnd": 2035800,
+            "title": "QQ",
+            "became_foreground": True,
+        }
+
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        activate_window_runner=runner,
+    )
+
+    actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert seen and seen[0]["window"] == "2035800"
+    tool_results = [
+        json.loads(message["content"])
+        for message in clients[0].requests[-1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert tool_results[0]["became_foreground"] is True
+    assert tool_results[0]["hwnd"] == 2035800
+
+
+def test_activate_window_ambiguity_reaches_the_model_as_candidates() -> None:
+    """Four windows share a title; the runtime returns all of them, not a guess."""
+    from winpilot.vnext.model_roles.visual_actor import _call_activate_window
+
+    def runner(_request: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "format": "activate-window/1",
+            "ok": False,
+            "error": "4 windows match 'QQ'; pass one handle",
+            "matching_windows": [
+                {"hwnd": 2035800, "title": "QQ", "process_name": "QQ.exe"},
+                {"hwnd": 3147966, "title": "QQ", "process_name": "QQ.exe"},
+            ],
+        }
+
+    result = _call_activate_window(runner, {"window": "QQ"})
+
+    assert result["ok"] is False
+    assert len(result["matching_windows"]) == 2
+    assert "pass one handle" in result["error"]

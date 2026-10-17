@@ -8,6 +8,291 @@
 >
 > DSH 插件子项目的一切都限制在 `packages/` 下，分支 `feat/dsh-plugin`。
 
+## 2026-10-17 晚：让模型读到"窗口自己说的话"，跨边界任务从 1/4 到 3/4
+
+本轮只改机械层两处，都在 `vnext` 视觉线内，没有新增任何门禁、校验、分类器或第二角色。
+
+### 改动 1：`read_window_text` 可以点名任何窗口
+
+- 之前：读取器是 `_window_text_reader_factory()`，注释写着 "from the window that owns
+  focus when called"，工具 schema **连参数都没有**。于是"读第二个窗口里的值"必须先抢焦点——
+  一次模型没要求的焦点变更，也是"哪些窗口能读"这种它看不见的隐藏约束。
+- 现在：`window` 可选参数，接受 `list_windows` 给的句柄或标题/进程名片段；空则回到焦点窗口。
+  未命中返回可见窗口候选，多重命中返回 `matching_windows` 并要求给句柄（与 `invoke_menu`
+  的回绝同一种形状：**回绝带回可用项，让模型自己改**）。返回里带 `window_title`。
+- 一行协议上的诚实：标题是本地化的。`记事本` 的标题是"无标题 - 记事本"，
+  `notepad` 这个 ASCII 名字只在**进程名**里，所以匹配同时看 `title` 和 `process_name`；
+  否则 `notepad` 会经标题子串静默解析到 Notepad++（实测过，见下）。
+
+### 改动 2：每个完成的 GUI 动作，结果里自带焦点窗口的文本
+
+- 提交帧最大边 1120（`1120 -> 1600` 历史 A/B 已证明更差，没再动）。1120×630 的全桌面帧里
+  计算器表达式行只有约 8px 高、表单小字同理，**模型读不清**；而同一个应用把这段文本
+  通过无障碍通道完整发布。
+- 现在：`LiveVisualActor._window_text_after_action()` 在**执行完一笔 GUI 动作、下一次
+  turn 开始时**读一次焦点窗口文本，附在该动作的 tool result 里：
+  `{"previous_action": {...}, "window_text": {"text": ≤600 字符, "truncated", "window_title", "window_hwnd"}}`。
+  读不到 / 窗口没文本 / 读取抛错 → **直接省略该字段**，绝不把已经发生的物理输入翻成错误。
+- 它是事实，不是判决：没有"完成 / 未完成"的结论，也没有任何拦截。
+- 代价：每笔 GUI 动作多一次 UIA 读数（`collect` 有界：≤300 元素、深度≤18、全局搜索 1.2s），
+  外加 ≤600 字符上下文。
+
+### 实测证据（同一台机、同一 oracle、同一个 `mimo-v2.6-flash`）
+
+命令：`node packages/dsh-plugin-lingdong/e2e/run.mjs --arm agent --task <id>`
+（`agent` 臂就是产品前端那条路：`POST /api/v2/goals/runs`，
+与 `src/renderer/platform/client.ts:368 startGoalRun` 同一路由、同一请求模型）。
+
+| 任务 | 改前 | 改后（各 2 轮） | 报告 |
+|---|---|---|---|
+| `cross_window_token`（跨窗口取值） | **FAIL** 40 步 / 424s | **PASS** 26 步 / 423s，**PASS** 34 步 / 423s | `report-1792233928864` → `report-1792235221603`、`report-1792236268433` |
+| `cross_app_pipeline`（计算器 → 记事本存盘） | **FAIL** 43 步 / 425s | **PASS 13 步** / 94s，**FAIL** 63 步 / 425s | `report-1792234364570` → `report-1792235320589`、`report-1792236697670` |
+| `fill_form`（对照，本来就过） | PASS 9 步 | PASS 12 步 / 77s | `report-1792230329636` → `report-1792235826445` |
+| `calculator_clipboard` | FAIL 41 步 / 424s | **FAIL** 64 步 / 423s | `report-1792234791350` → `report-1792235747080` |
+
+**改前 4 任务 1 过；改后 4 任务里 3 个至少过一次，逐回合 4/6。**
+两个跨边界任务都从"必失败"变成"会成功"：`cross_window_token` 2/2，
+`cross_app_pipeline` 1/2（最快一次 13 步 / 94 秒）。
+
+**必须说清的边缘**：`cross_window_token` 两次都在 **423 秒**通过——正好压在 harness 的
+420 秒超时线上（提交表单发生在取消前后，外侧 oracle 读到了提交结果，所以判 PASS 成立，
+但这条不能读成"快"）。真实产品预算是 200 回合 / 7200 秒，harness 的 420 秒是**测量台**
+的耐心，不是产品能力。
+
+同批次另外两条臂（`--arm cua` = 新建 profile 的 dsh + 自带 computer use；
+`--arm lingdong` = 本插件）在同一批 oracle 上：
+
+| 任务 | agent（本产品） | cua（新 dsh + computer use） | lingdong（插件） |
+|---|---|---|---|
+| `cross_window_token` | 26 / 34 步（均 PASS） | PASS 35 步 / 110s | PASS 15 步 / 59s |
+| `cross_app_pipeline` | 13 步 PASS / 63 步 FAIL | PASS 53 步 / 132s | PASS 23 步 / 69s |
+
+**读法**：完成率上本产品这一轮仍不如两条 DSH 臂稳定（1/2、2/2 对 2/2、2/2），
+但在最省的一次上步数与它们同量级（13 对 23 / 53），**而且这里不是同一个模型**
+（本产品 `mimo-v2.6-flash`，DSH 两臂 `deepseek-flash`），所以这是整栈对比。
+
+通过的 `cross_app_pipeline` trace（`arp-20261017-190708-66e0e9.jsonl`）显示它做了什么：
+`launch_application Calculator` → `input_sequence "type_text \"36*54\"; press enter"`
+（**直接用键盘输入算式，而不是点键盘按钮**）→ Ctrl+C → 切到记事本 Ctrl+V → Ctrl+S
+→ 输入文件名 → **`run_shell` 读回文件字节，发现只有 `'944'`（少一位）** → 重新输入 `1944`
+再存 → 再读回 `len=4 text='1944'` → 收尾。这是"依赖顺序 + 跨应用 + 自检纠错"的完整链路。
+
+### 仍然失败的那一个，是模型层，已就地记录
+
+`calculator_clipboard` 改后 **64 步**全部是点同一个键：46 次 `click(45,505)`、10 次
+`click(45,469)`、7 次 `click(114,350)`。逐次事实：
+
+- 每笔回执 `outcome=applied / input_completed=true / error_kind=null`（SendInput 全部送达）；
+- 每笔之后的 `window_text` 就是 `Display is 4` 这类**可读的显示值**（本机实测见
+  `.codex-run/probe-post-action-text.py`）；
+- `previous_action.same_action_attempts`（上一轮已落地）此刻已经是一个明显的两位数。
+
+**模型两条事实都在上下文里，仍然重复同一坐标 46 次。** 按根 `AGENTS.md`
+"模型是瓶颈就换模型或接受结果"，这里只记录、不加硬门禁
+（用户本轮明确要求不要过硬门禁）。
+
+另外，改前的 `cross_app_pipeline` 也是同一个病：42 笔 `input_sequence` 里有 **39 笔逐字相同**
+（`click left 185,348; click left 45,426; ...`），显示器上一直是 `78 × 32 = 2,496`
+（要求 74×83）——它把数字键盘读成了**列优先**布局，点出来的式子从头就是错的。
+
+改后同一任务失败的那一轮（`arp-20261017-192434-3707ba.jsonl`）是**同一个病**：
+62 笔 `click`，其中 30 次 `(45,467)`、16 次 `(45,503)`、15 次 `(114,349)`；
+同一任务成功的那一轮（`arp-20261017-190708-66e0e9.jsonl`）则是
+`input_sequence "type_text \"36*54\"; press enter"` —— **直接键盘输入算式**。
+也就是说：同一个应用、同一份上下文里，"点键盘"和"打键盘"两条路都开着，
+成不成取决于模型当轮选哪条。**这不是机械层的差别。**
+
+### 本轮排掉的三个假线索（都花过时间，写下来免得下一个人再查）
+
+1. **"shell 输出乱码"是假的。** trace 里 `浣跨敤` 是我用 Windows PowerShell 5.1
+   `Get-Content` 按 ANSI 码页读 UTF-8 文件的产物；`-Encoding UTF8` 读同一文件是
+   "使用"1"个参数调用…"。shell 输出链路本身是对的（`.codex-run/probe-shell-bytes.py`：
+   `CREATE_NO_WINDOW` 下子进程写的就是 UTF-8，`_decode(("utf-8","gbk"))` 直接命中）。
+2. **"exit 0 却在报错"不是壳在说谎。** `_powershell_command` 的 `$?` 只反映**最后一条语句**；
+   `.codex-run/probe-shell-exit.py` 五种情况实测：最后一句失败 → `ok=False/exit=1`，
+   最后一句成功 → `ok=True/exit=0`（stderr 里仍有错误文本）。这是 shell 语义，不是假成功。
+3. **"窗口绑定挡住了输入"也是假的。** `atomic.py` 里所有物理动作都写着
+   `enforce_foreground=False`，帧是 `scope_override="full_desktop"`，模型指哪打哪。
+   真正被绑定的是**读文本**那一条（改动 1），以及 `target_binding` 只作为任务锚点存在于
+   envelope 身份里。
+
+### 结论边界
+
+- 4 个任务：`fill_form` / `calculator_clipboard` 各 1 轮，两个跨边界任务改前 1 轮、改后各 2 轮。
+  **单轮不是率**；只能说"在这批任务上，改后 4/6，改前 1/4"。
+- 三个臂仍**不是同一个模型**：agent 臂是 `mimo-v2.6-flash`（本机 `config.json`），
+  两条 DSH 臂是 `deepseek-flash`。这是整栈对比，不是纯 agent 对比。
+- `calculator_clipboard` 步数 41 → 64 的变化**不代表能力退化**：两次都失败，
+  失败运行的步数只反映"循环到超时前跑了多少轮"。
+- agent 臂墙钟远高于另两臂（423s 对 110s / 59s 是模型延迟 + 每回合一次
+  UIA 读数的代价），**步数才是跨臂可比的量**。
+
+### 同日晚：真正从 Electron 前端下任务，并换成同一个模型
+
+前面所有 `agent` 臂的结论都是**直连 `POST /api/v2/goals/runs`** 得到的（前端自己也只用这一条
+路由：`src/renderer/platform/client.ts:368 startGoalRun` ← `useControlPlane.startGoal`）。
+用户指出"没看到前端"，于是补了真前端的一轮：
+
+1. `npm run dev` 起 Electron（窗口 `灵动脚本`），在输入框里**手动键入**目标、按 Enter 提交。
+2. 第一次跑出来的模型是 **`mimo-v2.6-flash`**——不是因为代码默认（`config.py` 默认
+   `deepseek-flash`），而是本机 `python/winpilot_home/config.json` 里
+   `active_model_profile: "mimo"`，且 `api` 块就是 mimo。前端输入框那个 chip 显示的就是
+   **当前档案**，trace 的 `live_agent_start model=` 也一致。
+3. 那一轮（mimo）13 回合都在点计算器键盘，被手动停掉——与 harness 里 mimo 的结论一致。
+4. 用产品自己的 `Config.activate_model_profile("deepseek")` 把档案切成 `deepseek`
+   （`model_profiles.deepseek`：`deepseek-flash`，有 key，`supports_vision: true`），
+   重启前端后 chip 变成 `deepseek-flash`。
+5. 同一个目标（35×80 → 存 `output/e2e/t10.txt`）**重新从前端键入并提交**：
+   **PASS**，`mission_verified`，**24 回合 / 32 次模型调用 / 2 分 5 秒**，
+   磁盘文件逐字节 `2800`。UI 上显示"任务已完成"，模型自述里还写了自己读回字节
+   `32 38 30 30` 的核对过程。
+
+**这一轮把最大的混杂变量去掉了**：agent 臂现在与两条 DSH 臂同为 `deepseek-flash`。
+同一个 `cross_app_pipeline` 上：**agent 24 回合（PASS）对 cua 53 回合（PASS）对
+lingdong 23 回合（PASS）**。
+
+**但要如实记两件事**：
+
+- `deepseek-flash` **也会**先点计算器键盘（前 11 回合坐标还在漂移），只是它后来改成
+  直接输入/走文件路径并自己核对，所以救回来了。**"点键盘读错布局"不是某个模型的专利。**
+- 观察 UI 时有一分钟以上的"卡在运行中"：那是**窗口被遮挡后不重绘**、CDP 截到的是最后一帧
+  旧图（同一 sha 重复两分钟，计时器不走）。Ctrl+R 后立刻显示 19:52:14 的"任务已完成"。
+  **不是状态 bug，是截图陈旧**——又一个"机器在骗分析者"的实例。
+
+### 同模型复跑：这批 4 个任务已经不能区分完成率了
+
+切到 `deepseek` 档案后，用同一批 oracle 复跑（agent 2 轮，cua / lingdong 各 1 轮，全部同模型）：
+
+| 任务 | agent r1 | agent r2 | cua | lingdong |
+|---|---|---|---|---|
+| `cross_app_pipeline` | **PASS 8 步 / 34s** | PASS 24 步 / 87s | PASS 53 | PASS 23 |
+| `cross_window_token` | PASS 17 / 47s | PASS 21 / 57s | PASS 35 | PASS 15 |
+| `calculator_clipboard` | PASS 13 / 55s | **PASS 5 / 29s** | PASS 36 | PASS 10 |
+| `fill_form` | PASS 15 / 43s | PASS 14 / 37s | PASS 35 | PASS 18 |
+| 合计 | 4/4 · 53 步 · 0.59M tok | 4/4 · 64 步 · 0.77M tok | 4/4 · 159 步 · 7.87M tok | 4/4 · 66 步 · 3.49M tok |
+
+**三臂完成率打平（都是 4/4），差别全在成本**：步数 agent 53–64 ≈ lingdong 66 ≪ cua 159；
+tokens agent 0.59–0.77M ≪ lingdong 3.49M ≪ cua 7.87M。
+
+**这一条要写清楚，因为它推翻了我原来的叙事**：本轮"完成率提升"的两个来源必须分开算——
+
+1. **机械层两处改动**（同名档案 `mimo` 下测）：4 任务 1/4 → 逐回合 4/6，
+   两个跨边界任务从"必失败"变成"会成功"。这是真的、可归因的。
+2. **换模型档案**（`mimo` → `deepseek`，机械层不变）：同一批任务 4/4（两轮，共 8/8）。
+   提升幅度**大于**机械层那两处。**所以不能说机械改动是本轮提升的主因。**
+
+**这批任务已经饱和**：三臂都 4/4，说明要继续量"完成率差异"就必须换更难的任务集
+（更长、更多跨边界、更多等待外部状态），而不是继续用这 4 个。
+
+**步数方差很大**（同一任务 r1/r2：8 对 24、13 对 5），完成率稳、步数不稳；
+引用成本要多轮取中位数。
+
+### 前端口述任务实测：QQ 那一步"像瞎子"的机械归因
+
+用户从前端发了一条真任务：「打开网易云音乐搜索林俊杰并播放第二首歌曲，然后打开 QQ 给我的手机
+发一句晚上好并配个表情」。网易云那半成功（`美人鱼 - 林俊杰` 在播），QQ 那半卡住被用户停掉。
+
+trace `arp-20261017-201410-f19835`（65 回合 / 3 分 52 秒）逐项：
+
+- 物理回执：**56 click + 3 launch_application + 2 hotkey，全部 `applied`，`error_kind` 全空**；
+  **一次 `type_text` 都没有**。
+- 48 次点击全部落在 QQ 消息输入区一个约 **150×60 图像像素**的框里；
+  坐标每次都差几十像素（"猜测"式乱点）。
+- 模型的 reasoning 每一轮都写着 "Now click the input box and type 晚上好"，
+  **但发出的工具调用只有 click**。本回合只允许一个 GUI 动作，所以"点完再打"要跨两回合；
+  而下一回合画面**看起来没变**（输入框获得焦点在 QQ 里几乎没有可见变化），于是它又点一次。
+- `same_action_attempts` 这时**一直是 1**：它只统计"逐字节相同的动作"，坐标抖动一次就不算重复。
+- 中途还有一次 r63 自述："my click on the taskbar summoned 网易云" —— 一次点击把音乐播放器
+  唤到前台盖住了 QQ，之后 5 个回合它仍然按"QQ 聊天窗口开着"继续点。
+
+三个机械事实：
+
+1. **QQ 完全不发布无障碍文本。** `read_window_text(window="QQ")` →
+   `element_count=0, text=""`（窗口类 `Chrome_WidgetWin_1`，Electron 自绘，1938×1038）。
+   所以本轮新加的"动作回执自带焦点窗口文本"对 QQ **返回空**，模型只有像素一条通道。
+2. **1120×630 的全桌面帧对 QQ 是 0.58×**：消息输入条被压成约 25 图像像素高，
+   光标/焦点框是亚像素，**"点没点中"在图上不可判**。
+3. **鼠标键盘链路本身是好的**（实测）：点进 QQ 输入框 (900,893) 再 SendInput 输入
+   `mech-check-123`，文字出现在输入框里。**不是被拒绝，也不是工具坏了。**
+
+已顺手补上的机械事实（本轮）：**每回合上下文里加 `foreground_window`**（标题/进程/类/hwnd，
+取自本来就要取的窗口清单，零额外调用）。它修的是"一次点击换了前台应用"这一类失明；
+实测复跑同一目标（`arp-20261017-202134-98fda0`）**这一步仍然循环 33 次点击、0 次 type_text**，
+所以它**不是**这个循环的病因，如实记录。
+
+**尚未做、但直接对症的两件（都只是事实，不是门禁）**：
+
+- 点击回执带上**按下点命中的窗口**（hwnd/进程/标题）——证明"我点在 QQ 上"。
+- **区域重复计数**："最近 N 次点击里有 M 次落在同一个 60×40 像素的框里"——
+  它能扛住坐标抖动，而 `same_action_attempts` 扛不住。
+
+### 追记：这不是插件改坏的，QQ 也从来不是"能完成"的那一类
+
+用户问"是不是适配 dsh 插件后改坏了 / 系统提示词对不上"。逐项核对：
+
+- **插件分支没碰 agent 线**：`git diff master..HEAD -- winpilot/vnext winpilot/orchestrator
+  winpilot/modeling action/shell.py` **为空**。插件只改了 `fast/*`、`desktop_observe.py`、
+  `server.py` 和 `clipboard_ops.py`；后者是把 `list_windows_backend` 抽成 `_window_record`
+  的**同语义重构**（过滤器、字段、`foreground` 标记完全一致）。
+- **提示词没有"对不上"**：当前 `VISUAL_ACTOR_SYSTEM_CONTRACT`（中文版）与 master 的英文版
+  语义一致，提到的工具名（`launch_application` / `copy_screen_to_clipboard` / `reply_to_user`
+  / `blocked` / `task_state_update`）都在实际工具面里。
+- **但本轮我自己造过一个真冲突**：提示词说"坐标就是这张图的像素"，
+  而我新加的点击回执**只报屏幕坐标**（`pressed at 1075,978` 对应模型给的 `627,570`），
+  模型为"坐标空间是不是搞错了"烧了 2 个回合（`arp-20261017-203231-2d8397` r42/r44）。
+  已改成 `image 627,570 = screen 1075,978`，复跑（`arp-20261017-203951-3d4bb5`）里
+  这个疑虑消失了。**这是我的改动引入又修掉的，记在这里。**
+- **agent 并没有整体退化**：同一天、同模型（deepseek）在 4 个 oracle 任务上 **8/8 通过**；
+  这几条真实任务里它每次都换歌成功、读出当前歌名、写对文件（`t12.txt` 分别是
+  `稻香 - Jay` / `同花顺 - 林倛玉`）、并选中正确的会话。
+- **QQ 从来不是"能完成"的那一类**：本文件 08-15 的结论写得很清楚——五项原始长任务
+  （含 **QQ 群摘要**）当时**没有 5/5**，**QQ 空间点赞属部分完成，失败性质是"模型覆盖/停止失败，
+  非输入基础设施失败"**。今天看到的正是同一类：模型一直点、不停、不打字。
+
+第三次 QQ 实测（`arp-20261017-203951-3d4bb5`）：46 条回执**全部 applied、0 error_kind**，
+**0 次 `type_text`**、41 次 click。三条新事实它都读到了
+（"Access window came to foreground"、"my earlier clicks were landing at doubled coordinates"、
+"I'm wasting many clicks"），**但动作没变**——模型层。
+
+### 解决了：同一个模型、同一条任务，agent 现在能发出消息
+
+先做了一次对照：**用"新 profile 的 dsh + 自带 computer use"跑同一条 QQ 任务**
+（`node dsh --profile cua-e2e --patch e2e/cua.patch.yml "<goal>"`），它 12 步就发出去了。
+它的日志把差距说得很清楚：
+
+- 它第一步 `get_accessibility_tree` 拿到窗口清单，**看到两个 "QQ" 窗口**；
+- 先看 `3147966`：2 个元素，document 是 `...index.html#/blank` → 判定是空壳；
+- 再看 `2035800`：**347 个元素**（会话列表、"我的手机"、"晚上好"、输入区 Group、发送按钮都在）；
+- 在真窗口里打字（foreground 投递）→ 发送 → 成功。
+
+也就是说：**QQ 并不拒绝被操控**；差别在"能不能看见、能不能切到对的窗口、文字能不能落进去"。
+
+按这三条各补一处机械能力（都是事实/能力，没有门禁、没有应用配方）：
+
+1. **窗口可寻址**（`clipboard_ops.py`、`live_agent.py`）：`list_windows` 的后台/最小化窗口也带 `hwnd`；
+   `read_window_text` 的解析改成包含后台窗口，同名多窗口**返回候选并要求给句柄**（不再随机命中空壳）。
+   实测 `uia.collect(2035800)` = **150 个元素 / 119 行文本**，QQ 的树本来就看得见。
+2. **点名激活窗口**（新 `activate_window`，`visual_actor.py` + `live_agent.py`）：
+   恢复 + `SetWindowPos(HWND_TOP)` + topmost 弹跳 + 前台尝试，**如实回报 `became_foreground`**。
+   实测把真窗口从黑壳下面抬起来后，整帧从"均值 1.9 / 55 色"变成"39.4 / 151 色"。
+3. **文字投递走得住的那条路**（`atomic.py`）：非 ASCII 的 `type_text` 改走
+   "写剪贴板 → Ctrl+V → 恢复原剪贴板"，回执写明 `via=clipboard_paste`。
+   依据：在 QQ 输入框里合成键盘字符**两次都没进一个字**（截图逐字节相同），
+   而剪贴板粘贴一次就进去。
+
+另外两处上下文/事实：**保留模型最近一次自己的计划与推理**（之前每回合都被剥光，
+于是它每回合重新推导同一个"先点输入框"）；点击回执带**按下点命中的窗口 + 重复次数**，
+回合上下文带**当前前台窗口**。
+
+**结果**：同一个 `deepseek-flash`、同一台机、同一条目标
+（`arp-20261017-211239-3d091e`）：**11 回合 / 63 秒，`mission_verified`**，
+它自己发出 `type_text {"text":"测试一下"}` → 点发送 → 收尾。
+QQ 会话里现在依次是：我手工发的「晚上好」(21:00)、cua 臂发的「我是cua」(21:09)、
+**agent 发的「测试一下」(21:13)**。
+
+**如实保留的缺陷**：它在打字前仍先盲点了 7 次（坐标在 composer 附近游走），
+只是这次没有陷进循环。要压掉这几步属于模型层，不再加机制。
+
 ## 2026-09-10 模型直切、通用连接器入口与 detached CI 修复
 
 - 本机 `config.json` 可保存 MiMo / DeepSeek 等模型档案；输入框模型名直接展开并切换，

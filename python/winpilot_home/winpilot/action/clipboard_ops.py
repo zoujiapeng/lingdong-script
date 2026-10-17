@@ -239,10 +239,17 @@ def list_windows_backend() -> dict[str, Any]:
         if identity in seen_background:
             continue
         seen_background.add(identity)
+        # The handle stays attached: without it a window that is minimized or
+        # behind a sibling cannot be named, so it can never be raised. Measured
+        # on QQ, whose blank full-screen placeholder shares the title "QQ" with
+        # the real panel: the real one was minimized and therefore addressable
+        # only from this list.
         background_applications.append({
             "process_name": process_name,
             "title": title,
             "state": "minimized" if item.get("minimized") else "background",
+            "hwnd": int(item.get("hwnd") or 0),
+            "minimized": bool(item.get("minimized")),
         })
         if len(background_applications) >= 24:
             break

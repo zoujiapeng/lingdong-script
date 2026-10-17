@@ -52,14 +52,14 @@ _PROVIDER_REJECTION_PREFIX = (
     "provider rejected model response: finish_reason="
 )
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
-Use original_goal, current JPEG, task_state, previous action, and tools. Choose
-one tool, or batch independent non-GUI tools. Briefly narrate. Coordinates are
-exact submitted-image pixels. Chat and act naturally; runtime does not classify
-or route. To answer a chat request, or when the current screen shows the goal
-complete with none remaining, call reply_to_user with the answer or result.
-If an external condition no tool can change blocks progress, call blocked.
-pointer_held persists until deliberately released. The current JPEG is the
-only authoritative visual state."""
+读 original_goal、当前截图、task_state、previous_action、tools。
+每回合只做一个决定：一个 GUI 动作，或一批互不依赖的非 GUI 工具。简述你在做什么。
+坐标就是这张图的像素，它也是唯一的权威视觉状态。
+打开或切换应用用 launch_application；截图用 copy_screen_to_clipboard，不要调系统工具。
+用 task_state_update.todos 维护用户可见的清单（pending / in_progress / completed）。
+pointer_held 会保持到你显式松开。
+目标已达成、或用户只是在聊天，就用 reply_to_user 回话；任何工具都改不了的外部阻塞，用 blocked。
+聊天与操作照常进行，runtime 不做分类或路由。"""
 
 _TOOL_DESCRIPTIONS = {
     "move_mouse": (
@@ -182,18 +182,25 @@ _SHELL_MAX_COMMAND_CHARS = 16_384
 _WINDOW_TEXT_TOOL = "read_window_text"
 _STANDALONE_WINDOW_TEXT_ALLOWANCE = 2
 _WINDOW_TEXT_MAX_CHARS = 6000
+# Text attached to a completed action's result is bounded much tighter than an
+# explicit read: it arrives every turn whether or not the model wants it.
+_POST_ACTION_WINDOW_TEXT_CHARS = 600
+# The model's own most recent plan survives into the next turn, bounded.
+_KEPT_PLAN_CHARS = 1200
 _COPY_CURRENT_VIEW_TOOL = _MODEL_TOOL_NAMES["copy_current_view"]
 _STANDALONE_COPY_CURRENT_VIEW_ALLOWANCE = 2
 _LIST_WINDOWS_TOOL = "list_windows"
 _STANDALONE_LIST_WINDOWS_ALLOWANCE = 1
+_ACTIVATE_WINDOW_TOOL = "activate_window"
+_STANDALONE_ACTIVATE_WINDOW_ALLOWANCE = 2
 # Optional tool-schema fields and their JSON defaults.  The model may omit
 # them; the runtime fills the default so the tool schema and the validator
 # never disagree.
 _OPTIONAL_TOOL_DEFAULTS = {
     _DETACHED_SHELL_TOOL: {"name": "task"},
     _CONNECTOR_SEARCH_TOOL: {"query": "", "connector": ""},
+    _WINDOW_TEXT_TOOL: {"window": ""},
 }
-
 
 @dataclass(slots=True)
 class _VisualExchange:
@@ -208,7 +215,16 @@ class _VisualExchange:
 def _text_only_tool_transcript(
     messages: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], ...]:
-    """Keep this run's tool conversation without old screenshots or reasoning."""
+    """Keep this run's tool conversation without old screenshots.
+
+    The model's own short plan and reasoning for the *latest* completed action is
+    kept: without it the model has no record of what it had already decided, so
+    it re-derives the same first step from the same goal and the same-looking
+    frame and repeats it.  Measured on QQ: 40 identical "click the input box"
+    plans in a row, each with the model's own reasoning saying "and then type".
+    Older prose is still dropped, because only the latest decision can still be
+    acted on.
+    """
 
     transcript: list[dict[str, Any]] = []
     for message in messages:
@@ -224,12 +240,34 @@ def _text_only_tool_transcript(
             continue
         if role not in {"assistant", "tool"}:
             continue
-        item = deepcopy(dict(message))
-        item.pop("reasoning_content", None)
-        if role == "assistant":
-            item["content"] = ""
-        transcript.append(item)
-    return tuple(transcript)
+        transcript.append(deepcopy(dict(message)))
+    return _keep_latest_plan(tuple(transcript))
+
+
+def _keep_latest_plan(
+    transcript: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """Strip plan text from every assistant turn except the most recent one."""
+
+    last_assistant = -1
+    for index, item in enumerate(transcript):
+        if item.get("role") == "assistant":
+            last_assistant = index
+    kept: list[dict[str, Any]] = []
+    for index, item in enumerate(transcript):
+        entry = dict(item)
+        if entry.get("role") == "assistant" and index != last_assistant:
+            entry.pop("reasoning_content", None)
+            entry["content"] = ""
+        elif entry.get("role") == "assistant":
+            reasoning = entry.get("reasoning_content")
+            if isinstance(reasoning, str):
+                entry["reasoning_content"] = reasoning[:_KEPT_PLAN_CHARS]
+            content = entry.get("content")
+            if isinstance(content, str):
+                entry["content"] = content[:_KEPT_PLAN_CHARS]
+        kept.append(entry)
+    return tuple(kept)
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
@@ -652,6 +690,39 @@ def _actor_parameters(
         raw,
         requires_local_intent=tool.requires_local_intent,
     )
+
+
+def _foreground_window_fact(inventory: Any) -> dict[str, Any] | None:
+    """Return the one window the desktop is currently showing, if the backend says.
+
+    ``list_windows`` already marks the foreground row; this only projects the
+    same snapshot the turn already fetched, so it adds no extra Windows call and
+    no failure path: an inventory without a foreground row simply omits the fact.
+    """
+
+    if not isinstance(inventory, Mapping):
+        return None
+    rows = inventory.get("windows")
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return None
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("foreground") is not True:
+            continue
+        fact: dict[str, Any] = {}
+        title = str(row.get("title") or "").strip()
+        if title:
+            fact["title"] = title[:200]
+        process_name = str(row.get("process_name") or "").strip()
+        if process_name:
+            fact["process_name"] = process_name[:80]
+        class_name = str(row.get("class_name") or "").strip()
+        if class_name:
+            fact["class_name"] = class_name[:120]
+        hwnd = row.get("hwnd")
+        if type(hwnd) is int and hwnd > 0:
+            fact["hwnd"] = hwnd
+        return fact or None
+    return None
 
 
 def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
@@ -1233,7 +1304,13 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
                     "Run PowerShell or cmd for code, files, processes, and "
                     "command output. Every call starts a fresh shell process, "
                     "so directory changes never persist between calls; pass "
-                    "cwd for project-local commands. ok and exit_code describe "
+                    "cwd for project-local commands. A powershell command "
+                    "already runs inside PowerShell, in this process: a nested "
+                    "powershell -Command or -File starts a separate process "
+                    "that inherits none of this one's state - not its "
+                    "variables, and not its DPI awareness, so window "
+                    "coordinates applied from a nested shell are scaled by the "
+                    "display factor. ok and exit_code describe "
                     "only the child process; they never provide a physical "
                     "mouse or keyboard receipt. Use the desktop input tools "
                     "for real input."
@@ -1331,17 +1408,41 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
 
 
 def _window_text_tool_definitions() -> list[dict[str, Any]]:
-    """One generic read-only window-text tool for the visual line."""
+    """One read-only window-text tool that can name any window on the desktop.
+
+    The tool used to read "whatever owns focus", which quietly made every text
+    read a focus change: a value living in a second window could only be read by
+    activating it first.  The model decides which window it means - a handle
+    from ``list_windows`` or a title fragment - and focus is only the fallback
+    when it names none.
+    """
 
     return [
         {
             "type": "function",
             "function": {
                 "name": _WINDOW_TEXT_TOOL,
-                "description": "Read current window text.",
+                "description": (
+                    "Read the on-screen accessibility text of one window "
+                    "without using the mouse or keyboard. `window` accepts a "
+                    "handle from list_windows or part of a window title; omit "
+                    "it to read the window that currently owns focus. An "
+                    "unresolved name returns the candidate windows instead of "
+                    "guessing."
+                ),
                 "parameters": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "window": {
+                            "type": "string",
+                            "maxLength": 256,
+                            "description": (
+                                "Window handle from list_windows, or a title "
+                                "fragment. Empty reads the focused window."
+                            ),
+                            "default": "",
+                        },
+                    },
                     "required": [],
                     "additionalProperties": False,
                 },
@@ -1375,6 +1476,50 @@ def _copy_current_view_tool_definitions() -> list[dict[str, Any]]:
                     },
                     requires_local_intent=False,
                 ),
+                "strict": True,
+            },
+        },
+    ]
+
+
+def _activate_window_tool_definitions() -> list[dict[str, Any]]:
+    """One tool that can bring a named window to the front.
+
+    Needed because an application may own several windows with the same title
+    and the one in front can be a blank full-screen placeholder, leaving every
+    click and keystroke with no visible effect. A human fixes that by switching
+    windows; without this tool the model cannot express "switch to that one".
+    """
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _ACTIVATE_WINDOW_TOOL,
+                "description": (
+                    "Bring one window to the front: restore it if minimized, "
+                    "raise it above its sibling windows, and try to focus it. "
+                    "`window` is a handle from list_windows or part of a title "
+                    "or process name. Use this when the screen you are looking "
+                    "at belongs to the wrong window of an application - for "
+                    "example a blank full-screen window that shares its title "
+                    "with the real panel."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "window": {
+                            "type": "string",
+                            "maxLength": 256,
+                            "description": (
+                                "Window handle from list_windows, or a title or "
+                                "process-name fragment."
+                            ),
+                        },
+                    },
+                    "required": ["window"],
+                    "additionalProperties": False,
+                },
                 "strict": True,
             },
         },
@@ -1428,6 +1573,17 @@ def _window_text_exchange(
     arguments = _decode_arguments(raw_arguments)
     if type(arguments) is not dict:
         raise LiveModelRoleError("Actor window-text arguments must be a JSON object")
+    # Only the window selector survives validation; an unknown or mistyped
+    # selector reads the focused window instead of failing the turn, because a
+    # read has no physical effect and a rejection here would only cost a turn.
+    raw_window = arguments.get("window", "")
+    if raw_window is None:
+        raw_window = ""
+    if type(raw_window) is int:
+        raw_window = str(raw_window)
+    if type(raw_window) is not str:
+        raw_window = ""
+    arguments = {"window": raw_window.strip()[:256]}
     content = member(message, "content")
     if content is not None and type(content) is not str:
         raise LiveModelRoleError("Actor window-text content must be text or null")
@@ -1454,15 +1610,32 @@ def _window_text_exchange(
 def _call_window_text(
     reader: Any,
     turn: ActorTurnInput,
+    arguments: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Read the bound target window's visible text through the injected reader."""
+    """Read one window's visible text through the injected reader.
+
+    ``arguments['window']`` is the model's own selector: a handle or a title
+    fragment, empty for the focused window.  The reader resolves it and reports
+    candidates when the name does not identify exactly one window.
+    """
     if reader is None or not callable(reader):
         return _actionable_tool_result(
             _WINDOW_TEXT_TOOL,
             {"ok": False, "error": "window-text reader is unavailable"},
         )
+    request = {
+        "window": str((arguments or {}).get("window") or "").strip()[:256],
+        "turn": turn,
+    }
     try:
-        result = reader(turn)
+        result = reader(request)
+    except TypeError:
+        # A reader written against the earlier one-argument contract still
+        # works; the selector simply has no effect.
+        try:
+            result = reader(turn)
+        except Exception as exc:
+            return _actionable_tool_error(_WINDOW_TEXT_TOOL, exc)
     except Exception as exc:
         return _actionable_tool_error(_WINDOW_TEXT_TOOL, exc)
     if not isinstance(result, Mapping):
@@ -1575,6 +1748,30 @@ def _call_copy_current_view(
             TypeError("current-view clipboard returned a non-object result"),
         )
     return _actionable_tool_result(_COPY_CURRENT_VIEW_TOOL, result)
+
+
+def _call_activate_window(
+    activate_runner: Any,
+    arguments: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ask the injected owner to raise one window and report what happened."""
+
+    if activate_runner is None or not callable(activate_runner):
+        return _actionable_tool_result(
+            _ACTIVATE_WINDOW_TOOL,
+            {"ok": False, "error": "window activation is unavailable"},
+        )
+    request = {"window": str((arguments or {}).get("window") or "").strip()[:256]}
+    try:
+        result = activate_runner(request)
+    except Exception as exc:
+        return _actionable_tool_error(_ACTIVATE_WINDOW_TOOL, exc)
+    if not isinstance(result, Mapping):
+        return _actionable_tool_error(
+            _ACTIVATE_WINDOW_TOOL,
+            TypeError("window activation returned a non-object result"),
+        )
+    return _actionable_tool_result(_ACTIVATE_WINDOW_TOOL, result)
 
 
 def _call_list_windows(
@@ -1952,6 +2149,12 @@ def _visual_batch_call(
         exchange = _local_utility_exchange(response)
     elif name == _WINDOW_TEXT_TOOL:
         exchange = _window_text_exchange(response)
+    elif name == _COPY_CURRENT_VIEW_TOOL:
+        exchange = _owned_tool_exchange(
+            response,
+            _COPY_CURRENT_VIEW_TOOL,
+            expected_arguments={},
+        )
     elif name == _LIST_WINDOWS_TOOL:
         exchange = _owned_tool_exchange(
             response,
@@ -1962,7 +2165,8 @@ def _visual_batch_call(
         exchange = _connector_exchange(response)
     if exchange is None:
         raise LiveModelRoleError(
-            "Visual tool batches may contain only independent non-GUI tools"
+            f"tool batch rejected: {name!r} is not an independent non-GUI "
+            "query; send a GUI/outcome tool in a turn of its own"
         )
     _assistant, call_id, parsed_name, arguments = exchange
     return call_id, parsed_name, arguments
@@ -1976,6 +2180,9 @@ def _execute_visual_batch_call(
     connector_gateway: Any,
     window_text_reader: Any,
     windows_reader: Any,
+    copy_current_view_runner: Any,
+    image_b64: str,
+    decision_id: str,
     turn: ActorTurnInput,
     timeout_s: float,
     stop_event: Any | None,
@@ -1990,7 +2197,13 @@ def _execute_visual_batch_call(
     if name in _LOCAL_UTILITY_TOOLS:
         return _call_local_utility(shell_runner, name, arguments)
     if name == _WINDOW_TEXT_TOOL:
-        return _call_window_text(window_text_reader, turn)
+        return _call_window_text(window_text_reader, turn, arguments)
+    if name == _COPY_CURRENT_VIEW_TOOL:
+        return _call_copy_current_view(
+            copy_current_view_runner,
+            image_b64=image_b64,
+            decision_id=decision_id,
+        )
     if name == _LIST_WINDOWS_TOOL:
         return _call_list_windows(windows_reader)
     return _call_connector(
@@ -2128,6 +2341,7 @@ class LiveVisualActor:
         window_text_reader: Any | None = None,
         copy_current_view_runner: Any | None = None,
         windows_reader: Any | None = None,
+        activate_window_runner: Any | None = None,
         history: Sequence[Mapping[str, Any]] = (),
         max_attempts: int = 1,
     ) -> None:
@@ -2175,6 +2389,11 @@ class LiveVisualActor:
         self._windows_reader = (
             windows_reader if callable(windows_reader) else None
         )
+        self._activate_window_runner = (
+            activate_window_runner
+            if callable(activate_window_runner)
+            else None
+        )
         if isinstance(history, (str, bytes)) or not isinstance(
             history, Sequence
         ):
@@ -2204,6 +2423,52 @@ class LiveVisualActor:
     def latest_narration(self) -> str:
         return self._latest_progress_note
 
+    def _window_text_after_action(self) -> dict[str, Any] | None:
+        """The focused window's own text right after one completed action.
+
+        A 1120px-wide frame can make a calculator display, a text field or an
+        editor line unreadable even when the application publishes that text
+        through accessibility.  Returning it with the action result is a fact
+        about what the screen now contains, not a judgment about the goal, and
+        it costs no extra model turn.  Any failure - no reader, an unreadable
+        window, an empty result - simply omits the fact; physical input has
+        already happened and must never be turned into an error here.
+        """
+
+        reader = self._window_text_reader
+        if reader is None:
+            return None
+        try:
+            raw = reader({"window": ""})
+        except Exception:
+            return None
+        if not isinstance(raw, Mapping):
+            return None
+        if raw.get("ok") is False or raw.get("error"):
+            return None
+        text = str(raw.get("text") or "").strip()
+        if not text:
+            return None
+        text = text[:_POST_ACTION_WINDOW_TEXT_CHARS]
+        # Accessibility text can contain a lone surrogate from a broken glyph.
+        # Serializing that would raise inside the turn, so replace it here where
+        # the cost is one lost character instead of a failed action result.
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            text = text.encode("utf-8", "replace").decode("utf-8")
+        fact: dict[str, Any] = {
+            "text": text,
+            "truncated": len(str(raw.get("text") or "")) > _POST_ACTION_WINDOW_TEXT_CHARS,
+        }
+        title = str(raw.get("window_title") or "").strip()
+        if title:
+            fact["window_title"] = title[:200]
+        hwnd = raw.get("window_hwnd")
+        if type(hwnd) is int and hwnd > 0:
+            fact["window_hwnd"] = hwnd
+        return fact
+
     @property
     def standalone_model_call_allowance(self) -> int:
         """Finite fallback for direct role users outside the live Runtime."""
@@ -2227,6 +2492,10 @@ class LiveVisualActor:
         ) + (
             _STANDALONE_LIST_WINDOWS_ALLOWANCE
             if self._windows_reader is not None
+            else 0
+        ) + (
+            _STANDALONE_ACTIVATE_WINDOW_ALLOWANCE
+            if self._activate_window_runner is not None
             else 0
         )
         return 3 + local_allowance
@@ -2284,13 +2553,18 @@ class LiveVisualActor:
                 patch.scratchpad
                 if patch.scratchpad is not None
                 else _canonical_json(
-                    {"remaining_items": list(patch.remaining_items or ())}
+                    {"todos": [item.to_dict() for item in patch.todos or ()]}
                 )
             )
             self._emit_activity(
                 kind="task_state",
                 message=visible_state[:8192],
                 task_state=visible_state[:8192],
+                task_state_scratchpad=self._current_task_state.scratchpad[:8192],
+                task_state_todos=[
+                    item.to_dict()
+                    for item in self._current_task_state.todos
+                ],
             )
         local_intent = arguments.pop("local_intent", None)
         runtime_name = _runtime_name_from_model_call(name, raw_arguments)
@@ -2421,6 +2695,11 @@ class LiveVisualActor:
             if self._windows_reader is not None
             else []
         )
+        activate_tools = (
+            _activate_window_tool_definitions()
+            if self._activate_window_runner is not None
+            else []
+        )
         connector_tools = _connector_tool_definitions(self._connector_gateway)
         turn_context = turn.to_dict()
         turn_context.pop("tools")
@@ -2468,6 +2747,17 @@ class LiveVisualActor:
                             compact_background.append(projected)
                 if compact_background:
                     context["background_applications"] = compact_background
+                # Which window the desktop is actually showing right now. A
+                # full-desktop frame is an image with no caption, so a click that
+                # brings another app forward silently changes what every later
+                # frame is about while the picture keeps looking "plausible".
+                # Measured: a QQ task whose click summoned the music player kept
+                # clicking the old coordinates for ~40 turns, still narrating
+                # "the QQ chat is open". The foreground identity is a fact the
+                # runtime already has; naming it costs one short object.
+                foreground = _foreground_window_fact(window_inventory)
+                if foreground is not None:
+                    context["foreground_window"] = foreground
         previous_action = context.get("previous_action")
         if (
             isinstance(previous_action, dict)
@@ -2521,6 +2811,16 @@ class LiveVisualActor:
                 completed_result = {
                     "previous_action": turn.previous_action.to_dict()
                 }
+                # The frame is 1120px wide, so a calculator display, a form
+                # field or an editor line can be too small to read reliably,
+                # while the same application publishes that text through
+                # accessibility. Attach the focused window's own text to the
+                # action's result so the model sees what its action produced
+                # without spending a whole turn asking for it. It is a fact,
+                # never a verdict, and an unreadable window omits it.
+                window_text = self._window_text_after_action()
+                if window_text is not None:
+                    completed_result["window_text"] = window_text
         if previous_exchange is not None and completed_result is not None:
             previous_exchange.result_content = completed_result
             self._completed_visual_history.extend(
@@ -2565,6 +2865,7 @@ class LiveVisualActor:
                 *window_text_tools,
                 *copy_current_view_tools,
                 *windows_tools,
+                *activate_tools,
                 *connector_tools,
             ],
             # MiMo's documented Chat Completions surface supports only
@@ -2613,8 +2914,61 @@ class LiveVisualActor:
                     envelopes = [
                         _visual_batch_call(call) for call in visual_calls
                     ]
-                except LiveModelRoleError:
-                    envelopes = []
+                except LiveModelRoleError as exc:
+                    # Do not fail the whole run on one malformed batch. Report
+                    # the offending calls back to the same model as in-band
+                    # tool errors so it can resend the GUI/outcome call alone,
+                    # matching how ordinary tool failures are handled.
+                    assistant = {
+                        "role": "assistant",
+                        "content": (
+                            member(response_message(outcome.response), "content")
+                            or ""
+                        ),
+                        "tool_calls": [
+                            {
+                                "id": member(call, "id"),
+                                "type": "function",
+                                "function": {
+                                    "name": member(
+                                        member(call, "function"), "name"
+                                    ),
+                                    "arguments": member(
+                                        member(call, "function"), "arguments"
+                                    ),
+                                },
+                            }
+                            for call in visual_calls
+                        ],
+                    }
+                    rejection_messages: list[dict[str, Any]] = [assistant]
+                    for call in visual_calls:
+                        call_id = str(member(call, "id") or "")
+                        call_name = str(
+                            member(member(call, "function"), "name") or ""
+                        )
+                        rejection = {
+                            "ok": False,
+                            "error": str(exc),
+                            "next_step": (
+                                "send a GUI/outcome tool in a turn of its own; "
+                                "only independent non-GUI queries may share one "
+                                "batch"
+                            ),
+                        }
+                        self._record_tool_result(call_name, rejection)
+                        rejection_messages.append(
+                            _projected_tool_message(
+                                seen_tool_results,
+                                name=call_name,
+                                call_id=call_id,
+                                result=rejection,
+                                model_calls_remaining=model_calls_remaining,
+                            )
+                        )
+                    current_exchange.extend(rejection_messages)
+                    provider_request["messages"].extend(rejection_messages)
+                    continue
             if envelopes:
                 message = response_message(outcome.response)
                 content = member(message, "content")
@@ -2656,6 +3010,9 @@ class LiveVisualActor:
                         connector_gateway=self._connector_gateway,
                         window_text_reader=self._window_text_reader,
                         windows_reader=turn_windows_reader,
+                        copy_current_view_runner=self._copy_current_view_runner,
+                        image_b64=image_b64,
+                        decision_id=_decision_id(turn, image_b64),
                         turn=turn,
                         timeout_s=min(30.0, self._total_timeout_s),
                         stop_event=stop_event,
@@ -2676,7 +3033,7 @@ class LiveVisualActor:
                             seen_tool_results,
                             name=name,
                             call_id=call_id,
-                            result=result,
+                            result=_model_visible_tool_result(result),
                             model_calls_remaining=model_calls_remaining,
                         )
                     )
@@ -2757,6 +3114,7 @@ class LiveVisualActor:
                 result = _call_window_text(
                     self._window_text_reader,
                     turn,
+                    arguments,
                 )
                 self._record_tool_result(name, result)
                 connector_messages = [
@@ -2836,6 +3194,39 @@ class LiveVisualActor:
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
                 continue
+            activate = None
+            if self._activate_window_runner is not None:
+                try:
+                    activate = _owned_tool_exchange(
+                        outcome.response,
+                        _ACTIVATE_WINDOW_TOOL,
+                        expected_arguments={"window": str},
+                    )
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if activate is not None:
+                assistant, call_id, name, arguments = activate
+                self._record_tool_start(
+                    _initial_calls_from_response(outcome.response)[0]
+                )
+                result = _call_activate_window(
+                    self._activate_window_runner,
+                    arguments,
+                )
+                self._record_tool_result(name, result)
+                connector_messages = [
+                    assistant,
+                    _projected_tool_message(
+                        seen_tool_results,
+                        name=name,
+                        call_id=call_id,
+                        result=result,
+                        model_calls_remaining=model_calls_remaining,
+                    ),
+                ]
+                current_exchange.extend(connector_messages)
+                provider_request["messages"].extend(connector_messages)
+                continue
             try:
                 connector = _connector_exchange(outcome.response)
             except LiveModelRoleError as exc:
@@ -2878,7 +3269,25 @@ class LiveVisualActor:
                         str(exc),
                     )
                     if repair is None:
-                        raise
+                        # No single malformed call to attach feedback to (for
+                        # example the model answered with prose or an empty
+                        # turn).  Nudge the same model once per remaining model
+                        # call instead of failing the whole run.
+                        nudge = [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Your last reply contained no usable tool "
+                                    f"call ({str(exc)[:300]}). Reply now with "
+                                    "exactly one tool call: a GUI action, an "
+                                    "independent non-GUI query, reply_to_user "
+                                    "or blocked."
+                                ),
+                            }
+                        ]
+                        current_exchange.extend(nudge)
+                        provider_request["messages"].extend(nudge)
+                        continue
                     assistant, call_id = repair
                     repair_messages = [
                         assistant,

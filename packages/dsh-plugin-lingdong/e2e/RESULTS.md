@@ -366,6 +366,93 @@ trace 时间戳为证：`read_target_text` 07:52 开始、08:52 落盘；`menu_p
 - 修 DPI 的代价是 **+199 ms / 次 shell 调用**，已实测；本轮 `terminate_app` 反而快了，
   说明该代价被行为改善盖过，但**没有逐任务隔离过**。
 
+## 第八轮：给模型"窗口自己说的话"之后（2026-10-17 晚，agent 臂 + 三臂对照）
+
+主产品侧只改了两处机械层（详见 `docs/handover/main-product-history.md` 同日条目）：
+
+1. **`read_window_text` 可以点名窗口**：`window` 可选参数（`list_windows` 的句柄 / 标题或进程名片段），
+   空则回到焦点窗口；未命中或歧义返回候选，不再静默解析到错的窗口。
+2. **每个完成的 GUI 动作，结果里自带焦点窗口的 UIA 文本**（≤600 字符 + `window_title` / `window_hwnd`）。
+   1120px 提交帧里读不清的表达式行/字段值，从此以文本形式随回执到达；读不到就省略字段。
+
+### agent 臂：4 个任务，改前 / 改后
+
+| 任务 | 改前 | 改后（各 2 轮，`fill_form`/`calculator` 1 轮） |
+|---|---|---|
+| `cross_window_token` | **FAIL** 40 步 / 424s | **PASS** 26 步 / 423s · **PASS** 34 步 / 423s |
+| `cross_app_pipeline` | **FAIL** 43 步 / 425s | **PASS 13 步 / 94s** · **FAIL** 63 步 / 425s |
+| `fill_form` | PASS 9 步 | PASS 12 步 / 77s |
+| `calculator_clipboard` | FAIL 41 步 / 424s | **FAIL** 64 步 / 423s |
+
+**改前 1/4，改后逐回合 4/6；4 个任务里 3 个至少过一次（改前 1 个）。**
+
+### 同一批 oracle 上的三条臂
+
+| 任务 | agent（本产品） | cua（新 profile 的 dsh + 自带 computer use） | lingdong（本插件） |
+|---|---|---|---|
+| `cross_window_token` | PASS 26 / PASS 34 步 | PASS 35 步 / 110s | PASS 15 步 / 59s |
+| `cross_app_pipeline` | PASS 13 / FAIL 63 步 | PASS 53 步 / 132s | PASS 23 步 / 69s |
+
+报告：`report-1792235221603` / `report-1792236268433`（agent · 跨窗）、
+`report-1792235320589` / `report-1792236697670`（agent · 跨应用）、
+`report-1792236811624` / `report-1792236950151`（cua）、
+`report-1792237012767` / `report-1792237087903`（lingdong）。
+
+### 结论（不要省略）
+
+- **完成率这一轮确实变好了，但幅度是"从必失败到会成功"，不是稳定通过**：
+  `cross_window_token` 2/2、`cross_app_pipeline` 1/2。
+- **`cross_window_token` 两次都在 423 秒通过**，正好压在 harness 的 420 秒超时线上；
+  提交发生在取消前后，外侧 oracle 读到了提交结果，PASS 成立，但**不能读成"快"**。
+  产品预算是 200 回合 / 7200 秒，420 秒是测量台的耐心。
+- **仍然失败的两次都是同一个病：模型把数字键盘读成列优先布局**。
+  改后失败的那轮 62 笔 `click`（30 次同一点），成功的那轮用
+  `type_text "36*54"` 直接算。同一份上下文里两条路都开着 → **这是模型层，不是机械层**。
+  按根 `AGENTS.md` 记下来，不加硬门禁。
+- 三个臂**仍不是同一个模型**（agent = `mimo-v2.6-flash`，两条 DSH 臂 = `deepseek-flash`）。
+- 墙钟不可跨臂比：agent 臂 423s 对 110s / 59s，差额主要是模型延迟（每步 5–8s）+ 每回合一次 UIA 读数。
+
+### 追加：真前端一轮 + 同模型对照（同日）
+
+前面的 agent 臂都是直连 `POST /api/v2/goals/runs`（前端自己也只有这一条路由）。补的一轮是
+**Electron 里手动键入目标并回车**：
+
+- 模型不是代码默认，而是本机 `config.json` 的 `active_model_profile`（当时是 `mimo`）。
+  切成 `deepseek` 档案后重启前端，chip 显示 `deepseek-flash`。
+- 同一目标（35×80 → 存 `output/e2e/t10.txt`）从 UI 提交：**PASS**，
+  **24 回合 / 32 次模型调用 / 2 分 5 秒**，磁盘文件逐字节 `2800`。
+- 于是 `cross_app_pipeline` 的三臂在**同一模型**下可比：
+  **agent 24 回合 PASS · cua 53 回合 PASS · lingdong 23 回合 PASS**。
+- `deepseek-flash` 同样先点计算器键盘（前 11 回合坐标漂移），后来改成输入/文件路径并自检才救回来。
+  **读错键盘布局不是单个模型的问题。**
+
+### 第九轮：**三臂同模型**（agent 切到 `deepseek-flash`），4 任务 × 2 轮
+
+把本机 `config.json` 的当前档案从 `mimo` 切成 `deepseek`（`model_profiles.deepseek`）后，
+三个臂第一次跑在**同一个模型**上。同一批 oracle、同一台机、同一轮：
+
+| 任务 | agent r1 | agent r2 | cua | lingdong |
+|---|---|---|---|---|
+| `cross_app_pipeline` | **PASS 8 步 / 34s** | PASS 24 步 / 87s | PASS 53 / 132s | PASS 23 / 69s |
+| `cross_window_token` | PASS 17 / 47s | PASS 21 / 57s | PASS 35 / 110s | **PASS 15 / 59s** |
+| `calculator_clipboard` | PASS 13 / 55s | **PASS 5 / 29s** | PASS 36 / 119s | PASS 10 / 43s |
+| `fill_form` | PASS 15 / 43s | PASS 14 / 37s | PASS 35 / 104s | PASS 18 / 50s |
+| **合计** | **4/4 · 53 步 · 0.59M tok** | **4/4 · 64 步 · 0.77M tok** | **4/4 · 159 步 · 7.87M tok** | **4/4 · 66 步 · 3.49M tok** |
+
+报告：agent r1 `report-1792238{123325,172487,230371,275592}`；
+agent r2 `report-1792238{372733,432246,464590,504371}`；
+cua `report-1792238{626769,734213}` + `report-1792236{811624,950151}`；
+lingdong `report-1792238{780868,834087}` + `report-1792237{012767,087903}`。
+
+**结论（同模型下）**：
+
+- **完成率在这一批 4 个任务上三臂打平：都是 4/4。** 没有任何一臂在这批任务上掉过。
+  也就是说：**这批任务已经不能区分完成率了**——要区分，必须换更难/更长的任务集。
+- **成本分层很清楚**：步数 agent 53–64 ≈ lingdong 66 ≪ cua 159；
+  tokens agent 0.59–0.77M ≪ lingdong 3.49M ≪ cua 7.87M。agent 的固定前缀最小（约 9k 对 27.6k / 51.4k）。
+- **同一任务两轮步数方差很大**（`cross_app_pipeline` 8 对 24、`calculator_clipboard` 13 对 5），
+  **完成率稳定、步数不稳**——引用成本必须多轮取中位数，不能拿单轮。
+
 ## 原始记录
 
 `output/e2e/report-<ts>.json`：每任务 step 数 / tokens / 耗时 / oracle 判定 / agent 事件流 / stderr。`output/` 已 gitignore。

@@ -297,10 +297,14 @@ def test_list_windows_reports_deduped_background_applications(monkeypatch) -> No
 
     assert [item["title"] for item in result["windows"]] == ["Editor"]
     assert result["background_count"] == 1
+    # The handle and the minimized flag stay attached so a window that is
+    # minimized or behind a sibling can still be named and raised.
     assert result["background_applications"] == [{
         "process_name": "QQ.exe",
         "title": "QQ",
         "state": "minimized",
+        "hwnd": 200,
+        "minimized": True,
     }]
 
 

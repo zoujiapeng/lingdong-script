@@ -79,6 +79,14 @@ _ACTIONS = frozenset(
 _JPEG_MEDIA_TYPE = "image/jpeg"
 _MAX_SCROLL_AMOUNT = 1200
 _MAX_LAUNCH_EFFECT_CHARS = 200
+# Pointer actions whose press point can be named back to the model.
+_POINTER_ACTIONS = frozenset({"click", "double_click", "drag", "move_mouse"})
+# Bounded press memory and the area treated as "the same place".  These only
+# shape a reported fact; nothing is refused because of them.
+_RECENT_PRESS_LIMIT = 32
+_REPEAT_AREA_X_PX = 120
+_REPEAT_AREA_Y_PX = 90
+_REPEAT_WINDOW_MIN_SAMPLES = 5
 # One spatial turn can make an Actor call followed by a Grounder call.  Keep
 # the emergency lease longer than their combined production timeout; normal
 # release is the next drag segment or session.close(), not this fallback.
@@ -156,6 +164,7 @@ class RawReceiptTraceSink(Protocol):
 @dataclass(frozen=True, slots=True)
 class _PreparedAction:
     action: str
+    image_point: tuple[float, float] | None = None
     point: PhysicalPoint | None = None
     end_point: PhysicalPoint | None = None
     points: tuple[PhysicalPoint, ...] | None = None
@@ -177,10 +186,21 @@ class _PreparedAction:
 
 
 @dataclass(frozen=True, slots=True)
+class _PointerHit:
+    """The top-level window that was under the press point when it was pressed."""
+
+    hwnd: int
+    title: str = ""
+    class_name: str = ""
+    process_id: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class _PinnedExecution:
     before_frame: RuntimeFrame | None
     receipt: RawActionReceipt
     raw_device_called: bool = False
+    hit: _PointerHit | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +231,8 @@ class AtomicDesktopAdapter:
         clock: Callable[[], float] = time.monotonic,
         held_pointer_timeout_s: float = _DEFAULT_HELD_POINTER_TIMEOUT_S,
         desktop_shell: bool = False,
+        window_facts: Callable[[int], Any] | None = None,
+        clipboard_text: Callable[[str], Any] | None = None,
     ) -> None:
         if not isinstance(frame_authority, FrameAuthority):
             raise TypeError("frame_authority must be FrameAuthority")
@@ -250,6 +272,10 @@ class AtomicDesktopAdapter:
             raise TypeError("raw_device must be RawDeviceExecutor")
         if launcher is not None and not callable(launcher):
             raise TypeError("launcher must be callable or null")
+        if window_facts is not None and not callable(window_facts):
+            raise TypeError("window_facts must be callable or null")
+        if clipboard_text is not None and not callable(clipboard_text):
+            raise TypeError("clipboard_text must be callable or null")
         if type(desktop_shell) is not bool:
             raise TypeError("desktop_shell must be boolean")
         if receipt_trace_sink is not None and not callable(
@@ -303,6 +329,13 @@ class AtomicDesktopAdapter:
         self._held_pointer: _HeldPointerLease | None = None
         self._pointer_uncertain = False
         self._closed = False
+        self._window_facts = window_facts
+        self._clipboard_text = clipboard_text
+        # Bounded press memory: enough to say "you keep pressing here" without
+        # becoming a plan or a policy.  It is reported, never acted on.
+        self._recent_presses: list[tuple[int, int, int]] = []
+        self._press_streak_hwnd: int | None = None
+        self._press_streak_count = 0
 
     @property
     def _is_desktop_shell(self) -> bool:
@@ -556,7 +589,7 @@ class AtomicDesktopAdapter:
                     action=action,
                     input_completed=True,
                     visible_effect=self._completed_input_effect(
-                        receipt, prepared,
+                        receipt, prepared, pinned.hit,
                     ),
                 )
             return self._unknown_transition(
@@ -580,7 +613,7 @@ class AtomicDesktopAdapter:
                     action=action,
                     input_completed=True,
                     visible_effect=self._completed_input_effect(
-                        receipt, prepared,
+                        receipt, prepared, pinned.hit,
                     ),
                 )
             return self._unknown_transition(
@@ -604,7 +637,7 @@ class AtomicDesktopAdapter:
             action_id=envelope.decision_id,
             action=action,
             input_completed=True,
-            visible_effect=self._completed_input_effect(receipt, prepared),
+            visible_effect=self._completed_input_effect(receipt, prepared, pinned.hit),
             post_frame_id=post_frame.frame_id,
         )
 
@@ -643,14 +676,18 @@ class AtomicDesktopAdapter:
             )
 
         raw_started = False
+        hit: _PointerHit | None = None
 
         def invoke_raw() -> RawActionReceipt:
-            nonlocal raw_started
+            nonlocal raw_started, hit
             if stop_event is not None and stop_event.is_set():
                 return self._not_started(
                     prepared.action,
                     "stop_requested_after_queue",
                 )
+            # Resolve the press target while the press point is still what the
+            # model chose; the answer rides back on the same receipt.
+            hit = self._record_pointer_press(prepared)
             self._publish_physical_attempt(
                 envelope,
                 prepared,
@@ -720,7 +757,7 @@ class AtomicDesktopAdapter:
                     "desktop_queue_boundary_exception",
                 )
             )
-        return _PinnedExecution(before_frame, receipt, raw_started)
+        return _PinnedExecution(before_frame, receipt, raw_started, hit)
 
     def _run_raw(
         self,
@@ -845,12 +882,23 @@ class AtomicDesktopAdapter:
 
         if prepared.action == "type_text":
             assert prepared.text is not None
+            if (
+                self._clipboard_text is not None
+                and prepared.text
+                and not prepared.text.isascii()
+            ):
+                return self._type_text_via_clipboard(
+                    context,
+                    prepared,
+                    stop_event=stop_event,
+                )
             return self._raw.type_text(
                 context,
                 prepared.text,
                 enforce_foreground=False,
                 stop_event=stop_event,
             )
+
         assert prepared.action == "hotkey" and prepared.chord is not None
         return self._raw.hotkey(
             context,
@@ -859,6 +907,63 @@ class AtomicDesktopAdapter:
             enforce_foreground=False,
             stop_event=stop_event,
         )
+
+    def _type_text_via_clipboard(
+        self,
+        context: RawActionContext,
+        prepared: _PreparedAction,
+        *,
+        stop_event: threading.Event | None,
+    ) -> RawActionReceipt:
+        """Deliver text through the clipboard, then restore what was there.
+
+        Measured: QQ's composer ignores synthesized character events (two
+        attempts changed no pixel) but accepts Ctrl+V. Input still flows through
+        the same single raw-device owner; only the text arrives via the
+        clipboard, and the receipt says so.
+        """
+
+        assert prepared.text is not None
+        written: Any = None
+        try:
+            written = self._clipboard_text(prepared.text)
+        except Exception as exc:
+            written = {"ok": False, "error": str(exc)}
+        if not isinstance(written, Mapping) or written.get("ok") is not True:
+            # The clipboard did not accept the text; the ordinary typing path
+            # still deserves its attempt.
+            return self._raw.type_text(
+                context,
+                prepared.text,
+                enforce_foreground=False,
+                stop_event=stop_event,
+            )
+        receipt = self._raw.hotkey(
+            context,
+            HotkeyChord(("ctrl", "v")),
+            enforce_foreground=False,
+            stop_event=stop_event,
+        )
+        previous = written.get("previous")
+        if isinstance(previous, str) and previous:
+            try:
+                self._clipboard_text(previous)
+            except Exception:
+                pass
+        if receipt.backend_result is None:
+            return receipt
+        facts = dict(receipt.backend_result.facts)
+        facts["via"] = "clipboard_paste"
+        facts["characters"] = len(prepared.text)
+        return replace(
+            receipt,
+            action="type_text",
+            backend_result=RawBackendResult(
+                receipt.backend_result.input_completed,
+                facts,
+            ),
+        )
+
 
     def _run_launch(
         self,
@@ -893,7 +998,7 @@ class AtomicDesktopAdapter:
         if not isinstance(result, Mapping) or result.get("ok") is not True:
             return self._not_started(
                 prepared.action,
-                "launch_application_failed",
+                self._launch_failure_kind(result),
             )
         via = str(result.get("via") or "generic")
         facts = {
@@ -960,16 +1065,179 @@ class AtomicDesktopAdapter:
             return "found an already-running instance; no new one started"
         return ""
 
-    @classmethod
+    @staticmethod
+    def _launch_failure_kind(result: Any) -> str:
+        """Self-describing failure kind so the model can name the real reason.
+
+        A bare ``launch_application_failed`` forces the same model to guess; the
+        launcher's own error and the nearest installed-app names let it correct
+        the arguments instead of retrying an unresolvable name.
+        """
+
+        kind = "launch_application_failed"
+        if not isinstance(result, Mapping):
+            return kind
+        detail = ""
+        error = str(result.get("error") or "").strip()
+        if error:
+            detail += f": {error}"
+        suggestions = result.get("suggestions")
+        if isinstance(suggestions, (list, tuple)):
+            names = [
+                str(item).strip()
+                for item in suggestions
+                if str(item).strip()
+            ]
+            if names:
+                detail += " | try: " + ", ".join(names[:3])
+        return (kind + detail)[:300]
+
+    def _pointer_hit(self, point: PhysicalPoint) -> _PointerHit | None:
+        """The top-level window under one physical point, or null.
+
+        The runtime already owns a hit test (the workspace probe); this only
+        stops throwing its answer away.  Nothing here can veto input: a missing
+        answer means the receipt says less, never that the press is refused.
+        """
+
+        probe = getattr(self._workspace, "hit_test_root", None)
+        if not callable(probe):
+            return None
+        try:
+            hwnd = probe(int(point[0]), int(point[1]))
+        except Exception:
+            return None
+        if type(hwnd) is not int or hwnd <= 0:
+            return None
+        title = class_name = ""
+        process_id = 0
+        facts = self._window_facts
+        if facts is not None:
+            try:
+                info = facts(hwnd)
+            except Exception:
+                info = None
+            if isinstance(info, Mapping) and info.get("ok") is True:
+                window = info.get("window")
+                if isinstance(window, Mapping):
+                    title = str(window.get("title") or "")[:120]
+                    class_name = str(window.get("class_name") or "")[:80]
+                    try:
+                        process_id = int(window.get("pid") or 0)
+                    except (TypeError, ValueError):
+                        process_id = 0
+        return _PointerHit(
+            hwnd=hwnd,
+            title=title,
+            class_name=class_name,
+            process_id=process_id,
+        )
+
+    def _record_pointer_press(self, prepared: _PreparedAction) -> _PointerHit | None:
+        """Remember one press fact before input so it can be reported back."""
+
+        if prepared.point is None or prepared.action not in _POINTER_ACTIONS:
+            return None
+        hit = self._pointer_hit(prepared.point)
+        hwnd = 0 if hit is None else hit.hwnd
+        with self._pointer_lock:
+            self._recent_presses.append(
+                (hwnd, int(prepared.point[0]), int(prepared.point[1]))
+            )
+            if len(self._recent_presses) > _RECENT_PRESS_LIMIT:
+                del self._recent_presses[:-_RECENT_PRESS_LIMIT]
+            if hwnd and hwnd == self._press_streak_hwnd:
+                self._press_streak_count += 1
+            else:
+                self._press_streak_hwnd = hwnd or None
+                self._press_streak_count = 1
+        return hit
+
+    def _pointer_press_effect(
+        self,
+        point: PhysicalPoint,
+        hit: _PointerHit | None,
+        image_point: tuple[float, float] | None = None,
+    ) -> str:
+        """Report where the press landed and how repetitive it has become.
+
+        A model whose click focuses a text box sees almost nothing change at
+        1120px, so it presses again; measured on QQ that ran for dozens of turns
+        while the model's own reasoning said "click the input box and type".
+        Both counts are facts about this run's presses, not advice about what to
+        do next.  The submitted-image point is named next to the screen point so
+        a receipt in one space and a frame in another cannot cost the model two
+        turns of guessing which scale it used.
+        """
+
+        x, y = int(point[0]), int(point[1])
+        if image_point is not None:
+            where = (
+                f"image {int(image_point[0])},{int(image_point[1])} = "
+                f"screen {x},{y}"
+            )
+        else:
+            where = f"screen {x},{y}"
+        parts = [f"pointer receipt: pressed at {where}"]
+        if hit is not None:
+            label = hit.title or hit.class_name or "an untitled window"
+            identity = f"window {label!r}"
+            if hit.process_id:
+                identity += f" (pid {hit.process_id})"
+            parts[0] += f" on {identity}"
+        with self._pointer_lock:
+            streak = self._press_streak_count
+            recent = list(self._recent_presses)
+        if hit is not None and streak >= 3:
+            parts.append(f"this is press {streak} in a row on that window")
+        total = len(recent)
+        if total >= _REPEAT_WINDOW_MIN_SAMPLES:
+            near = sum(
+                1
+                for _hwnd, press_x, press_y in recent
+                if abs(press_x - x) <= _REPEAT_AREA_X_PX
+                and abs(press_y - y) <= _REPEAT_AREA_Y_PX
+            )
+            if near >= _REPEAT_WINDOW_MIN_SAMPLES:
+                parts.append(
+                    f"{near} of your last {total} presses landed within "
+                    f"{_REPEAT_AREA_X_PX}x{_REPEAT_AREA_Y_PX} px of this point"
+                )
+        return "; ".join(parts)
+
     def _completed_input_effect(
-        cls,
+        self,
         receipt: RawActionReceipt,
         prepared: _PreparedAction,
+        hit: _PointerHit | None = None,
     ) -> str:
         """Describe only the completed mechanical input, never its outcome."""
 
         if prepared.action == "launch_application":
-            return cls._launch_visible_effect(receipt, prepared.action)
+            return self._launch_visible_effect(receipt, prepared.action)
+        if prepared.point is not None and prepared.action in _POINTER_ACTIONS:
+            return self._pointer_press_effect(
+                prepared.point,
+                hit,
+                prepared.image_point,
+            )
+        if prepared.action == "type_text" and receipt.input_completed is True:
+            characters = len(prepared.text or "")
+            facts = (
+                {}
+                if receipt.backend_result is None
+                else dict(receipt.backend_result.facts)
+            )
+            if facts.get("via") == "clipboard_paste":
+                return (
+                    f"physical text receipt: pasted {characters} character(s) "
+                    "through the clipboard (this application ignores synthesized "
+                    "key characters); inspect the current screen"
+                )
+            return (
+                f"physical text receipt: typed {characters} character(s) through "
+                "the keyboard; inspect the current screen"
+            )
         if (
             prepared.action == "hotkey"
             and receipt.input_completed is True
@@ -1201,6 +1469,7 @@ class AtomicDesktopAdapter:
                 action=action,
                 point=point,
                 button=button,
+                image_point=(float(args["image_x"]), float(args["image_y"])),
                 press_duration_ms=press_duration_ms,
             )
         if action == "move_mouse":

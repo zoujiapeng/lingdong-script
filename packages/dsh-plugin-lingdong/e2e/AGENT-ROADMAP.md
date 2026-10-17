@@ -247,10 +247,94 @@ C 臂是十几次单动作调用 —— 2.0× 步数差主要从这里来。
 6. **三臂数据进 `e2e/RESULTS.md`**，并保留结论边界。
 
 ---
-## 五、补丁设计（**已全部授权并落地**）
 
-> 用户已授权修改 `vnext/**` 与 `action/shell.py`。下面是**实际做了什么**，
-> 以及每条改动被什么证据支持、复验方式是什么。
+## 五之二、2026-10-17 晚：跨边界缺口补上了（两条机械改动）
+
+上一节把诊断收窄成"跨边界的状态传递缺失"，这一轮就只修那一条，两处都在视觉线内，
+没有新增门禁、校验、分类器或第二角色。完整证据与边界见
+`docs/handover/main-product-history.md` 同日条目与 `e2e/RESULTS.md` 第八轮。
+
+### 改动 A：`read_window_text` 可以点名窗口
+
+- 文件：`vnext/model_roles/visual_actor.py`（工具 schema / exchange / call）、
+  `orchestrator/live_agent.py`（`_window_text_reader_factory`）。
+- 之前读取器只读**调用瞬间拥有焦点的窗口**，工具 schema **没有参数**——"读第二个窗口里的值"
+  必须先抢焦点，一次模型没要求的焦点变更，也是它看不见的隐藏约束。
+- 现在：`window` 可选参数接受句柄或标题/进程名片段；未命中返回可见窗口候选，
+  多重命中返回 `matching_windows` 并要求给句柄。**回绝带回可用项**，与 `invoke_menu` 同形。
+- 踩到的细节：标题是本地化的，"记事本"的标题是 `无标题 - 记事本`，`notepad` 只在
+  **进程名**里；只按标题子串匹配会让 `notepad` 静默落到 Notepad++。所以匹配同时看
+  `title` 与 `process_name`（实测：`notepad` 现在返回两个候选并要句柄）。
+- 复验：`.codex-run/probe-window-text.py`（真机：焦点/按标题/片名/歧义/错句柄五种）。
+
+### 改动 B：完成的 GUI 动作自带焦点窗口文本
+
+- 文件：`vnext/model_roles/visual_actor.py`（`_window_text_after_action`）。
+- 1120px 提交帧里，计算器表达式行 / 表单小字读不清；同一个应用却通过无障碍通道
+  完整发布这段文本。
+- 现在每次 GUI 动作完成后，下一次 turn 的 tool result 里多一个
+  `window_text: {text ≤600, truncated, window_title, window_hwnd}`；读不到就省略字段，
+  **绝不把已发生的物理输入翻成错误**。它是事实，不是判决。
+- 复验：`.codex-run/probe-post-action-text.py`（真机真计算器，返回 `Display is 4`）；
+  单测 `test_completed_gui_action_carries_the_focused_window_text`
+  与 `test_unreadable_window_text_never_fails_a_completed_action`。
+
+### 结果（agent 臂，4 任务）
+
+改前 1/4，改后逐回合 4/6；两个跨边界任务从"必失败"变成"会成功"
+（`cross_window_token` 2/2、`cross_app_pipeline` 1/2，最快 13 步 / 94s）。
+
+### 这一轮真正剩下的东西（下一步按这个）
+
+1. **这批任务已经饱和，先换任务集。** 把 agent 档案切到 `deepseek` 之后，4 个任务三臂**全部 4/4**
+   （agent 两轮 8/8）。成本分层：步数 agent 53–64 ≈ lingdong 66 ≪ cua 159；
+   tokens agent 0.59–0.77M ≪ lingdong 3.49M ≪ cua 7.87M。
+   **继续用这 4 个任务量不出完成率差异**——要么换更长/更多跨边界/更多等待外部状态的任务，
+   要么把指标从"完成率"换成"成本"或"更长任务上的完成率"。
+2. **`mimo` 的失败是模型层，不要硬门禁。** 它把数字键盘读成列优先布局，`window_text`（显示值）
+   与 `same_action_attempts` 都在上下文里，仍重复同一动作几十次；同任务成功的那轮
+   是 `type_text "36*54"` 直接输入。`deepseek` 档案下同一任务 5–13 步通过。
+   按根 `AGENTS.md`：换模型或接受。
+3. **`cross_window_token` 在 `mimo` 下两次都在 423 秒通过**（harness 超时 420 秒）；
+   在 `deepseek` 下 17 / 21 步、47 / 57 秒。**墙钟差异主要是模型延迟**，
+   不要把 423 秒读成"能力到极限"。
+4. **若要把墙钟纳入比较**：先把每回合那次 UIA 读数做成"文本变化时才附带"再测，
+   不要先归因（本轮没有隔离它对 tokens 的贡献）。
+
+---
+
+### 2026-10-17 深夜：同名窗口与文字投递（QQ 一类，已解决）
+
+**症状**：前端发「打开网易云…然后打开 QQ 给我的手机发一句晚上好」，
+音乐那半每次都成，QQ 那半在输入框附近盲点 40+ 次、**0 次输入**、被用户停掉。
+
+**对照**：新 profile 的 dsh + 自带 computer use 跑同一条 QQ 任务 **12 步成功**。
+它的日志显示它先看到**两个 "QQ" 窗口**（`3147966` 的 document 是 `#/blank` → 空壳；
+`2035800` 有 347 个元素 → 真界面），随后在对的窗口里打字。
+
+**根因（三条，全部实测）**：
+
+1. **窗口不可寻址**：`list_windows` 的后台/最小化窗口不带 `hwnd`；`read_window_text("QQ")`
+   只匹配可见窗口 → 命中空壳 → 返回空文本 → 模型没有文本通道。
+   实测产品自己的 `uia.collect(2035800)` 有 **150 个元素 / 119 行文本**，树本来就看得见。
+2. **不能点名抬窗**：空壳是全屏的，盖住真界面；`launch_application QQ` 只会重复激活同一个。
+   实测 `SetWindowPos(真窗口, HWND_TOP)` 一行就把整帧从均值 1.9 / 55 色恢复到 39.4 / 151 色。
+3. **文字投递在 QQ 里静默失败**：合成键盘字符两次都没进一个字（截图逐字节相同），
+   剪贴板粘贴一次就进。
+
+**修法（三处能力 + 两处事实，全部无门禁）**：`list_windows` 带后台 hwnd；
+`read_window_text` 含后台窗口、同名返回候选；新 `activate_window`
+（恢复 + HWND_TOP + topmost 弹跳，回报 `became_foreground`）；
+非 ASCII `type_text` 走"剪贴板 + Ctrl+V + 恢复"并回报 `via=clipboard_paste`；
+保留模型最近一次计划；点击回执带命中窗口与重复次数；回合上下文带前台窗口。
+
+**结果**：同模型同任务 **11 回合 / 63 秒 / mission_verified**，
+QQ 会话里出现 agent 发的「测试一下」（另有我手工发的「晚上好」和 cua 臂发的「我是cua」）。
+
+**仍留的缺陷**：打字前仍先盲点 7 次；压这个属于模型层，不加机制。
+
+---
+## 五、补丁设计（**已全部授权并落地**）
 
 ### 已落地 0：shell 子进程声明 DPI 感知
 

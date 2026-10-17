@@ -2986,3 +2986,180 @@ def test_hotkey_tolerates_extra_arguments() -> None:
     assert attempt.controller_error is None
     assert attempt.transition is not None
     assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+
+
+def test_pointer_receipt_reports_where_the_press_landed() -> None:
+    """A click receipt names its point and, once, the window under it.
+
+    The model's own picture cannot tell "the input box got focus" from "nothing
+    happened", so the runtime says what it observed: this exact point, on this
+    exact window.
+    """
+    from winpilot.vnext.desktop_adapter.atomic import (
+        _PointerHit,
+        _PreparedAction,
+    )
+
+    harness = _harness("click")
+    adapter = harness.adapter
+
+    adapter = _hit_stub(harness)
+    prepared = _PreparedAction(action="click", point=(1131, 977))
+
+    hit = adapter._record_pointer_press(prepared)
+    assert hit is not None and hit.title == "QQ" and hit.process_id == 25844
+
+    effect = adapter._completed_input_effect(
+        _receipt(),
+        prepared,
+        hit,
+    )
+    assert "screen 1131,977" in effect
+    assert "'QQ'" in effect
+    assert "pid 25844" in effect
+
+
+def test_pointer_receipt_counts_repetition_in_the_same_area() -> None:
+    """Dozens of presses in one small area become one visible fact.
+
+    ``same_action_attempts`` only counts byte-identical actions, so a model that
+    jitters its coordinates defeats it. This count survives the jitter, and it
+    only ever reports.
+    """
+    from winpilot.vnext.desktop_adapter.atomic import _PreparedAction
+
+    harness = _harness("click")
+    adapter = _hit_stub(harness)
+    hit = _PointerHitStub()
+
+    effects: list[str] = []
+    for index in range(8):
+        prepared = _PreparedAction(
+            action="click",
+            point=(1131 + (index % 3) * 20, 977 - (index % 4) * 15),
+        )
+        adapter._record_pointer_press(prepared)
+        effects.append(
+            adapter._completed_input_effect(
+                _receipt(),
+                prepared,
+                hit,
+            )
+        )
+
+    assert "landed within" not in effects[0]
+    assert "landed within" in effects[-1]
+    assert "in a row on that window" in effects[-1]
+
+
+def _hit_stub(harness):
+    """Point the adapter's hit test at one fake QQ window."""
+
+    class _WorkspaceStub:
+        binding = harness.binding
+
+        def hit_test_root(self, _x: int, _y: int) -> int:
+            return 2035800
+
+        def snapshot(self, _hwnd: int):
+            return None
+
+    adapter = harness.adapter
+    adapter._workspace = _WorkspaceStub()
+    adapter._window_facts = lambda _hwnd: {
+        "ok": True,
+        "window": {
+            "hwnd": 2035800,
+            "title": "QQ",
+            "class_name": "Chrome_WidgetWin_1",
+            "pid": 25844,
+        },
+    }
+    return adapter
+
+
+def _receipt():
+    from winpilot.action.raw_device import RawActionReceipt, RawBackendResult
+
+    return RawActionReceipt(
+        action="click",
+        outcome=MutationOutcome.APPLIED,
+        backend_result=RawBackendResult(True, {}),
+    )
+
+
+def _PointerHitStub():
+    from winpilot.vnext.desktop_adapter.atomic import _PointerHit
+
+    return _PointerHit(hwnd=2035800, title="QQ", class_name="Chrome_WidgetWin_1", process_id=25844)
+
+
+def test_pointer_receipt_omits_the_window_when_the_hit_test_is_missing() -> None:
+    """No hit test means a shorter receipt, never a refused press."""
+    from winpilot.vnext.desktop_adapter.atomic import _PreparedAction
+
+    harness = _harness("click")
+    adapter = harness.adapter
+    prepared = _PreparedAction(action="click", point=(10, 20))
+
+    hit = adapter._record_pointer_press(prepared)
+    assert hit is None
+
+    effect = adapter._completed_input_effect(
+        _receipt(),
+        prepared,
+        None,
+    )
+    assert effect.startswith("pointer receipt: pressed at screen 10,20")
+    assert "window" not in effect
+
+
+def test_non_ascii_type_text_is_delivered_through_the_clipboard() -> None:
+    """An app that ignores synthesized characters still receives the text.
+
+    Measured on QQ: two typed attempts changed no pixel, while a clipboard paste
+    landed immediately. The delivery route is a mechanical fact and the receipt
+    reports which one was used.
+    """
+    harness = _harness(
+        "type_text",
+        action_args={"text": "晚上好"},
+    )
+    writes: list[str] = []
+
+    def clipboard(text: str) -> dict[str, Any]:
+        writes.append(text)
+        return {"ok": True, "previous": "old-clipboard"}
+
+    harness.adapter._clipboard_text = clipboard
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert writes[:1] == ["晚上好"]
+    assert "old-clipboard" in writes      # previous content restored
+    assert "pasted 3 character(s) through the clipboard" in (
+        attempt.transition.visible_effect
+    )
+    assert harness.raw.calls[-1][0] == "hotkey"
+
+
+def test_ascii_type_text_still_uses_synthesized_keys() -> None:
+    """Plain text keeps the ordinary path; the clipboard is not touched."""
+    harness = _harness("type_text", action_args={"text": "hello"})
+    writes: list[str] = []
+
+    def clipboard(text: str) -> dict[str, Any]:
+        writes.append(text)
+        return {"ok": True, "previous": None}
+
+    harness.adapter._clipboard_text = clipboard
+    attempt = harness.run()
+
+    assert attempt.transition is not None
+    assert writes == []
+    assert harness.raw.calls[-1][0] == "type_text"
+    assert "typed 5 character(s) through the keyboard" in (
+        attempt.transition.visible_effect
+    )
