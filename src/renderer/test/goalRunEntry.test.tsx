@@ -1069,6 +1069,49 @@ describe('primary agent surface', () => {
     expect(within(toolCalls as HTMLElement).getByText('24 passed')).toBeVisible();
   });
 
+  it('renders the dynamic task board as a three-state todo checklist', async () => {
+    const todoRun = {
+      run_id: 'run-todo-board',
+      kind: 'agent',
+      status: 'running',
+      phase: 'acting',
+      goal: 'Build the summary and verify it',
+      started_at: 1,
+      updated_at: 6,
+      task_state: 'Phase: build',
+      task_state_revision: 3,
+      task_state_scratchpad: 'Phase: build; source rows imported.',
+      task_state_todos: [
+        { content: 'Import the source rows', activeForm: 'importing the source rows', status: 'completed' },
+        { content: 'Build the summary sheet', activeForm: 'building the summary sheet', status: 'in_progress' },
+        { content: 'Add charts', activeForm: 'adding charts', status: 'pending' },
+      ],
+      timeline: [],
+      evidence: [],
+      metrics: {},
+    };
+
+    render(
+      <AgentCockpit
+        plane={cockpitPlane(vi.fn(async () => goalRunStart()), todoRun, [todoRun]) as never}
+      />,
+    );
+
+    const taskBoard = document.querySelector('.ld-capsule-task-board');
+    expect(taskBoard).not.toBeNull();
+    expect(taskBoard).toHaveTextContent('1/3 已完成');
+    const items = (taskBoard as HTMLElement).querySelectorAll('.ld-task-board-todo');
+    expect(items).toHaveLength(3);
+    expect(items[0]).toHaveClass('status-completed');
+    expect(items[1]).toHaveClass('status-in_progress');
+    expect(items[2]).toHaveClass('status-pending');
+    expect(items[1]).toHaveTextContent('building the summary sheet');
+    expect(items[2]).toHaveTextContent('Add charts');
+    expect((taskBoard as HTMLElement).querySelector('.ld-task-board-notes'))
+      .toHaveTextContent('source rows imported');
+    expect((taskBoard as HTMLElement).querySelector('pre')).toBeNull();
+  });
+
   it('collapses a long Agent answer without making it inaccessible', async () => {
     const longResult = Array.from(
       { length: 18 },

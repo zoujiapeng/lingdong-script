@@ -256,6 +256,67 @@ def test_automation_ir_api_starts_arp_projection(client, monkeypatch):
     assert captured[0][1] == {"token": "x"}
 
 
+def test_automation_ir_api_runs_a_real_offline_command_flow(client, tmp_path):
+    target = tmp_path / "api-command-result.txt"
+    ir = _arp_automation_ir()
+    graph = ir["runtime"]["graph"]
+    graph["nodes"] = [
+        {"id": "start", "kind": "start"},
+        {
+            "id": "seed",
+            "kind": "set_variable",
+            "config": {"name": "payload", "value": "api-offline-pass"},
+        },
+        {
+            "id": "command",
+            "kind": "replay_step",
+            "config": {
+                "step": {
+                    "tool": "ext.run_shell",
+                    "command": (
+                        "[System.IO.File]::WriteAllText('api-command-result.txt', '${payload}', "
+                        "[System.Text.UTF8Encoding]::new($false)); "
+                        "Write-Output '${payload}'"
+                    ),
+                    "shell": "powershell",
+                    "cwd": str(tmp_path),
+                    "timeout_s": 10,
+                    "into": "command_output",
+                },
+                "session": "api-command-flow",
+                "pace_ms": 0,
+            },
+            "timeout_s": 10,
+        },
+        {"id": "end", "kind": "end"},
+    ]
+    graph["edges"] = [
+        {"id": "e1", "source": "start", "target": "seed", "branch": "next"},
+        {"id": "e2", "source": "seed", "target": "command", "branch": "next"},
+        {"id": "e3", "source": "command", "target": "end", "branch": "next"},
+    ]
+
+    created = client.post("/api/v2/automation-ir/runs", json={"automation": ir})
+
+    assert created.status_code == 200
+    assert created.json()["runtime_kind"] == "arp_graph"
+    run_id = created.json()["run_id"]
+    deadline = time.time() + 5
+    run = None
+    while time.time() < deadline:
+        response = client.get(f"/api/v2/arp/runs/{run_id}")
+        assert response.status_code == 200
+        run = response.json()["run"]
+        if run["status"] not in {"queued", "running"}:
+            break
+        time.sleep(0.02)
+
+    assert run is not None
+    assert run["status"] == "done"
+    assert run["variables"]["command_output"].strip() == "api-offline-pass"
+    assert target.read_text(encoding="utf-8") == "api-offline-pass"
+
+
 def test_script_save_uses_valid_runtime_graph_directly(client):
     ir = _arp_automation_ir()
     ir["steps"][0]["tool"] = "changed-after-runtime-compile"

@@ -3,7 +3,7 @@ import type { NodeType } from '../../../types';
 import { registerEditorDraftCommitter } from '../../../utils/editorDrafts';
 
 interface Props {
-  type: Extract<NodeType, 'action_batch' | 'replay_step' | 'skill_replay' | 'evidence_gate' | 'human_gate'>;
+  type: Extract<NodeType, 'action_batch' | 'replay_step' | 'run_command' | 'skill_replay' | 'evidence_gate' | 'human_gate'>;
   params: Record<string, any>;
   onChange: (params: Record<string, any>) => void;
 }
@@ -187,6 +187,37 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
             </Field>
           </div>
           {jsonError && <div className="arp-field-error">{jsonError}</div>}
+        </>
+      )}
+
+      {type === 'run_command' && (
+        <>
+          <Field label="命令" hint="可使用 ${变量名} 引用前序步骤写入的流程变量；命令在本机运行，不经过模型。">
+            <textarea
+              className="form-input arp-code-editor"
+              spellCheck={false}
+              value={params.command || ''}
+              onChange={(event) => patch({ command: event.target.value })}
+              placeholder="例如：ffmpeg -i ${input} -y ${output}"
+            />
+          </Field>
+          <div className="arp-policy-grid">
+            <Field label="Shell">
+              <select className="form-input" value={params.shell || 'powershell'} onChange={(event) => patch({ shell: event.target.value })}>
+                <option value="powershell">PowerShell</option>
+                <option value="cmd">CMD</option>
+              </select>
+            </Field>
+            <Field label="超时（秒）">
+              <input className="form-input" type="number" min={1} max={3600} value={params.timeout_s ?? 30} onChange={(event) => patch({ timeout_s: Math.max(1, Math.min(3600, Number(event.target.value) || 30)) })} />
+            </Field>
+          </div>
+          <Field label="工作目录" hint="留空时使用运行时默认工作目录。">
+            <input className="form-input" value={params.cwd || ''} onChange={(event) => patch({ cwd: event.target.value })} placeholder="可选" />
+          </Field>
+          <Field label="输出变量" hint="可选；把标准输出保存到流程变量，供后续条件或命令使用。">
+            <input className="form-input" value={params.into || ''} onChange={(event) => patch({ into: event.target.value })} placeholder="例如：result" />
+          </Field>
         </>
       )}
 

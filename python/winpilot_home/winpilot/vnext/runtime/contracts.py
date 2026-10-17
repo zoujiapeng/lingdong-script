@@ -22,6 +22,7 @@ from .task_state import (
     ActorTaskState,
     ActorTaskStateError,
     ActorTaskStateUpdate,
+    ActorTodoItem,
     ActorTurnDecision,
     TASK_STATE_UPDATE_SCHEMA,
 )
@@ -484,6 +485,10 @@ class ActorPreviousActionView:
     semantic_summary: str | None = None
     local_intent: str | None = None
     error_kind: str | None = None
+    # How many times this mission has already attempted exactly this action with
+    # exactly these arguments, counting this one. The runtime only counts; it
+    # never decides what the count means or what to do about it.
+    same_action_attempts: int = 1
 
     def __post_init__(self) -> None:
         if type(self.action) is not str or not _TOOL.fullmatch(self.action):
@@ -528,6 +533,10 @@ class ActorPreviousActionView:
                 "error_kind",
                 _text(self.error_kind, "error_kind", allow_empty=True),
             )
+        if type(self.same_action_attempts) is not int or self.same_action_attempts < 1:
+            raise RuntimeContractError(
+                "previous action same_action_attempts must be an integer >= 1"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         result = {
@@ -536,6 +545,7 @@ class ActorPreviousActionView:
             "local_intent": self.local_intent,
             "input_completed": self.input_completed,
             "visible_effect": self.visible_effect,
+            "same_action_attempts": self.same_action_attempts,
         }
         if self.error_kind is not None:
             result["error_kind"] = self.error_kind
@@ -826,6 +836,7 @@ def project_actor_turn_input(
             input_completed=transition.input_completed,
             visible_effect=transition.visible_effect,
             error_kind=transition.error_kind,
+            same_action_attempts=card.same_action_attempts,
         )
     return ActorTurnInput(
         mission=mission,
@@ -1018,6 +1029,7 @@ __all__ = [
     "ActorTaskState",
     "ActorTaskStateError",
     "ActorTaskStateUpdate",
+    "ActorTodoItem",
     "ActorTurnDecision",
     "TASK_STATE_UPDATE_SCHEMA",
     "project_actor_turn_input",

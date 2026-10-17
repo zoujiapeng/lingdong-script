@@ -31,6 +31,7 @@ export const RUNNABLE_FLOW_NODE_TYPES = new Set<NodeType>([
   'clipboard_set',
   'clipboard_get',
   'mouse_operation',
+  'run_command',
 ]);
 
 export function isRunnableFlowNodeType(type: string): type is NodeType {
@@ -251,7 +252,29 @@ function nodeToArp(node: FlowNode): ArpNode {
   let timeout_s: number | null = null;
   const actions = controllerActions(node);
 
-  if (node.type === 'clipboard_get') {
+  if (node.type === 'run_command') {
+    const command = String(params.command || '').trim();
+    const parsedTimeout = Number(params.timeout_s);
+    const commandTimeout = Number.isFinite(parsedTimeout)
+      ? Math.max(1, Math.min(3600, parsedTimeout))
+      : 30;
+    const commandShell = String(params.shell || '').toLowerCase() === 'cmd' ? 'cmd' : 'powershell';
+    const step: Record<string, unknown> = {
+      tool: 'ext.run_shell',
+      command,
+      shell: commandShell,
+      timeout_s: commandTimeout,
+    };
+    if (String(params.cwd || '').trim()) step.cwd = String(params.cwd).trim();
+    if (String(params.into || '').trim()) step.into = String(params.into).trim();
+    kind = 'replay_step';
+    config = {
+      step,
+      session: 'flow-command',
+      pace_ms: 0,
+    };
+    timeout_s = commandTimeout;
+  } else if (node.type === 'clipboard_get') {
     const into = String(params.into || 'clipboard_text').trim() || 'clipboard_text';
     kind = 'replay_step';
     config = { step: { tool: 'ext.clipboard_get', into } };

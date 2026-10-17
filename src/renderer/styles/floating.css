@@ -1203,6 +1203,66 @@
   font: 11px/1.6 var(--font-mono, ui-monospace, monospace);
 }
 
+.ld-task-board-todos {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  max-height: 190px;
+  overflow: auto;
+}
+
+.ld-task-board-todo {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--ld-text-soft);
+  font-size: 11px;
+  line-height: 1.5;
+  user-select: text;
+}
+
+.ld-task-board-todo > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ld-task-board-todo .ld-todo-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--ld-text-faint);
+}
+
+.ld-task-board-todo.status-in_progress {
+  color: var(--ld-text);
+}
+
+.ld-task-board-todo.status-in_progress .ld-todo-icon.active {
+  color: var(--ld-accent);
+}
+
+.ld-task-board-todo.status-completed {
+  color: var(--ld-text-faint);
+  text-decoration: line-through;
+}
+
+.ld-task-board-todo.status-completed .ld-todo-icon.done {
+  color: var(--ld-success, var(--ld-accent));
+}
+
+.ld-task-board-notes {
+  margin: 8px 0 0;
+  padding-top: 7px;
+  border-top: 1px dashed color-mix(in srgb, var(--ld-border) 80%, transparent);
+  color: var(--ld-text-faint);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 .ld-live-activity-list {
   display: grid;
   gap: 3px;

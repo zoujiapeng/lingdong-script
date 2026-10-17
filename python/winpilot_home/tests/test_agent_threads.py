@@ -3,7 +3,7 @@ import json
 import pytest
 
 
-def test_thread_history_contains_only_successful_user_facing_turns():
+def test_thread_history_keeps_turn_goals_even_after_a_failed_attempt():
     from winpilot.orchestrator.agent_threads import AgentThreadStore
     from winpilot.utils.log import BUS
 
@@ -51,6 +51,11 @@ def test_thread_history_contains_only_successful_user_facing_turns():
         assert history == [
             {"role": "user", "content": "Remember ALPHA."},
             {"role": "assistant", "content": "ALPHA"},
+            {"role": "user", "content": "What did I ask you to remember?"},
+            {
+                "role": "assistant",
+                "content": "The previous attempt did not complete.",
+            },
         ]
     finally:
         BUS.remove_sink(store.on_event)

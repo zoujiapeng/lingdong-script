@@ -30,6 +30,7 @@ export type NodeType =
   | 'region_wait'
   | 'scene_condition'
   | 'tool_call'
+  | 'run_command'
   | 'shutdown'
   | 'reboot'
   | 'logoff'
@@ -272,6 +273,16 @@ export interface ToolCallNodeParams {
   description?: string;
 }
 
+/** A deterministic local command step for offline/ARP flow execution. */
+export interface RunCommandNodeParams {
+  command: string;
+  shell?: string;
+  cwd?: string;
+  timeout_s?: number;
+  into?: string;
+  description?: string;
+}
+
 export interface SystemCommandParams {
   delay_seconds: number;
   confirm: boolean;
@@ -509,6 +520,7 @@ export type NodeParams =
   | SceneConditionNodeParams
   | ScreenshotNodeParams
   | ToolCallNodeParams
+  | RunCommandNodeParams
   | SystemCommandParams
   | LockWorkstationParams
   | VolumeSetParams

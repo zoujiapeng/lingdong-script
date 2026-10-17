@@ -1801,7 +1801,18 @@ def test_handler_saves_progress_on_blocked_without_retry_and_closes() -> None:
         latest_narration="I finished the source-data import.",
         task_progress={
             "scratchpad": "Imported and normalized the source rows.",
-            "remaining_items": ["Build the summary sheet", "Add charts"],
+            "todos": [
+                {
+                    "content": "Build the summary sheet",
+                    "activeForm": "building the summary sheet",
+                    "status": "pending",
+                },
+                {
+                    "content": "Add charts",
+                    "activeForm": "adding charts",
+                    "status": "pending",
+                },
+            ],
         },
     )
     manager = ArpRunManager()
@@ -1841,7 +1852,18 @@ def test_handler_saves_progress_when_model_call_budget_is_exhausted() -> None:
         latest_narration="The first workbook phase is complete.",
         task_progress={
             "scratchpad": "Created RawData with 400 rows.",
-            "remaining_items": ["Create formulas", "Verify workbook"],
+            "todos": [
+                {
+                    "content": "Create formulas",
+                    "activeForm": "creating formulas",
+                    "status": "pending",
+                },
+                {
+                    "content": "Verify workbook",
+                    "activeForm": "verifying workbook",
+                    "status": "pending",
+                },
+            ],
         },
     )
     config = _config()
@@ -3099,7 +3121,8 @@ def test_real_composition_launch_failure_is_recoverable_before_any_input(
     ]
     assert len(receipts) == 1
     assert receipts[0]["input_completed"] is False
-    assert receipts[0]["error_kind"] == "launch_application_failed"
+    assert receipts[0]["error_kind"].startswith("launch_application_failed")
+    assert "no such application" in receipts[0]["error_kind"]
 
 
 def test_desktop_shell_launch_adopts_the_launched_window_next_observation(

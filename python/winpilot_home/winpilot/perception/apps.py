@@ -234,13 +234,51 @@ $records = @(Get-StartApps | ForEach-Object {
         package_family = $packageFamily
     }
 })
+# Get-StartApps omits some installed packaged (Store/MSIX) applications, so the
+# Start menu never lists them even though the package is installed.  Union the
+# installed package manifests so a display name like "Microsoft Edge" still
+# resolves to its launchable AUMID; entries already covered keep their friendly
+# StartApps name and dedupe by app_id.
+$known = @{}
+foreach ($record in @($records)) { $known[[string]$record.app_id] = $true }
+$packaged = @()
+foreach ($package in @(Get-AppxPackage)) {
+    $manifest = $null
+    try { $manifest = Get-AppxPackageManifest -Package $package } catch {}
+    if (-not $manifest) { continue }
+    $family = [string]$package.PackageFamilyName
+    $display = [string]$manifest.Package.Properties.DisplayName
+    if (-not $family -or -not $display) { continue }
+    if ($display.StartsWith('ms-resource:')) { continue }
+    foreach ($app in @($manifest.Package.Applications.Application)) {
+        $applicationId = [string]$app.Id
+        if (-not $applicationId) { continue }
+        $aumid = $family + '!' + $applicationId
+        if ($known.ContainsKey($aumid)) { continue }
+        $exe = [Environment]::ExpandEnvironmentVariables([string]$app.Executable)
+        if ($exe -and -not [IO.Path]::IsPathRooted($exe)) {
+            $exe = Join-Path ([string]$package.InstallLocation) $exe
+        }
+        # A registered package can be a stub with no runnable executable (for
+        # example a partially removed Store app); never index a name that
+        # cannot actually start.
+        if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { continue }
+        $packaged += [pscustomobject]@{
+            name = $display
+            app_id = $aumid
+            executable = $exe
+            package_family = $family
+        }
+    }
+}
+$records = @($records) + @($packaged)
 ConvertTo-Json -InputObject $records -Compress -Depth 3
 """.strip()
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=20, creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=45, creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return _parse_start_apps_output(out.stdout or "")
     except (subprocess.SubprocessError, OSError) as exc:
@@ -1011,6 +1049,35 @@ def _existing_launch_result(
     return result
 
 
+def _closest_entry_names(query: str, limit: int = 3) -> list[str]:
+    """Best-effort nearest installed-app display names for a failed lookup.
+
+    Returned to the model as a launch-failure hint so an unresolvable name
+    becomes a corrective suggestion instead of a blind retry loop.
+    """
+
+    normalized_query = _normalized(query)
+    if not normalized_query:
+        return []
+    scored: list[tuple[float, str]] = []
+    for entry in _index():
+        name = str(entry.get("name") or "").strip()
+        normalized_name = _normalized(name)
+        if not normalized_name:
+            continue
+        ratio = SequenceMatcher(None, normalized_name, normalized_query).ratio()
+        if ratio >= 0.5:
+            scored.append((ratio, name))
+    scored.sort(key=lambda item: -item[0])
+    names: list[str] = []
+    for _ratio, name in scored:
+        if name not in names:
+            names.append(name)
+        if len(names) >= limit:
+            break
+    return names
+
+
 def launch_application(
     app: str,
     arguments: str = "",
@@ -1075,7 +1142,12 @@ def launch_application(
                 "aliases": [],
             }
         except OSError as exc:
-            return {"ok": False, "error": str(exc), "target": name}
+            return {
+                "ok": False,
+                "error": str(exc),
+                "target": name,
+                "suggestions": _closest_entry_names(name),
+            }
     resolved = None
     if resolver is not None:
         try:
@@ -1106,7 +1178,10 @@ def launch_application(
             entry["arguments"] = arguments_list
         launched = launch_target(entry)
         if launched.get("ok") is not True:
-            return launched
+            return {
+                **launched,
+                "suggestions": _closest_entry_names(name),
+            }
         window = _wait_for_resolved_window(entry)
         if window is None:
             return launched
@@ -1134,4 +1209,9 @@ def launch_application(
             "aliases": [],
         }
     except OSError as exc:
-        return {"ok": False, "error": str(exc), "target": name}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "target": name,
+            "suggestions": _closest_entry_names(name),
+        }

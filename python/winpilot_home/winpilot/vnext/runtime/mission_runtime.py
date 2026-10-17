@@ -6,6 +6,8 @@ second completion/evidence ledger.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 from typing import Any, Callable, Mapping
 
@@ -47,8 +49,46 @@ from .ports import (
 from .task_state import (
     ActorTaskState,
     ActorTaskStateError,
+    ActorTodoItem,
     ActorTurnDecision,
 )
+
+def _plain_json(value: Any) -> Any:
+    """Thaw the frozen containers a proposal keeps its arguments in."""
+
+    items = getattr(value, "items", None)
+    if callable(items):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(item) for item in value]
+    if value is None or type(value) in (str, bool, int, float):
+        return value
+    return str(value)
+
+
+def _proposal_signature(proposal: Any) -> str:
+    """A stable identity for "the same action with the same arguments".
+
+    ``local_intent`` is deliberately excluded: it is the model's own prose and
+    changes every turn, so including it would make an identical physical action
+    look new each time - which is precisely how a loop stays invisible.
+    """
+
+    try:
+        payload = json.dumps(
+            {
+                "action": str(getattr(proposal, "action", "")),
+                "args": _plain_json(getattr(proposal, "args", {})),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
 
 class MissionRuntimeConfigurationError(ValueError):
     """The injected slice is outside the authorized live-agent surface."""
@@ -166,7 +206,15 @@ class MissionRuntime:
             try:
                 return ActorTaskState(
                     scratchpad=value.get("scratchpad", ""),
-                    remaining_items=tuple(value.get("remaining_items", ())),
+                    todos=tuple(
+                        ActorTodoItem(
+                            content=str(item.get("content", "")),
+                            activeForm=str(item.get("activeForm", "")),
+                            status=str(item.get("status", "")),
+                        )
+                        for item in value.get("todos", ())
+                        if isinstance(item, Mapping)
+                    ),
                 ).to_dict()
             except ActorTaskStateError:
                 pass
@@ -323,6 +371,7 @@ class MissionRuntime:
             visible_effect=transition.visible_effect or "",
             action_id=envelope.decision_id,
             error_kind=error_kind or "",
+            signature=_proposal_signature(envelope.proposal),
         )
 
     def _run_action(
@@ -416,6 +465,7 @@ class MissionRuntime:
                     action=proposal.action,
                     action_id=envelope.decision_id,
                     input_completed=True,
+                    signature=_proposal_signature(proposal),
                 )
             except Exception as exc:
                 # The controller already knows SendInput completed.  A local
@@ -482,6 +532,7 @@ class MissionRuntime:
                 input_completed=True,
                 visible_effect=transition.visible_effect,
                 frame_id=transition.post_frame_id,
+                signature=_proposal_signature(proposal),
             )
         except Exception as exc:
             # Bookkeeping is advisory once the OS accepted the input.  The next

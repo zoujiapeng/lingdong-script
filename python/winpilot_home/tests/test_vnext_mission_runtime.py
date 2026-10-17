@@ -332,11 +332,11 @@ def _task_decision(
     proposal: Mapping[str, Any],
     *,
     scratchpad: str | None = None,
-    remaining_items: list[str] | None = None,
+    todos: list[dict[str, str]] | None = None,
 ) -> ActorTurnDecision:
     update: dict[str, Any] = {"scratchpad": scratchpad}
-    if remaining_items is not None:
-        update["remaining_items"] = remaining_items
+    if todos is not None:
+        update["todos"] = todos
     return ActorTurnDecision(
         proposal=proposal,
         task_state_update=ActorTaskStateUpdate.from_dict(update),
@@ -735,12 +735,23 @@ def test_actor_can_verify_already_satisfied_goal_without_mutation() -> None:
     )
 
 
-def test_task_state_remaining_items_merge_replace_and_clear() -> None:
+def test_task_state_todos_derive_remaining_items() -> None:
     state = ActorTaskState.initial().apply(
         ActorTaskStateUpdate.from_dict(
             {
                 "scratchpad": "Start the first phase",
-                "remaining_items": ["send the image", "finish the game"],
+                "todos": [
+                    {
+                        "content": "send the image",
+                        "activeForm": "sending the image",
+                        "status": "completed",
+                    },
+                    {
+                        "content": "finish the game",
+                        "activeForm": "finishing the game",
+                        "status": "in_progress",
+                    },
+                ],
             }
         )
     )
@@ -750,23 +761,119 @@ def test_task_state_remaining_items_merge_replace_and_clear() -> None:
             {"scratchpad": "The first phase is done"}
         )
     )
-    cleared = revised.apply(
-        ActorTaskStateUpdate.from_dict(
-            {"scratchpad": None, "remaining_items": []}
-        )
-    )
 
     assert revised.scratchpad == "The first phase is done"
-    assert revised.remaining_items == ("send the image", "finish the game")
+    assert revised.remaining_items == ("finish the game",)
+
+    cleared = revised.apply(
+        ActorTaskStateUpdate.from_dict({"todos": []})
+    )
+
     assert cleared.remaining_items == ()
 
 
-def test_visible_claim_supersedes_stale_actor_remaining_items() -> None:
+def test_task_state_todos_merge_replace_and_clear() -> None:
+    state = ActorTaskState.initial().apply(
+        ActorTaskStateUpdate.from_dict(
+            {
+                "todos": [
+                    {
+                        "content": "draft the answer",
+                        "activeForm": "drafting the answer",
+                        "status": "completed",
+                    },
+                    {
+                        "content": "verify the answer",
+                        "activeForm": "verifying the answer",
+                        "status": "in_progress",
+                    },
+                ]
+            }
+        )
+    )
+
+    assert [item.status for item in state.todos] == ["completed", "in_progress"]
+    assert [item.content for item in state.todos] == [
+        "draft the answer",
+        "verify the answer",
+    ]
+
+    revised = state.apply(
+        ActorTaskStateUpdate.from_dict(
+            {
+                "todos": [
+                    {
+                        "content": "verify the answer",
+                        "activeForm": "verifying the answer",
+                        "status": "completed",
+                    }
+                ]
+            }
+        )
+    )
+
+    assert [item.content for item in revised.todos] == ["verify the answer"]
+    assert revised.todos[0].status == "completed"
+
+    cleared = revised.apply(
+        ActorTaskStateUpdate.from_dict({"todos": []})
+    )
+
+    assert cleared.todos == ()
+
+
+def test_task_state_todos_reject_unknown_status() -> None:
+    with pytest.raises(ActorTaskStateError):
+        ActorTaskStateUpdate.from_dict(
+            {
+                "todos": [
+                    {
+                        "content": "x",
+                        "activeForm": "doing x",
+                        "status": "done",
+                    }
+                ]
+            }
+        )
+
+
+def test_task_state_todos_reject_multiple_in_progress() -> None:
+    with pytest.raises(ActorTaskStateError):
+        ActorTaskStateUpdate.from_dict(
+            {
+                "todos": [
+                    {
+                        "content": "a",
+                        "activeForm": "doing a",
+                        "status": "in_progress",
+                    },
+                    {
+                        "content": "b",
+                        "activeForm": "doing b",
+                        "status": "in_progress",
+                    },
+                ]
+            }
+        )
+
+
+def test_visible_claim_supersedes_stale_actor_todos() -> None:
     harness = _harness(
         _task_decision(
             _action("click"),
             scratchpad="Music is playing",
-            remaining_items=["send playback image", "build and play game"],
+            todos=[
+                {
+                    "content": "send playback image",
+                    "activeForm": "sending playback image",
+                    "status": "pending",
+                },
+                {
+                    "content": "build and play game",
+                    "activeForm": "building and playing game",
+                    "status": "pending",
+                },
+            ],
         ),
         _task_decision(_claim()),
     )

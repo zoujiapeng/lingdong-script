@@ -6,8 +6,10 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 _SCRATCHPAD_CHARS = 8192
-_MAX_REMAINING_ITEMS = 32
-_REMAINING_ITEM_CHARS = 256
+_TODO_STATUSES = ("pending", "in_progress", "completed")
+_MAX_TODOS = 32
+_TODO_CONTENT_CHARS = 256
+_TODO_ACTIVEFORM_CHARS = 256
 
 
 class ActorTaskStateError(ValueError):
@@ -26,59 +28,109 @@ def _scratchpad(value: Any, name: str) -> str:
     return value
 
 
-def _remaining_items(value: Any, name: str) -> tuple[str, ...]:
-    if (
-        type(value) is not list
-        or len(value) > _MAX_REMAINING_ITEMS
-    ):
+def _bounded_text(value: Any, name: str, limit: int) -> str:
+    if type(value) is not str or not value.strip() or len(value) > limit:
         raise ActorTaskStateError(
-            f"{name} must be a bounded list of unfinished work"
+            f"{name} must be bounded non-empty text"
         )
-    items = tuple(value)
-    if any(
-        type(item) is not str
-        or not item.strip()
-        or len(item) > _REMAINING_ITEM_CHARS
-        for item in items
-    ):
+    return value
+
+
+def _validate_todo_list(items: tuple["ActorTodoItem", ...], name: str) -> None:
+    if len(items) > _MAX_TODOS:
         raise ActorTaskStateError(
-            f"{name} items must be bounded non-empty text"
+            f"{name} must be at most {_MAX_TODOS} items"
         )
-    return items
+    if sum(1 for item in items if item.status == "in_progress") > 1:
+        raise ActorTaskStateError(
+            f"{name} allows at most one in_progress item"
+        )
+
+
+def _todo_items(value: Any, name: str) -> tuple["ActorTodoItem", ...]:
+    if type(value) is not list:
+        raise ActorTaskStateError(
+            f"{name} must be a bounded list of todo items"
+        )
+    items: list[ActorTodoItem] = []
+    for item in value:
+        if (
+            type(item) is not dict
+            or set(item) != {"content", "activeForm", "status"}
+        ):
+            raise ActorTaskStateError(
+                f"{name} items must be "
+                "{content, activeForm, status} objects"
+            )
+        items.append(
+            ActorTodoItem(
+                content=item["content"],
+                activeForm=item["activeForm"],
+                status=item["status"],
+            )
+        )
+    result = tuple(items)
+    _validate_todo_list(result, name)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class ActorTodoItem:
+    """One user-visible todo entry with imperative and active-form text."""
+
+    content: str
+    activeForm: str
+    status: str
+
+    def __post_init__(self) -> None:
+        _bounded_text(self.content, "todo content", _TODO_CONTENT_CHARS)
+        _bounded_text(
+            self.activeForm, "todo activeForm", _TODO_ACTIVEFORM_CHARS
+        )
+        if type(self.status) is not str or self.status not in _TODO_STATUSES:
+            raise ActorTaskStateError(
+                f"todo status must be one of {', '.join(_TODO_STATUSES)}"
+            )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "content": self.content,
+            "activeForm": self.activeForm,
+            "status": self.status,
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class ActorTaskStateUpdate:
-    """Field patch; ``None`` retains and an empty list clears remaining work."""
+    """Field patch; ``None`` retains and an empty list clears the checklist."""
 
     scratchpad: str | None = None
-    remaining_items: tuple[str, ...] | None = None
+    todos: tuple[ActorTodoItem, ...] | None = None
 
     @classmethod
     def from_dict(cls, value: Any) -> "ActorTaskStateUpdate":
         if value is None:
             return cls()
-        allowed = {"scratchpad", "remaining_items"}
+        allowed = {"scratchpad", "todos"}
         if (
             type(value) is not dict
             or not set(value) <= allowed
         ):
             raise ActorTaskStateError(
-                "task_state_update allows only scratchpad and "
-                "remaining_items"
+                "task_state_update allows only scratchpad and todos"
             )
         scratchpad = value.get("scratchpad")
-        remaining_items = value.get("remaining_items")
+        todos = value.get("todos")
         return cls(
             scratchpad=(
                 None
                 if scratchpad is None
                 else _scratchpad(scratchpad, "scratchpad")
             ),
-            remaining_items=(
+            todos=(
                 None
-                if remaining_items is None
-                else _remaining_items(remaining_items, "remaining_items")
+                if todos is None
+                else _todo_items(todos, "todos")
             ),
         )
 
@@ -96,28 +148,42 @@ class ActorTaskStateUpdate:
                 if newer.scratchpad is None
                 else newer.scratchpad
             ),
-            remaining_items=(
-                self.remaining_items
-                if newer.remaining_items is None
-                else newer.remaining_items
+            todos=(
+                self.todos
+                if newer.todos is None
+                else newer.todos
             ),
         )
 
     @property
     def changes_state(self) -> bool:
-        return self.scratchpad is not None or self.remaining_items is not None
+        return self.scratchpad is not None or self.todos is not None
 
 
 @dataclass(frozen=True, slots=True)
 class ActorTaskState:
     scratchpad: str
-    remaining_items: tuple[str, ...] = ()
+    todos: tuple[ActorTodoItem, ...] = ()
 
     def __post_init__(self) -> None:
         _scratchpad(self.scratchpad, "scratchpad")
-        if type(self.remaining_items) is not tuple:
-            raise ActorTaskStateError("remaining_items state must be a tuple")
-        _remaining_items(list(self.remaining_items), "remaining_items")
+        if type(self.todos) is not tuple or any(
+            type(item) is not ActorTodoItem for item in self.todos
+        ):
+            raise ActorTaskStateError(
+                "todos state must be a tuple of todo items"
+            )
+        _validate_todo_list(self.todos, "todos")
+
+    @property
+    def remaining_items(self) -> tuple[str, ...]:
+        """Derived view of unfinished work; never a second source of truth."""
+
+        return tuple(
+            item.content
+            for item in self.todos
+            if item.status != "completed"
+        )
 
     @classmethod
     def initial(cls) -> "ActorTaskState":
@@ -132,17 +198,17 @@ class ActorTaskState:
                 if patch.scratchpad is None
                 else patch.scratchpad
             ),
-            remaining_items=(
-                self.remaining_items
-                if patch.remaining_items is None
-                else patch.remaining_items
+            todos=(
+                self.todos
+                if patch.todos is None
+                else patch.todos
             ),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "scratchpad": self.scratchpad,
-            "remaining_items": list(self.remaining_items),
+            "todos": [item.to_dict() for item in self.todos],
         }
 
 
@@ -171,8 +237,7 @@ TASK_STATE_UPDATE_SCHEMA: dict[str, Any] = {
         "scratchpad": {
             "description": (
                 "Mutable current phase, stage rules, facts, artifacts, or "
-                "recovery notes. Use remaining_items for dependent "
-                "unfinished work."
+                "recovery notes. Keep the user-visible checklist in todos."
             ),
             "anyOf": [
                 {
@@ -183,19 +248,37 @@ TASK_STATE_UPDATE_SCHEMA: dict[str, Any] = {
             ],
             "default": None,
         },
-        "remaining_items": {
+        "todos": {
             "description": (
-                "Your editable ordered list of unfinished work for this goal. "
-                "Null or omission preserves it; [] clears it when none remain."
+                "Your user-visible todo checklist. Send the full list each "
+                "time; each item is {content (imperative), activeForm "
+                "(present continuous), status}. Keep at most one in_progress. "
+                "Null or omission preserves it; [] clears it."
             ),
             "anyOf": [
                 {
                     "type": "array",
-                    "maxItems": _MAX_REMAINING_ITEMS,
+                    "maxItems": _MAX_TODOS,
                     "items": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": _REMAINING_ITEM_CHARS,
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": _TODO_CONTENT_CHARS,
+                            },
+                            "activeForm": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": _TODO_ACTIVEFORM_CHARS,
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": list(_TODO_STATUSES),
+                            },
+                        },
+                        "required": ["content", "activeForm", "status"],
+                        "additionalProperties": False,
                     },
                 },
                 {"type": "null"},
@@ -208,5 +291,5 @@ TASK_STATE_UPDATE_SCHEMA: dict[str, Any] = {
 
 __all__ = [
     "ActorTaskState", "ActorTaskStateError", "ActorTaskStateUpdate",
-    "ActorTurnDecision", "TASK_STATE_UPDATE_SCHEMA",
+    "ActorTodoItem", "ActorTurnDecision", "TASK_STATE_UPDATE_SCHEMA",
 ]

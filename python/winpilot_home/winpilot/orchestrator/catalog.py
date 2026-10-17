@@ -82,7 +82,7 @@ def capability_catalog() -> list[CapabilitySpec]:
                 "session": "string?",
                 "pace_ms": "integer?",
             },
-            flow_node_types=["replay_step"],
+            flow_node_types=["replay_step", "run_command"],
         ),
         CapabilitySpec(
             id="control.condition",

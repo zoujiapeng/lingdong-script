@@ -1049,14 +1049,16 @@ class DSLExecutor:
         try:
             from agent.dialog_handler import handle_any_dialog
             result = handle_any_dialog()
-            if result != "not_found":
+            # 只有真正处理成功才算数；"not_found" / "unhandlable"（自绘界面）/ 失败类型
+            # 都要继续往下走，交给 popup_close 能力按标题关窗。
+            if result == "handled":
                 self._log(f"  POPUP_CLOSE 通过 dialog_handler 处理: {result}")
                 self._emit("node_done", node_type="POPUP_CLOSE", args=args, line=node.line)
                 return
         except Exception:
             pass
         # Fallback: old OCR/pyautogui close strategy
-        self._call_action("popup_close", strategy=args or "auto", ctx=ctx)
+        self._call_action("popup_close", text=args, strategy=args or "auto", ctx=ctx)
         self._emit("node_done", node_type="POPUP_CLOSE", args=args, line=node.line)
 
     def _exec_color_check(self, node: ASTNode, ctx: ExecutionContext):

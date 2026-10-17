@@ -9,6 +9,7 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
+  Circle,
   CircleStop,
   Clock3,
   Database,
@@ -1839,7 +1840,18 @@ export function AgentCockpit({
   const progress = runVisualProgress(run);
   const latestActivitySummary = latestRunActivitySummary(run);
   const taskState = String(run?.task_state || '').trim();
-  const taskBoardSummary = taskState.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || latestActivitySummary;
+  const taskStateTodos = Array.isArray(run?.task_state_todos) ? run.task_state_todos : [];
+  const taskStateDone = taskStateTodos.filter((item) => item.status === 'completed').length;
+  const taskStateScratchpad = String(run?.task_state_scratchpad || '').trim();
+  const activeTodo = taskStateTodos.find((item) => item.status === 'in_progress')
+    || taskStateTodos.find((item) => item.status === 'pending');
+  const taskBoardSummary = taskStateTodos.length
+    ? activeTodo
+      ? activeTodo.status === 'in_progress'
+        ? activeTodo.activeForm || activeTodo.content
+        : activeTodo.content
+      : '全部待办已完成'
+    : taskState.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || latestActivitySummary;
   const visibleConversationRuns = conversationRuns.length
     ? conversationRuns
     : (run ? [run] : []);
@@ -1933,9 +1945,42 @@ export function AgentCockpit({
                   <div>
                     <ListChecks size={14} />
                     <strong>动态任务板</strong>
-                    <small>{run?.task_state_revision ? `模型已更新 ${run.task_state_revision} 次` : '等待模型更新'}</small>
+                    <small>
+                      {taskStateTodos.length
+                        ? `${taskStateDone}/${taskStateTodos.length} 已完成`
+                        : run?.task_state_revision
+                          ? `模型已更新 ${run.task_state_revision} 次`
+                          : '等待模型更新'}
+                    </small>
                   </div>
-                  <pre>{taskState || '模型尚未发布任务板。'}</pre>
+                  {taskStateTodos.length > 0 ? (
+                    <ul className="ld-task-board-todos">
+                      {taskStateTodos.map((item, index) => (
+                        <li
+                          className={`ld-task-board-todo status-${item.status || 'pending'}`}
+                          key={`${index}-${item.content}`}
+                        >
+                          {item.status === 'completed' ? (
+                            <CheckCircle2 size={14} className="ld-todo-icon done" />
+                          ) : item.status === 'in_progress' ? (
+                            <Loader2 size={14} className="ld-todo-icon active arp-spin" />
+                          ) : (
+                            <Circle size={14} className="ld-todo-icon pending" />
+                          )}
+                          <span>
+                            {item.status === 'in_progress'
+                              ? item.activeForm || item.content
+                              : item.content}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <pre>{taskState || '模型尚未发布任务板。'}</pre>
+                  )}
+                  {taskStateScratchpad && taskStateTodos.length > 0 && (
+                    <p className="ld-task-board-notes">{taskStateScratchpad}</p>
+                  )}
                 </section>
                 <div className="ld-runtime-controls">
                   {active && run?.phase !== 'awaiting_human' && <button type="button" onClick={() => void togglePause()} disabled={controlling}>{manuallyPaused ? <Play size={13} /> : <Pause size={13} />}{manuallyPaused ? '继续' : '暂停'}</button>}

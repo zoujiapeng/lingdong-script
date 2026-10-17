@@ -195,6 +195,14 @@ class MissionCard:
     target_binding: TargetBinding | None
     last_transition: TransitionSummary | None = None
     failure_summary: FailureSummary | None = None
+    # How many times this mission has already attempted exactly this action with
+    # exactly these arguments, counting this one. 1 means it is new. This is a
+    # fact about what the runtime observed, not a policy: a run that proposed one
+    # of four action sequences thirty-four times looked exactly like thirty-four
+    # different attempts to the model before this existed. Consecutive-only
+    # counting was tried first and never fired, because a looping model tends to
+    # alternate between a few variants rather than repeat one verbatim.
+    same_action_attempts: int = 1
     format: str = "mission-card/1"
 
     def __post_init__(self) -> None:
@@ -211,6 +219,11 @@ class MissionCard:
             raise MissionError("last_transition must be TransitionSummary or null")
         if self.failure_summary is not None and type(self.failure_summary) is not FailureSummary:
             raise MissionError("failure_summary must be FailureSummary or null")
+        object.__setattr__(
+            self,
+            "same_action_attempts",
+            _positive_int(self.same_action_attempts, "same_action_attempts"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -227,6 +240,7 @@ class MissionCard:
             "failure_summary": (
                 None if self.failure_summary is None else self.failure_summary.to_dict()
             ),
+            "same_action_attempts": self.same_action_attempts,
         }
 
 
@@ -250,6 +264,8 @@ class MissionState:
         self.revision = 0
         self.status = MissionStatus.RUNNING
         self.last_transition: TransitionSummary | None = None
+        self.action_attempts: dict[str, int] = {}
+        self.same_action_attempts = 1
         self.failure_summary: FailureSummary | None = None
         self.last_error = ""
 
@@ -262,6 +278,7 @@ class MissionState:
             target_binding=self.target_binding,
             last_transition=self.last_transition,
             failure_summary=self.failure_summary,
+            same_action_attempts=self.same_action_attempts,
         )
 
     def _require_running(self) -> None:
@@ -279,6 +296,7 @@ class MissionState:
         frame_id: int | None = None,
         action_id: str | None = None,
         error_kind: str | None = None,
+        signature: str | None = None,
     ) -> None:
         self._require_running()
         self.last_transition = TransitionSummary(
@@ -289,6 +307,19 @@ class MissionState:
             action_id=action_id,
             error_kind=error_kind,
         )
+        # Count consecutive identical attempts. The count is what makes a loop
+        # visible to the model: without it, the eighty-first identical action
+        # arrives looking exactly like the first.
+        if signature:
+            seen = self.action_attempts.get(signature, 0) + 1
+            # Bounded bookkeeping: a long run must not grow an unbounded map,
+            # and losing old counts only makes the number smaller, never wrong.
+            if len(self.action_attempts) > 512 and signature not in self.action_attempts:
+                self.action_attempts.clear()
+            self.action_attempts[signature] = seen
+            self.same_action_attempts = seen
+        else:
+            self.same_action_attempts = 1
         self.revision += 1
 
     def complete(self) -> None:

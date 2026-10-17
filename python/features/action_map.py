@@ -174,6 +174,86 @@ def resolve_feature(step_type: str) -> str | None:
     )
 
 
+def _hex_to_hsv(color: str) -> tuple[int, int, int]:
+    """``RRGGBB`` 十六进制 → OpenCV HSV（H 0-179, S/V 0-255）。"""
+    import colorsys
+
+    value = str(color or "").strip().lstrip("#")
+    if len(value) != 6:
+        return 0, 0, 0
+    try:
+        r, g, b = (int(value[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except ValueError:
+        return 0, 0, 0
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    return int(round(h * 179)), int(round(s * 255)), int(round(v * 255))
+
+
+def _region_from(kwargs: dict) -> str:
+    if all(kwargs.get(k) is not None for k in ("x", "y", "w", "h")):
+        return f"{int(kwargs['x'])},{int(kwargs['y'])},{int(kwargs['w'])},{int(kwargs['h'])}"
+    return str(kwargs.get("region") or "")
+
+
+def _translate_dsl_action(action: str, kwargs: dict) -> dict:
+    """把 DSLExecutor 传入的动作参数翻译成 @feature 真实函数的参数。
+
+    DSL 节点用简写（``args`` 字符串 / ``x1,y1`` 等），而注册表功能用更规范的
+    命名（``template_name`` / ``region`` / ``query`` …）。这里做一次显式映射，
+    让“DSL 文本节点”和“直接调 feature”走同一条能力线。
+    """
+    params = dict(kwargs)
+
+    if action == "image_find":
+        raw = str(params.pop("args", "") or "")
+        template_name, threshold, region = "", 0.8, ""
+        for token in raw.split():
+            if "=" in token:
+                key, val = token.split("=", 1)
+                key = key.lower()
+                if key in {"sim", "similarity", "threshold"}:
+                    threshold = float(val)
+                elif key == "region":
+                    region = val
+            elif not template_name:
+                template_name = token.strip('"').strip("'")
+        params.update(template_name=template_name, threshold=threshold, region=region)
+
+    elif action == "ocr_find":
+        raw = str(params.pop("args", params.get("query", "")) or "")
+        params["query"] = raw.strip().strip('"').strip("'")
+
+    elif action == "region_wait":
+        params["region"] = _region_from(params)
+        params.setdefault("region_type", "stable")
+        params.setdefault("timeout", 30.0)
+
+    elif action == "color_check":
+        params["region"] = _region_from(params)
+        params.update(zip(("h", "s", "v"), _hex_to_hsv(str(params.pop("expected_color", "")))))
+        params.setdefault("tolerance", 30)
+
+    elif action == "scroll":
+        clicks = int(params.pop("clicks", params.get("amount", 3)) or 3)
+        params.update(direction="down" if clicks >= 0 else "up", amount=abs(clicks))
+
+    elif action == "swipe":
+        params.update(
+            start_x=int(params.pop("x1", params.get("start_x", 0))),
+            start_y=int(params.pop("y1", params.get("start_y", 0))),
+            end_x=int(params.pop("x2", params.get("end_x", 0))),
+            end_y=int(params.pop("y2", params.get("end_y", 0))),
+        )
+
+    elif action == "click":
+        target = params.get("target")
+        if isinstance(target, str) and target.replace(",", " ").replace(" ", "").isdigit():
+            params["target"] = target.replace(" ", ",")
+            params["physical"] = True
+
+    return params
+
+
 def make_action_handler():
     """用 registry.execute 构建 DSLExecutor 可用的 action_handler。
 
@@ -198,6 +278,14 @@ def make_action_handler():
 
         if action == "template_capture":
             return True
+
+        # ── DSL 简写参数 → @feature 规范参数 ──
+        kwargs = _translate_dsl_action(action, kwargs)
+
+        # 注册表里的 swipe_action 已标记废弃，但底层 ActionHandler 拖拽实现仍可用。
+        if action == "swipe":
+            from interaction.actions import ActionHandler
+            return ActionHandler()("swipe", **kwargs)
 
         # ── Priority 1: RPA.Windows ──
         try:

@@ -14,6 +14,19 @@ import logging
 import os
 import time
 
+# 让本进程成为 DPI 感知进程：否则在 125%/150% 缩放下，SetCursorPos/mouse_event 的
+# 坐标会被 Windows 再缩放一次（物理坐标 → 逻辑坐标），导致继承自截图/模板匹配的
+# 物理坐标落点偏移，表现为“点击/拖拽落不到目标”。感知后坐标与 mss 截图一致。
+try:
+    import ctypes
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        ctypes.windll.user32.SetProcessDPIAware()
+except Exception:
+    pass
+
 # Screen coordinate scale factor — set by supervisor.capture_b64 when resizing screenshots.
 # The LLM sees a resized image and picks coordinates in that virtual space;
 # _exec_click rescales them to actual screen coordinates before clicking.

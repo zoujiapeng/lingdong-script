@@ -98,6 +98,8 @@ class RunProjectionStore:
             "task_state": "",
             "task_state_revision": 0,
             "task_state_explicit": False,
+            "task_state_scratchpad": "",
+            "task_state_todos": [],
             "continuation": {},
             "timeline": [],
             "evidence": [],
@@ -336,6 +338,22 @@ class RunProjectionStore:
                             ) + 1
                         run["task_state"] = task_state
                         run["task_state_explicit"] = True
+                    scratchpad = event.get("task_state_scratchpad")
+                    if type(scratchpad) is str:
+                        run["task_state_scratchpad"] = scratchpad[:8192]
+                    todos = event.get("task_state_todos")
+                    if isinstance(todos, list):
+                        run["task_state_todos"] = [
+                            {
+                                "content": str(item.get("content") or "")[:256],
+                                "activeForm": str(
+                                    item.get("activeForm") or ""
+                                )[:256],
+                                "status": str(item.get("status") or ""),
+                            }
+                            for item in todos
+                            if isinstance(item, dict)
+                        ][:32]
                 if activity_kind == "tool_start" and event.get("tool"):
                     run["current_tool"] = event.get("tool")
                 elif (
@@ -946,6 +964,8 @@ class RunProjectionStore:
             data["evidence"] = []
             data["result"] = None
             data["task_state"] = ""
+            data["task_state_scratchpad"] = ""
+            data["task_state_todos"] = []
         metrics = data["metrics"]
         tool_samples = metrics.pop("tool_latency_ms", [])
         perception_samples = metrics.pop("perception_latency_ms", [])

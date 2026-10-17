@@ -24,6 +24,8 @@
 
 “完全离线执行”在这里指不访问外部网络、不调用模型：确定性的 `replay_step` 和本地原生节点仍由机器上的 Python Runtime、Replayer 与 Desktop Action Queue 执行。Electron 单进程预览、计时器或日志不能冒充真实桌面执行；Runtime 不在或源码漂移时只能继续编辑，不能运行。
 
+`run_command` 是确定性流程的通用本机扩展点：用户可以运行已安装的 CLI 或脚本，在命令、工作目录和超时中使用流程变量，并把 stdout 写回一个变量。它复用 canonical `replay_step/ext.run_shell`，非零退出或超时会让节点失败；没有为抖音或任何单一服务增加节点、关键词路由或 adapter。需要模型判断和动态 MCP 发现的任务仍由唯一的主 Actor 使用 `ConnectorGateway` 完成，不把 MCP 接成第二套离线流程运行时。
+
 Studio 提供显式的“一句话生成片段”辅助，但不进入 Agent 默认执行线。只有用户在编辑器中主动提交时，后端才创建一次短生命周期的 `FlowFragmentProposer`：它复用现有 provider/model/protocol/budget plumbing，但不是第二个 `LiveVisualActor`，主 Actor 也不承担图编排职责。请求只有一条 user JSON，不含 system/developer prompt，不读取桌面、Thread、连接器或完整文档，只收到用户原话、当前图的节点计数/类型摘要、基线 fingerprint 和小型本地可编译机械节点目录。它没有桌面、连接器或执行权限，不增加 Agent 默认提示词、默认工具面、Planner 或任务分类器。
 
 模型只能返回一个严格 schema 的无环片段草稿。Renderer 校验节点类型、参数、端口和基线 fingerprint，先展示摘要、节点、参数与连线；用户确认后才把片段放到当前图右侧空白区，并形成一次可撤销 checkpoint。它不会自动连接既有节点、覆盖文档、保存或运行。这个辅助调用需要模型和网络；新建、打开、编辑、拼接、撤销、保存以及确定性节点的本地执行仍保持完全离线。不得接回 `src/ai-interface`、旧 DSL 生成器或 Electron HTTP 直接写图路径。
@@ -77,7 +79,7 @@ Flow editor state -> automation-ir/1(runtime.arp_graph) -> validation -> Runtime
 FlowScript/WPS 可导入。`store/executor.ts` 与 `python/engine/` 仍是兼容执行入口，不是新工作台
 的主运行时。
 
-当前可放入画布的节点包括 action batch、verified skill replay、replay step、evidence/human gate、
+当前可放入画布的节点包括 action batch、verified skill replay、replay step、run command、evidence/human gate、
 基础 GUI action、condition、delay 和 set variable。历史 `agent_goal` 只可读取，validation 会给出
 迁移错误。预置模板与其搜索元数据由同一 registry 生成；未知模板 ID 会报错，不再静默回退。
 

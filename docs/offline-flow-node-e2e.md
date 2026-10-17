@@ -7,12 +7,16 @@
 > 2026-08-19 更新：下文保留 2026-08-02 的逐项证据作为历史记录；当前
 > `ACTION_BATCH` 已直接复用 run 内 `FastGuiController`，整个 `ToolSession` / `agent/`
 > 实现已经删除。不要按历史修复说明恢复它们。
+>
+> 2026-09-11 更新：新增通用 `run_command` 节点。它编译到既有
+> `replay_step/ext.run_shell`，没有新增执行器或服务专属 adapter；本轮取得 C、I 级证据，
+> 尚未把它记作可见 Electron E2E。
 
 ## 当前边界
 
-- `NODE_DEFINITIONS` 仍保存 60 种历史定义，供旧文件读取。
-- 当前节点目录只开放 20 种可编辑节点；其中 `agent_goal` 需要模型，不属于完全离线节点。
-- 其余 19 种可编辑节点，加上脚本自带的 `start` / `end`，均可在不联网时编排。
+- `NODE_DEFINITIONS` 仍保存现役和历史定义，供旧文件读取。
+- 当前节点目录开放 20 种可编辑节点，均可编译到 canonical ARP，并可在不联网时编排。
+- 历史 `agent_goal` 不再出现在节点目录；它需要模型，也不计入完全离线矩阵。
 - “离线执行”不等于“不要本机 Runtime”。桌面输入、截图、窗口、剪贴板、WPS 和技能重放仍需要本机 Python Runtime、Desktop Action Queue 或本地 Memory Store。
 - `image_click`、`loop`、`sub_script`、`web_browser`、`popup_close`、`color_check`、`progress_wait`、`region_wait`、`scene_condition`、`variable_get`、系统电源/音频/桌面聚合节点、`dialog_action`、`a11y_action`、`wifi_action`、`tool_call` 和 camera 节点等 38 种历史定义没有出现在当前节点目录。它们尚未获得 canonical ARP 与逐节点可见 E2E，不得称为离线可执行节点；后续只能逐个迁移并测试，或删除。
 
@@ -24,8 +28,8 @@
 | I | 本机 Runtime handler/integration 测试实际运行，允许使用 test double；不是用户端 E2E。 |
 | E | 用户从可见 Electron Studio 创建/打开流程并点击运行，动作进入真实本机 Runtime，由 Runtime 之外的 oracle 验证。 |
 
-本轮新增的完整 fixture matrix 覆盖全部 20 个目录节点的 C 级合同，并验证只有
-`agent_goal` 被分类为需要模型。它只证明非 `legacy_flow` 编译路径和合同覆盖，不证明
+完整 fixture matrix 覆盖全部 20 个目录节点的 C 级合同，并验证当前目录没有模型依赖节点。
+它只证明非 `legacy_flow` 编译路径和合同覆盖，不证明
 每个参数的物理执行语义；本轮没有把这个测试结果写成 E2E 通过。
 
 ## 逐节点状态
@@ -54,11 +58,12 @@
 | `focus_window` | 是 | 本机窗口 | 已有 | 共用 controller | 待测 | OS foreground HWND 精确等于 target HWND |
 | `clipboard_set` | 是 | 本机剪贴板 | 已有 | 共用 controller | YES 组合链通过；独立逐项待测 | 独立 OS clipboard reader 得到精确 nonce；空串允许用于清空 |
 | `clipboard_get` | 是 | 本机剪贴板 | 已有 | 共用 controller | YES 组合链通过；独立逐项待测 | harness 先写 nonce，节点输出与后继可见文本精确一致 |
+| `run_command` | 是 | 本机进程 + Replayer | 已有 | **真实命令、变量插值、文件落盘和 stdout 回传通过** | 待测 | 从可见 Studio 运行后，由独立进程核对 nonce 文件、退出码和后继变量；非零退出必须使节点失败 |
 | `replay_step` | 是 | 本机 Replayer | 已有 | 已有 | 既有组合证据；未计入独立矩阵 | 既有双窗口 JSON/标题 oracle；仍需按 WPS tool 分支继续拆测 |
 | `skill_replay` | 是 | 本地 Memory + Replayer | 已有 | 已有 | Studio 节点 E2E 待测 | 现有证据来自相邻的 Memory 页面链路，不是 Studio 节点 E2E |
 | `agent_goal` | 否 | 模型 + 本机 Runtime | 已有 | 已有 | Studio 节点 E2E 待测；不计入离线矩阵 | 主 Agent 的相邻 E2E 不能替代 Studio `agent_goal` 节点 E2E |
 
-### 严格独立矩阵：3/19（`click`、`input_text`、`screenshot`）
+### 严格独立矩阵：3/20（`click`、`input_text`、`screenshot`）
 
 严格 case 的计数单位是“一个 DUT（device under test）节点”，不是“整张图只能有一个动作节点”。
 为了让真实桌面动作具备合法目标和让 Runtime 到达可审计终态，case 可以加入通用的目标建立节点
@@ -129,7 +134,7 @@ Windows work-area 下方，返回 `x=50,y=1030,width=350,height=35`，证明 ove
 `e82463ec23dc36748988a2970377fa3448360e51ce65e2e0281a9b20b85e1321`。这只证明删除兼容后
 已有截图能力未退化，`screenshot` 仍只计既有的一项。
 
-### 补充的组合 E 级批次（不计入 2/19）
+### 补充的组合 E 级批次（不计入 3/20）
 
 2026-08-02 从可见 Electron Studio 打开
 `python/winpilot_home/eval_targets/offline_flow_clipboard_screenshot.json` 并点击运行。流程为
@@ -184,7 +189,7 @@ python python/winpilot_home/eval_targets/offline_flow_node_target.py `
 按下列顺序逐组推进；未通过时不扩大生产节点面：
 
 1. 精确设备输入：`click`、`input_text`、`keyboard`、`swipe`、四种 `mouse_operation`；
-2. 纯本地与控制流：`start/end`、`wait.time`、`variable_set`、`condition`；
+2. 纯本地与控制流：`start/end`、`wait.time`、`variable_set`、`condition`、`run_command`；
 3. 门控：`evidence_gate`、`human_gate`；
 4. 观察与窗口：`click_text`、`screenshot`、`wait.window`、`launch_program`、`focus_window`；
 5. 剪贴板：`clipboard_set`、`clipboard_get`；

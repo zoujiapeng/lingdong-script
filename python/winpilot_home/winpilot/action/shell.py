@@ -190,6 +190,27 @@ def _shape_result(
     return result
 
 
+# Windows virtualizes window coordinates for a process that has not declared DPI
+# awareness. On a 125% display a `MoveWindow` asking for 200,150 640x480 lands at
+# 250,188 800x600 - every number multiplied by the display scale - and the model
+# that supplied the correct numbers is told its action succeeded. Measured with
+# `e2e/probe-shell-dpi.mjs`: an unaware child scales the request by exactly the
+# display factor, an aware child lands on it. `__COMPAT_LAYER=HIGHDPIAWARE` does
+# not work here, so the declaration has to be in-process, before the model's
+# command runs. It costs about 200 ms per shell call; being wrong about window
+# geometry costs a whole task.
+_PS_DPI_PREFIX = (
+    "try {"
+    " if (-not ('WinPilotDpi' -as [type])) {"
+    " Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices;"
+    " public class WinPilotDpi {"
+    ' [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c);'
+    " }';"
+    " }"
+    " [void][WinPilotDpi]::SetProcessDpiAwarenessContext([IntPtr](-4));"
+    " } catch { }; "
+)
+
 # PowerShell 5.1 pipes output in the ANSI codepage (GBK on Chinese systems);
 # force UTF-8 so Chinese output isn't mojibake (the snake-game run produced
 # "�ļ��Ѵ���" which hid a real failure from the model).
@@ -211,6 +232,7 @@ def _powershell_command(command: str) -> str:
     """
 
     return (
+        f"{_PS_DPI_PREFIX}\n"
         f"{_PS_UTF8_PREFIX}\n"
         "$global:LASTEXITCODE=$null\n"
         "$global:__winpilot_success=$true\n"

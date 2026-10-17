@@ -209,6 +209,8 @@ export interface RunProjection {
   narration?: string;
   task_state?: string;
   task_state_revision?: number;
+  task_state_scratchpad?: string;
+  task_state_todos?: Array<{ content: string; activeForm?: string; status: string }>;
   continuation?: {
     format?: string;
     reason?: string;

@@ -15,8 +15,15 @@ from typing import Any
 
 
 _THINKING_DISABLED_BY_DEFAULT = {"reasonix"}
+# Reasoning models that emit a long ``reasoning_content`` (counted against the
+# completion budget) before any tool call.  With a bounded ``max_tokens`` the
+# reasoning alone can consume the whole budget and the turn finishes with
+# ``finish_reason=length`` and zero tool calls, so the Agent never acts.  These
+# providers therefore default to non-reasoning unless the operator explicitly
+# enables thinking.  This mirrors the VLM workaround in ``perception/vlm.py``.
+_THINKING_OVERSPEND_PROVIDERS = {"mimo"}
 _VISION_MODEL_MARKERS = ("omni", "-vl", "vision", "gpt-4o")
-_DEEPSEEK_VISION_MODELS = {"deepseek-v4-flash-vision-exp"}
+_DEEPSEEK_VISION_MODELS = {"deepseek-v4-flash-vision-exp", "deepseek-flash"}
 _NATIVE_PROTOCOL_ALIASES = {
     "openai_responses": "openai_responses",
     "responses": "openai_responses",
@@ -195,11 +202,13 @@ def model_profile_from_config(api: dict[str, Any] | Any) -> ModelProfile:
 def request_extra_body(api: dict[str, Any]) -> dict[str, Any]:
     """Return only provider extras the operator supplied explicitly.
 
-    The adapter used to turn a missing or false boolean into a provider-specific
-    ``thinking=disabled`` request.  That silently removed the model's native
-    reasoning from vNext visual turns.  ``False`` now leaves the provider at
-    its native default, ``True`` explicitly enables reasoning, and an explicit
-    object still passes through unchanged.
+    ``False``/missing leaves a provider at its native default, ``True``
+    explicitly enables reasoning, and an explicit object still passes through
+    unchanged.  One exception: providers in ``_THINKING_OVERSPEND_PROVIDERS``
+    default to reasoning *off* when the operator left ``thinking`` unset,
+    because their reasoning otherwise consumes the entire completion budget and
+    the turn emits no tool call.  Operators can still force it on with
+    ``thinking: true`` or an explicit object.
     """
     body: dict[str, Any] = {}
     thinking = api.get("thinking", None)
@@ -207,6 +216,10 @@ def request_extra_body(api: dict[str, Any]) -> dict[str, Any]:
         body["thinking"] = {"type": "enabled"}
     elif isinstance(thinking, dict):
         body["thinking"] = thinking
+    elif thinking in (False, None) and _lower(api.get("provider")) in (
+        _THINKING_OVERSPEND_PROVIDERS
+    ):
+        body["thinking"] = {"type": "disabled"}
 
     extra = api.get("extra_body")
     if isinstance(extra, dict):

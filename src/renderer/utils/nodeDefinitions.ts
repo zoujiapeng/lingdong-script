@@ -848,6 +848,28 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
       outputs: [{ id: 'output', type: 'flow' }],
     },
   },
+  run_command: {
+    type: 'run_command',
+    label: '运行命令',
+    description: '在本机离线运行一个可复现的 CLI/脚本步骤，并可把标准输出写入流程变量。',
+    icon: 'Terminal',
+    category: 'tools',
+    color: '#0f766e',
+    defaultParams: {
+      command: '',
+      shell: 'powershell',
+      cwd: '',
+      timeout_s: 30,
+      into: '',
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'output', label: '完成', type: 'flow' },
+        { id: 'fail', label: '失败', type: 'flow' },
+      ],
+    },
+  },
   camera_capture: {
     type: 'camera_capture',
     label: '摄像头抓拍',

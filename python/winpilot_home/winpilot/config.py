@@ -32,7 +32,7 @@ _DEFAULTS: dict[str, Any] = {
         "provider": "auto",
         "base_url": "https://api.deepseek.com",
         "api_key": "",
-        "model": "deepseek-v4-flash-vision-exp",
+        "model": "deepseek-flash",
         "temperature": 0.3,
         "max_tokens": 4096,
         "thinking": False,

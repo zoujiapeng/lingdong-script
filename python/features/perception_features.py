@@ -379,20 +379,52 @@ def screenshot(region: str = "", format: str = "jpeg", quality: int = 70):
            validator=lambda r: r.get("success") is True, skip_in_ci=True),
     ],
 )
-def popup_close(text: str = "", timeout: float = 5) -> bool:
+def popup_close(text: str = "", timeout: float = 5, strategy: str = "auto") -> bool:
+    """关闭弹窗。
+
+    - 给定 ``text``：关闭标题包含该文字的可见顶层窗口（自绘弹窗也可）。
+    - 留空：只关闭 Windows 标准对话框（窗口类 ``#32770``）。
+    通过发送 ``WM_CLOSE`` 关闭，目标窗口会走它自己的关闭逻辑。
+    """
+    import time as _time
+
     try:
-        from interaction.actions import ActionHandler, AutoPopup, ClickTarget
-        from perception.ocr import OCREngine
-        from perception.vision import TemplateMatcher
-        ocr = OCREngine()
-        matcher = TemplateMatcher()
-        clicker = ClickTarget(ocr, matcher)
-        popup = AutoPopup(clicker)
-        if text:
-            return popup.close_by_text(text, timeout=timeout)
-        return popup.check_and_handle(ocr)
+        import win32con
+        import win32gui
     except ImportError:
         return False
+
+    keyword = str(text or "").strip().lower()
+
+    def candidates() -> list[int]:
+        found: list[int] = []
+
+        def cb(hwnd: int, _extra: object) -> None:
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            title = win32gui.GetWindowText(hwnd)
+            if keyword:
+                if keyword in title.lower():
+                    found.append(hwnd)
+            elif win32gui.GetClassName(hwnd) == "#32770":
+                found.append(hwnd)
+
+        win32gui.EnumWindows(cb, None)
+        return found
+
+    deadline = _time.time() + max(0.5, float(timeout))
+    while _time.time() < deadline:
+        targets = candidates()
+        if targets:
+            for hwnd in targets:
+                try:
+                    win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                except Exception:
+                    pass
+            _time.sleep(0.2)
+            return True
+        _time.sleep(0.2)
+    return False
 
 
 @feature(

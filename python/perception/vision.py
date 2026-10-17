@@ -101,13 +101,24 @@ class TemplateMatcher:
         self._template_dir = Path(template_dir)
         self._cache: Dict[str, np.ndarray] = {}
 
+    @staticmethod
+    def _imread_unicode(path: "Path") -> Optional[np.ndarray]:
+        """读取图片，支持中文/非 ASCII 路径（cv2.imread 对非 ASCII 路径会失败）。"""
+        try:
+            data = np.fromfile(str(path), dtype=np.uint8)
+            if data.size == 0:
+                return None
+            return cv2.imdecode(data, cv2.IMREAD_COLOR)
+        except Exception:
+            return None
+
     def load_template(self, name: str) -> Optional[np.ndarray]:
         if name in self._cache:
             return self._cache[name]
         for ext in [".png", ".jpg", ".bmp"]:
             path = self._template_dir / (name + ext)
             if path.exists():
-                tmpl = cv2.imread(str(path))
+                tmpl = self._imread_unicode(path)
                 self._cache[name] = tmpl
                 return tmpl
         return None
@@ -118,7 +129,7 @@ class TemplateMatcher:
             if f.suffix.lower() in {".png", ".jpg", ".bmp"}:
                 name = f.stem
                 if name not in self._cache:
-                    self._cache[name] = cv2.imread(str(f))
+                    self._cache[name] = self._imread_unicode(f)
 
     def find(
         self,

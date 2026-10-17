@@ -20,6 +20,7 @@ _MAX_HISTORY_MESSAGES = 12
 _MAX_HISTORY_CHARS = 16_384
 _ACTIVE_STATUSES = frozenset({"queued", "running", "paused"})
 _SUCCESS_STATUSES = frozenset({"done", "reply"})
+_INCOMPLETE_ASSISTANT_NOTE = "The previous attempt did not complete."
 _CHECKPOINT_FORMAT = "agent-thread-continuation/1"
 _MAX_CHECKPOINT_BYTES = _MAX_THREADS * (_MAX_HISTORY_CHARS + 4096)
 _DEFAULT_CHECKPOINT = (
@@ -151,16 +152,12 @@ class AgentThreadStore:
                 return
             status = str(event.get("status") or "failed")
             turn.status = status
-            if status in _SUCCESS_STATUSES:
-                result = event.get("user_result")
-                turn.result = (
-                    str(result).strip()
-                    if type(result) is str and result.strip()
-                    else ""
-                )[:16_384]
+            result = event.get("user_result")
+            if type(result) is str and result.strip():
+                turn.result = str(result).strip()[:16_384]
             turn.updated_at = thread.updated_at = time.time()
             self._runs.pop(run_id, None)
-            if status in _SUCCESS_STATUSES and turn.result:
+            if turn.result:
                 self._completed[run_id] = (thread, turn)
                 try:
                     self._save_checkpoint_locked()
@@ -230,7 +227,7 @@ class AgentThreadStore:
     def _continuation_turns(thread: _Thread) -> list[_Turn]:
         turns = [
             turn for turn in thread.turns
-            if turn.status in _SUCCESS_STATUSES and turn.result
+            if turn.status not in _ACTIVE_STATUSES and turn.result
         ][-(_MAX_HISTORY_MESSAGES // 2):]
         while (
             turns
@@ -241,15 +238,38 @@ class AgentThreadStore:
         return turns
 
     @classmethod
+    def _history_turns(cls, thread: _Thread) -> list[_Turn]:
+        """Keep every terminal turn's goal so a follow-up still sees the task.
+
+        Unlike the success-only continuation checkpoint, the model-facing
+        history must retain the original request even when the previous attempt
+        failed or was canceled; otherwise a short follow-up ("continue") loses
+        the goal and the model re-derives a truncated task from the screen.
+        """
+
+        turns = [
+            turn for turn in thread.turns
+            if turn.status not in _ACTIVE_STATUSES
+        ][-(_MAX_HISTORY_MESSAGES // 2):]
+        while (
+            turns
+            and sum(
+                len(turn.goal)
+                + len(turn.result or _INCOMPLETE_ASSISTANT_NOTE)
+                for turn in turns
+            )
+            > _MAX_HISTORY_CHARS
+        ):
+            turns = turns[1:]
+        return turns
+
+    @classmethod
     def _history(cls, thread: _Thread) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
-        for turn in cls._continuation_turns(thread):
-            messages.extend(
-                (
-                    {"role": "user", "content": turn.goal},
-                    {"role": "assistant", "content": turn.result},
-                )
-            )
+        for turn in cls._history_turns(thread):
+            messages.append({"role": "user", "content": turn.goal})
+            content = turn.result or _INCOMPLETE_ASSISTANT_NOTE
+            messages.append({"role": "assistant", "content": content})
         return [dict(item) for item in messages]
 
     @staticmethod
@@ -384,7 +404,7 @@ class AgentThreadStore:
                     or type(result) is not str
                     or not result
                     or type(status) is not str
-                    or status not in _SUCCESS_STATUSES
+                    or status in _ACTIVE_STATUSES
                 ):
                     raise AgentThreadError("invalid or duplicate checkpoint turn")
                 history_chars += len(goal) + len(result)

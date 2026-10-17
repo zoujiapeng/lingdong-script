@@ -135,6 +135,7 @@ function NodeParamEditor({
   switch (node.type) {
     case 'action_batch':
     case 'replay_step':
+    case 'run_command':
     case 'skill_replay':
     case 'evidence_gate':
     case 'human_gate':

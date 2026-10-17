@@ -377,6 +377,96 @@ def test_replay_clipboard_get_updates_arp_variables_for_conditions(monkeypatch):
     assert condition["output"] == {"actual": "clipboard-nonce", "matched": True}
 
 
+def test_replay_shell_step_performs_real_local_work_and_exports_stdout(tmp_path):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    target = tmp_path / "offline-flow-result.txt"
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="seed",
+                kind=ArpNodeKind.SET_VARIABLE,
+                config={"name": "payload", "value": "offline-flow-pass"},
+            ),
+            ArpNode(
+                id="command",
+                kind=ArpNodeKind.REPLAY_STEP,
+                config={
+                    "step": {
+                        "tool": "ext.run_shell",
+                        "command": (
+                            "[System.IO.File]::WriteAllText('offline-flow-result.txt', '${payload}', "
+                            "[System.Text.UTF8Encoding]::new($false)); "
+                            "Write-Output '${payload}'"
+                        ),
+                        "shell": "powershell",
+                        "cwd": str(tmp_path),
+                        "timeout_s": 10,
+                        "into": "command_output",
+                    },
+                    "session": "command-flow",
+                },
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="seed"),
+            ArpEdge(id="e2", source="seed", target="command"),
+            ArpEdge(id="e3", source="command", target="end"),
+        ],
+        policy=ArpPolicy(),
+    )
+
+    result = ArpExecution(graph, adapters.default_handlers(), run_id="shell-replay").run()
+
+    assert result["status"] == "done"
+    assert target.read_text(encoding="utf-8").strip() == "offline-flow-pass"
+    assert result["variables"]["command_output"].strip() == "offline-flow-pass"
+
+
+def test_replay_shell_step_propagates_a_real_nonzero_exit():
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="command",
+                kind=ArpNodeKind.REPLAY_STEP,
+                config={
+                    "step": {
+                        "tool": "ext.run_shell",
+                        "command": "Write-Error 'expected failure'; exit 7",
+                        "shell": "powershell",
+                        "timeout_s": 10,
+                    },
+                    "session": "command-flow",
+                },
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="command"),
+            ArpEdge(id="e2", source="command", target="end"),
+        ],
+        policy=ArpPolicy(),
+    )
+
+    result = ArpExecution(graph, adapters.default_handlers(), run_id="shell-replay-failure").run()
+
+    assert result["status"] == "failed"
+    command = next(item for item in result["history"] if item["node_id"] == "command")
+    assert command["ok"] is False
+    assert command["branch"] == "fail"
+    assert command["output"]["results"][0]["exit_code"] == 7
+    assert "command exited with code 7" in command["error"]
+
+
 def test_managed_screenshot_action_batch_surfaces_run_artifact(monkeypatch, tmp_path):
     import numpy as np
 
@@ -1412,6 +1502,52 @@ def test_run_projection_tracks_interleaved_activity_and_local_replanning():
     assert run["task_state_revision"] == 3
     assert run["task_state"].startswith("Phase: verify")
     assert run["current_tool"] is None
+
+
+def test_run_projection_surfaces_structured_todo_board() -> None:
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    run_id = "run-todo-board"
+    store.on_event({
+        "type": "arp_run_start", "ts": 1.0, "run_id": run_id,
+        "graph_id": "graph", "graph_name": "Track the todo board",
+    })
+    store.on_event({
+        "type": "live_agent_activity",
+        "ts": 2.0,
+        "run_id": run_id,
+        "kind": "task_state",
+        "task_state": "Phase: build",
+        "task_state_scratchpad": "Phase: build",
+        "task_state_todos": [
+            {
+                "content": "draft the answer",
+                "activeForm": "drafting the answer",
+                "status": "completed",
+            },
+            {
+                "content": "verify the answer",
+                "activeForm": "verifying the answer",
+                "status": "in_progress",
+            },
+        ],
+    })
+
+    run = store.get(run_id)
+    assert run["task_state_scratchpad"] == "Phase: build"
+    assert run["task_state_todos"] == [
+        {
+            "content": "draft the answer",
+            "activeForm": "drafting the answer",
+            "status": "completed",
+        },
+        {
+            "content": "verify the answer",
+            "activeForm": "verifying the answer",
+            "status": "in_progress",
+        },
+    ]
 
 
 def test_run_projection_preserves_manual_pause_across_child_events():

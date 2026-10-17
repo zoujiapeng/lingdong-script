@@ -157,7 +157,7 @@ Windows Shell 桌面不可用，run 在首次模型调用前以 `target_binding`
     "fresh": true,
     "coordinate_space": "submitted_image_pixels"
   },
-  "task_state": { "...": "有界模型笔记" },
+  "task_state": { "...": "有界模型笔记（scratchpad + todos 清单）" },
   "budget": { "...": "turn/model-call/time 机械预算事实" },
   "previous_action": null,
   "pointer_held": false,
@@ -171,8 +171,12 @@ message 的 `image_url` 内容发送，前面还带有有界成功 Thread 文本
 
 ### 6.1 Task state 与 action history
 
-- `task_state_update` 是可选的有界更新，缺省为 `{"scratchpad": null}`；
-- task state 是 in-memory、非权威提示，不进入 Mission truth；
+- `task_state_update` 是可选的有界更新，缺省为 `{"scratchpad": null}`；字段为
+  `scratchpad`（自由笔记）与 `todos`（用户可见的待办清单，全量覆盖，每项
+  `{content, activeForm, status}`，status ∈ pending/in_progress/completed，最多一个
+  in_progress）；
+- task state 是 in-memory、非权威提示，不进入 Mission truth；未完成待办
+  （`remaining_items`）由 `todos` 派生，不是独立的模型字段；
 - 当前响应或 Runtime apply 遇到格式错误的 task state 时只忽略该更新，
   不得因此拒绝同一响应里的有效动作或完成 claim；
 - 视觉上下文只保留紧邻一笔 provider 原生 `user image → assistant tool call → tool result`；

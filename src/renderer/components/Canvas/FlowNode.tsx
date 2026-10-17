@@ -165,6 +165,10 @@ function getNodeSummary(node: FlowNodeType): string {
     case 'tool_call': {
       return p.feature_name ? `${p.feature_name}` : '(调用工具)';
     }
+    case 'run_command': {
+      const command = String(p.command || '').trim();
+      return command ? `运行: ${command.slice(0, 32)}${command.length > 32 ? '…' : ''}` : '(运行命令)';
+    }
     default: return `(${node.type})`;
   }
 }

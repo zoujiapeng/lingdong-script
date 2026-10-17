@@ -368,6 +368,7 @@ describe('flow to ARP compiler', () => {
     { type: 'clipboard_set', dependency: 'desktop', params: { text: 'hello' } },
     { type: 'clipboard_get', dependency: 'desktop', params: { into: 'clip_text' } },
     { type: 'mouse_operation', dependency: 'desktop', params: { sub_operation: 'scroll', x: 10, y: 20, scroll_amount: 1 } },
+    { type: 'run_command', dependency: 'local', params: { command: 'Write-Output ok', shell: 'powershell', timeout_s: 10, into: 'result' } },
   ];
 
   function singleNodeFlow(type: NodeType, params: Record<string, unknown>): FlowScript {
@@ -642,6 +643,40 @@ describe('flow to ARP compiler', () => {
     expect(graph.nodes.find((node) => node.id === 'offline')?.config).not.toHaveProperty('allow_shell');
     expect(graph.policy).not.toHaveProperty('allow_shell');
     expect(graph.metadata.compilation).toMatchObject({ replay_nodes: 1, legacy_nodes: 0 });
+  });
+
+  it('compiles the generic command node to a real offline shell step', () => {
+    const script = scriptFixture();
+    script.nodes.splice(1, 0, {
+      id: 'command',
+      type: 'run_command',
+      x: 0,
+      y: 0,
+      params: {
+        command: 'Write-Output ${input}',
+        shell: 'powershell',
+        cwd: 'C:/work',
+        timeout_s: 12,
+        into: 'output',
+      },
+    });
+
+    const compiled = flowToArpGraph(script).nodes.find((node) => node.id === 'command');
+    expect(compiled).toMatchObject({
+      kind: 'replay_step',
+      timeout_s: 12,
+      config: {
+        step: {
+          tool: 'ext.run_shell',
+          command: 'Write-Output ${input}',
+          shell: 'powershell',
+          cwd: 'C:/work',
+          timeout_s: 12,
+          into: 'output',
+        },
+      },
+    });
+    expect(validateAutomationLocally(automationIrFromFlowScript(script))).toMatchObject({ valid: true });
   });
 
   it('compiles common GUI nodes into one controller batch per node', () => {

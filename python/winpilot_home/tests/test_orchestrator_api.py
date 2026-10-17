@@ -106,7 +106,7 @@ def test_platform_overview_exposes_contracts_and_capabilities(client):
         for item in data["capabilities"]
         for node_type in item.get("flow_node_types", [])
     }
-    assert {"agent_goal", "action_batch", "skill_replay", "variable_set"} <= advertised_nodes
+    assert {"agent_goal", "action_batch", "skill_replay", "variable_set", "run_command"} <= advertised_nodes
     assert "human_gate" not in advertised_nodes
 
 

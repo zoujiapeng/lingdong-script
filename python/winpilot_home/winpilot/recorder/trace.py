@@ -3567,7 +3567,7 @@ class Replayer:
     def _emit_step(self, idx: str, tool: str, ok: bool, result: dict) -> None:
         detail_keys = (
             "error", "verify_detail", "verify_method", "verified", "attempts",
-            "timeout", "stopped", "hint", "resolved", "launch_settle",
+            "timeout", "stopped", "hint", "resolved", "launch_settle", "exit_code",
         )
         BUS.publish("replay", state="step", index=idx, tool=tool, ok=ok,
                     detail={k: v for k, v in result.items()
@@ -3631,7 +3631,15 @@ class Replayer:
             result = shell.run(str(step.get("command", "")),
                                shell=str(step.get("shell", "powershell")),
                                timeout_s=float(step.get("timeout_s", 30)),
+                               cwd=step.get("cwd"),
                                stop_event=self.stop_event)
+            if not result.get("ok") and not result.get("error"):
+                exit_code = result.get("exit_code")
+                detail = str(result.get("stderr") or "").strip()[:300]
+                result["error"] = (
+                    f"command exited with code {exit_code}"
+                    + (f": {detail}" if detail else "")
+                )
             into = str(step.get("into", "")).strip()
             if into:
                 self.vars[into] = result.get("stdout", "") or ""
