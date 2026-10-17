@@ -12,12 +12,13 @@
  *   node packages/dsh-plugin-lingdong/e2e/explain.mjs output/e2e/report-123.json read_target_pixels
  *   node packages/dsh-plugin-lingdong/e2e/explain.mjs --latest --all
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPORTS = path.resolve(HERE, '..', '..', '..', 'output', 'e2e')
+const TRACES = path.resolve(HERE, '..', '..', '..', 'python', 'winpilot_home', 'traces')
 
 function latestReport() {
   const files = readdirSync(REPORTS)
@@ -51,6 +52,37 @@ function callsOf(row) {
   return calls
 }
 
+/**
+ * The agent arm's calls, read from the run's own trace.
+ *
+ * The other two arms are DSH sessions, so their tool calls are in the
+ * transcript the launcher printed. This arm is a separate process that writes a
+ * trace file of its own, and that file is the complete record - no bounded
+ * transcript slice, every proposal and every result. Reading it by run id is
+ * also what makes an old report re-explainable after the fact.
+ */
+function agentCallsOf(row) {
+  if (!row.run_id) return null
+  const file = path.join(TRACES, `${row.run_id}.jsonl`)
+  if (!existsSync(file)) return null
+  const calls = []
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (!line.startsWith('{')) continue
+    let event = null
+    try { event = JSON.parse(line) } catch { continue }
+    if (event.type !== 'live_agent_activity') continue
+    if (event.kind === 'tool_start') {
+      calls.push({ tool: String(event.tool ?? '?'), input: String(event.content ?? '').slice(0, 200) })
+    } else if (event.kind === 'tool_result' && calls.length) {
+      const text = String(event.content ?? '').replace(/\s+/g, ' ').trim()
+      calls[calls.length - 1].result = text.slice(0, 200)
+    } else if (event.kind === 'task_state' && calls.length) {
+      calls[calls.length - 1].note = String(event.task_state ?? '').slice(0, 120)
+    }
+  }
+  return calls
+}
+
 const argv = process.argv.slice(2)
 const positional = argv.filter((value) => !value.startsWith('--'))
 const explicitReport = positional.find((value) => value.endsWith('.json'))
@@ -65,13 +97,15 @@ const tasks = taskId ? [taskId] : [...new Set(rows.map((row) => row.task))]
 
 for (const id of tasks) {
   for (const row of rows.filter((entry) => entry.task === id)) {
-    console.log(`\n=== ${id} / ${row.arm}: ${row.steps} steps, ${row.total_tokens} tokens, pass=${row.pass} (${row.detail})`)
+    const outcome = row.agent_status ? ` agent=${row.agent_status}${row.failure_stage ? `/${row.failure_stage}` : ''}` : ''
+    console.log(`\n=== ${id} / ${row.arm}: ${row.steps} steps, ${row.total_tokens} tokens, pass=${row.pass} (${row.detail})${outcome}`)
     if (!showAll) continue
-    const calls = callsOf(row)
+    const calls = agentCallsOf(row) ?? callsOf(row)
     for (const [index, call] of calls.entries()) {
-      console.log(`  ${String(index + 1).padStart(2)}. ${call.tool} ${JSON.stringify(call.input).slice(0, 150)}`)
+      const input = typeof call.input === 'string' ? call.input : JSON.stringify(call.input)
+      console.log(`  ${String(index + 1).padStart(2)}. ${call.tool} ${input.slice(0, 160)}`)
       if (call.result) console.log(`      -> ${call.result}`)
     }
-    if (!calls.length) console.log('  (no tool_calls recorded in the transcript)')
+    if (!calls.length) console.log('  (no tool calls recorded for this arm)')
   }
 }

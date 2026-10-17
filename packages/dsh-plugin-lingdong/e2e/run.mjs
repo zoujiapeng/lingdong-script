@@ -8,28 +8,43 @@
  * bytes, the clipboard, a window rectangle - and the agent never sees it. A run
  * that claims success and left nothing behind fails.
  *
+ * The `agent` arm is the control that the other two cannot be: it drives the
+ * repository's own LiveVisualActor through `/api/v2/goals/runs`, with no DSH in
+ * the loop at all. Without it, "the tools win" and "the agent wins" are the same
+ * measurement, because both DSH arms share one agent loop.
+ *
  * Usage:
- *   node packages/dsh-plugin-lingdong/e2e/run.mjs                 # both arms, all tasks
+ *   node packages/dsh-plugin-lingdong/e2e/run.mjs                 # all arms, all tasks
  *   node packages/dsh-plugin-lingdong/e2e/run.mjs --arm lingdong  # one arm
+ *   node packages/dsh-plugin-lingdong/e2e/run.mjs --arm agent     # the original agent
  *   node packages/dsh-plugin-lingdong/e2e/run.mjs --task calculator_clipboard
  *   node packages/dsh-plugin-lingdong/e2e/run.mjs --list
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { resolveConfig } from '../src/config.mjs'
+import { WinPilotSidecar } from '../src/sidecar.mjs'
+import { createClient } from '../src/client.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.resolve(HERE, '..')
 const REPO = path.resolve(PLUGIN, '..', '..')
 const WORK = path.join(REPO, 'output', 'e2e')
+const TRACES = path.join(REPO, 'python', 'winpilot_home', 'traces')
 const TARGET_PS1 = path.join(HERE, 'target.ps1')
+/** The runtime's own working directory: where its shell commands land by default. */
+const RUNTIME_CWD = path.join(REPO, 'python', 'winpilot_home')
 
 const ARMS = {
   lingdong: { profile: 'ld-e2e', patch: path.join(HERE, 'lingdong.patch.yml') },
   cua: { profile: 'cua-e2e', patch: path.join(HERE, 'cua.patch.yml') },
+  // The repository's own agent, spoken to directly. Its own port keeps it off
+  // whatever the `web` profile's sidecar is holding.
+  agent: { kind: 'runtime', port: Number(process.env.LD_AGENT_PORT || 8795) },
 }
 
 const RUN_TIMEOUT_MS = Number(process.env.LD_E2E_TIMEOUT_MS || 420_000)
@@ -131,6 +146,73 @@ $found
   const parts = text(result.stdout).trim().split(',').map(Number)
   if (parts.length !== 4 || parts.some((value) => !Number.isFinite(value))) return null
   return { left: parts[0], top: parts[1], width: parts[2] - parts[0], height: parts[3] - parts[1] }
+}
+
+/**
+ * Both defensible readings of one window's "outer frame".
+ *
+ * `GetWindowRect` includes the invisible resize border Windows 10+ keeps around
+ * a window, so it reports a 640x480 window as 660x500. `DwmGetWindowAttribute`
+ * with `DWMWA_EXTENDED_FRAME_BOUNDS` (9) is the frame a person actually sees.
+ * A goal that says "the outer frame" does not choose between them, so a
+ * geometry task must accept whichever one the arm aimed at - otherwise it
+ * measures which API the arm happened to pick, not whether it could place the
+ * window. The plugin's own `set_window_frame` targets `GetWindowRect`; the
+ * agent arm targeted the DWM frame; both are correct readings.
+ */
+function windowFrames(fragment) {
+  const script = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class F {
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int s);
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c);
+  public delegate bool EnumProc(IntPtr h, IntPtr p);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+}
+"@
+[void][F]::SetProcessDpiAwarenessContext([IntPtr](-4))
+$script:found = $null
+$cb = [F+EnumProc]{
+  param($h, $p)
+  if (-not [F]::IsWindowVisible($h)) { return $true }
+  $len = [F]::GetWindowTextLength($h)
+  if ($len -le 0) { return $true }
+  $sb = New-Object System.Text.StringBuilder ($len + 1)
+  [void][F]::GetWindowText($h, $sb, $sb.Capacity)
+  if ($sb.ToString() -like "*${fragment}*") {
+    $w = New-Object F+RECT
+    [void][F]::GetWindowRect($h, [ref]$w)
+    $d = New-Object F+RECT
+    $rc = [F]::DwmGetWindowAttribute($h, 9, [ref]$d, 16)
+    if ($rc -ne 0) { $d = $w }
+    $script:found = "$($w.L),$($w.T),$($w.R),$($w.B);$($d.L),$($d.T),$($d.R),$($d.B)"
+    return $false
+  }
+  return $true
+}
+[void][F]::EnumWindows($cb, [IntPtr]::Zero)
+$found
+`
+  const result = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8', timeout: 30_000,
+  })
+  const raw = text(result.stdout).trim()
+  if (!raw) return null
+  const [classic, visible] = raw.split(';')
+  const box = (source) => {
+    const parts = String(source || '').split(',').map(Number)
+    if (parts.length !== 4 || parts.some((value) => !Number.isFinite(value))) return null
+    return { left: parts[0], top: parts[1], width: parts[2] - parts[0], height: parts[3] - parts[1] }
+  }
+  return { classic: box(classic), visible: box(visible) }
 }
 
 /** Kill any process whose name matches, ignoring failures. */
@@ -495,13 +577,25 @@ function buildTasks() {
       },
       goal: () => `Move and resize the window titled "LD Target" so that its outer frame is exactly x=200, y=150, width=640, height=480. Do not leave it any other size.`,
       async oracle() {
-        const rect = windowRect('LD Target')
-        if (!rect) return { pass: false, detail: 'the target window is gone' }
-        const ok = Math.abs(rect.left - 200) <= 2 && Math.abs(rect.top - 150) <= 2
-          && Math.abs(rect.width - 640) <= 2 && Math.abs(rect.height - 480) <= 2
-        return ok
-          ? { pass: true, detail: `frame is ${rect.left},${rect.top} ${rect.width}x${rect.height}` }
-          : { pass: false, detail: `frame is ${rect.left},${rect.top} ${rect.width}x${rect.height}` }
+        // Either reading of "outer frame" counts - see `windowFrames`.
+        const frames = windowFrames('LD Target')
+        if (!frames) return { pass: false, detail: 'the target window is gone' }
+        const wanted = { left: 200, top: 150, width: 640, height: 480 }
+        const near = (box) => box
+          && Math.abs(box.left - wanted.left) <= 2 && Math.abs(box.top - wanted.top) <= 2
+          && Math.abs(box.width - wanted.width) <= 2 && Math.abs(box.height - wanted.height) <= 2
+        const matched = near(frames.visible) ? 'visible frame' : near(frames.classic) ? 'GetWindowRect frame' : ''
+        const describe = (box) => box ? `${box.left},${box.top} ${box.width}x${box.height}` : 'gone'
+        return matched
+          ? {
+            pass: true,
+            detail: `${matched} is ${describe(matched === 'visible frame' ? frames.visible : frames.classic)}`
+              + ` (GetWindowRect ${describe(frames.classic)} / visible ${describe(frames.visible)})`,
+          }
+          : {
+            pass: false,
+            detail: `GetWindowRect ${describe(frames.classic)}, visible frame ${describe(frames.visible)}`,
+          }
       },
       async teardown({ child }) {
         // Only the process this task started: killing every powershell would
@@ -646,6 +740,96 @@ function buildTasks() {
         await new Promise((resolve) => server.close(resolve))
       },
     },
+    {
+      id: 'cross_app_pipeline',
+      // The first task here that cannot be finished inside one application: the
+      // answer has to be produced in Calculator, carried out of it, and land in
+      // a Notepad document that is then saved. Every earlier task could be done
+      // without ever leaving the window it started in, which is exactly the
+      // limitation the repository's own docs name as its remaining gap.
+      async setup() {
+        killByName(['notepad', 'CalculatorApp', 'Calculator'])
+        await sleep(1200)
+        const out = path.join(WORK, 't10.txt')
+        rmSync(out, { force: true })
+        // Random operands, so the answer cannot be a constant the model already
+        // knows: it has to be produced (or worked out) this run.
+        const left = 23 + Math.floor(Math.random() * 68)
+        const right = 23 + Math.floor(Math.random() * 68)
+        await startNotepad()
+        return { out, left, right, product: String(left * right) }
+      },
+      goal: ({ out, left, right }) => [
+        'Two applications are involved and the order matters.',
+        `In the Windows Calculator, work out ${left} multiplied by ${right} and copy the result to the clipboard.`,
+        'Then put that result into Notepad, as the only content of the document, and save it to',
+        `${out} .`,
+        'The file must contain the number and nothing else.',
+      ].join(' '),
+      async oracle({ out, product }) {
+        if (!existsSync(out)) return { pass: false, detail: 'the document was never saved' }
+        const got = text(readFileSync(out, 'utf8')).trim()
+        if (got === product) return { pass: true, detail: `the saved document holds ${product}` }
+        return { pass: false, detail: `the saved document holds ${JSON.stringify(got.slice(0, 40))} (wanted ${product})` }
+      },
+      async teardown() {
+        killByName(['notepad', 'CalculatorApp', 'Calculator'])
+        await sleep(600)
+      },
+    },
+    {
+      id: 'cross_window_token',
+      // The value lives in one window and has to be typed into another, so it
+      // must survive a focus change. `fill_form` and `read_target_text` can each
+      // be passed while treating the screen as one place; this one cannot.
+      async setup() {
+        const value = token('T11')
+        const out = path.join(WORK, 't11.json')
+        rmSync(out, { force: true })
+        const target = await startTarget('text', value)
+        const form = spawn('powershell', ['-NoProfile', '-STA', '-File', path.join(HERE, 'form.ps1'), '-Out', out], {
+          stdio: 'ignore',
+          windowsHide: false,
+        })
+        const deadline = Date.now() + 25_000
+        while (Date.now() < deadline) {
+          if (windowRect('LD Form')) break
+          await sleep(400)
+        }
+        return { value, out, target, form }
+      },
+      goal: ({ value }) => [
+        'Two windows are open. The window titled "LD Target" displays a token.',
+        `Type that token into the Name field of the window titled "LD Form".`,
+        'City must be Chengdu, the newsletter check box must be ticked, and Plan B must be selected.',
+        'Then press Submit.',
+        'The form writes what it actually received to a file when you submit.',
+      ].join(' '),
+      async oracle({ value, out }) {
+        if (!existsSync(out)) return { pass: false, detail: 'the form was never submitted' }
+        let got = null
+        try {
+          got = JSON.parse(readFileSync(out, 'utf8'))
+        } catch (error) {
+          return { pass: false, detail: `unreadable submission: ${error.message}` }
+        }
+        const wrong = []
+        // The token is compared against the one this task minted, never against
+        // the text the goal happened to spell out: the goal does not contain it.
+        if (got.name !== value) wrong.push(`name=${JSON.stringify(got.name)}`)
+        if (got.city !== 'Chengdu') wrong.push(`city=${JSON.stringify(got.city)}`)
+        if (got.subscribe !== true) wrong.push(`subscribe=${JSON.stringify(got.subscribe)}`)
+        if (got.plan !== 'B') wrong.push(`plan=${JSON.stringify(got.plan)}`)
+        return wrong.length
+          ? { pass: false, detail: `submitted with ${wrong.join(' ')}` }
+          : { pass: true, detail: `the token crossed windows intact (${value})` }
+      },
+      async teardown({ target, form }) {
+        target?.kill()
+        form?.kill()
+        await sleep(400)
+      },
+    },
   ]
 }
 
@@ -705,12 +889,181 @@ function metricsFrom(stdout) {
   return { steps, turns, input_tokens: input, output_tokens: output, total_tokens: total, tools, final: finalText }
 }
 
+/**
+ * The repository's own agent, reached over its REST goal route.
+ *
+ * One runtime serves every task in the round: spawning a fresh Python process
+ * per task would put its interpreter warm-up inside the measurement, which is
+ * exactly the kind of thing that makes an arm look slower than it is.
+ */
+let agentRuntime = null
+
+function agentClient(port) {
+  if (!agentRuntime) {
+    const settings = resolveConfig({ port, autoStart: true })
+    const sidecar = new WinPilotSidecar(settings, {
+      info: () => {},
+      warn: (message) => process.stderr.write(`${message}\n`),
+    })
+    agentRuntime = { sidecar, client: createClient(settings, sidecar), baseUrl: sidecar.baseUrl }
+  }
+  return agentRuntime
+}
+
+/** Cost lives in the run's own trace; the REST projection reports lifecycle only. */
+function readAgentTrace(runId) {
+  const file = path.join(TRACES, `${runId}.jsonl`)
+  if (!existsSync(file)) return null
+  const prompts = []
+  let completion = 0
+  let physical = 0
+  let rejected = 0
+  const proposals = []
+  const lines = []
+  let done = null
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (!line.startsWith('{')) continue
+    let event
+    try { event = JSON.parse(line) } catch { continue }
+    if (event.type === 'agent_usage' && event.step_usage) {
+      prompts.push(event.step_usage.prompt_tokens ?? 0)
+      completion += event.step_usage.completion_tokens ?? 0
+    } else if (event.type === 'vnext_physical_attempt') physical += 1
+    else if (event.type === 'vnext_raw_receipt' && event.error_kind) rejected += 1
+    else if (event.type === 'vnext_model_tool_shape' && Array.isArray(event.calls)) {
+      for (const call of event.calls) proposals.push(String(call.name || ''))
+    } else if (event.type === 'live_agent_done') done = event
+    if (event.type === 'vnext_model_tool_shape' || event.type === 'vnext_raw_receipt'
+      || event.type === 'live_agent_turn' || event.type === 'vnext_model_call') {
+      lines.push(line)
+    }
+  }
+  // A run cut off by the timeout has no `live_agent_done` yet, but the calls it
+  // already made are still the honest cost of the attempt - reporting zero
+  // steps would read as "the agent did nothing" when it did a lot.
+  if (!done && !prompts.length) return null
+  return {
+    prompts,
+    proposals,
+    physical,
+    rejected,
+    transcript: lines.join('\n'),
+    steps: prompts.length,
+    turns: done?.turns_used ?? prompts.length,
+    input_tokens: prompts.reduce((sum, value) => sum + value, 0),
+    output_tokens: completion,
+    total_tokens: prompts.reduce((sum, value) => sum + value, 0) + completion,
+    final: done?.detail ?? '',
+    status: done?.status ?? 'incomplete',
+    failure_stage: done?.failure_stage ?? 'timed_out',
+  }
+}
+
+/** Run one goal on the repository's own agent and report it in the same currency. */
+async function runAgentArm(goal) {
+  const started = Date.now()
+  const { client } = agentClient(ARMS.agent.port)
+  await agentRuntime.sidecar.ensure()
+  await waitForIdleRuntime(client)
+  const submitted = await client.post('/api/v2/goals/runs', { goal })
+  const runId = submitted.run_id ?? submitted.run?.run_id
+  if (!runId) throw new Error('the runtime accepted the goal but reported no run id')
+  let final = await client.waitForRun(runId, { timeoutMs: RUN_TIMEOUT_MS })
+  // Whether this harness ran out of patience is a fact about the harness, and
+  // it is recorded as such: the run is then cancelled so the tasks behind it
+  // are not judged against a desktop this one is still driving.
+  const harnessTimeout = Boolean(final?.timed_out)
+  if (harnessTimeout) {
+    try {
+      await client.post(`/api/v2/runs/${encodeURIComponent(runId)}/cancel`, {})
+      await client.waitForRun(runId, { timeoutMs: 60_000 })
+    } catch (error) {
+      process.stderr.write(`could not cancel ${runId}: ${error.message}\n`)
+    }
+  }
+  const elapsed = Date.now() - started
+  // The trace is written when the run unwinds, so a terminal projection can be
+  // observed a moment before its last line lands.
+  let trace = null
+  for (let attempt = 0; attempt < 40 && !trace; attempt += 1) {
+    trace = readAgentTrace(runId)
+    if (!trace) await sleep(250)
+  }
+  await waitForIdleRuntime(client)
+  return {
+    run_id: runId,
+    elapsed_ms: elapsed,
+    timed_out: harnessTimeout || !trace,
+    runtime_status: client.statusOf(final),
+    result: final?.run?.result ?? final?.run?.reply ?? null,
+    trace,
+  }
+}
+
+/**
+ * Block until the runtime reports no run in flight.
+ *
+ * The next task's oracle reads the real world, so beginning it while the
+ * previous goal is still clicking would judge one task with another's actions.
+ */
+async function waitForIdleRuntime(client, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const status = await client.get('/api/status')
+      const busy = status?.busy ?? {}
+      const active = status?.agent_running || status?.arp_running
+        || Object.values(busy).some(Boolean)
+      if (!active) return true
+    } catch {
+      return false
+    }
+    await sleep(500)
+  }
+  return false
+}
+
 /** Run one arm on one task and judge it by the oracle alone. */
 async function runOne(armName, task) {
   const arm = ARMS[armName]
   const context = await task.setup()
   const goal = task.goal(context)
   const started = Date.now()
+
+  if (arm.kind === 'runtime') {
+    const outcome = await runAgentArm(goal)
+    const trace = outcome.trace
+    let verdict
+    try {
+      verdict = await task.oracle(context)
+    } catch (error) {
+      verdict = { pass: false, detail: `oracle failed: ${error.message}` }
+    }
+    await task.teardown?.(context)
+    await sleep(600)
+    return {
+      arm: armName,
+      task: task.id,
+      pass: verdict.pass,
+      detail: verdict.detail,
+      elapsed_ms: Date.now() - started,
+      timed_out: outcome.timed_out,
+      steps: trace?.steps ?? 0,
+      turns: trace?.turns ?? 0,
+      input_tokens: trace?.input_tokens ?? 0,
+      output_tokens: trace?.output_tokens ?? 0,
+      total_tokens: trace?.total_tokens ?? 0,
+      said: String(outcome.result ?? '').split('\n').filter(Boolean).slice(-1)[0]?.slice(0, 200) ?? '',
+      runtime_status: outcome.runtime_status,
+      agent_status: trace?.status ?? '',
+      failure_stage: trace?.failure_stage ?? '',
+      proposals: trace?.proposals ?? [],
+      run_id: outcome.run_id,
+      transcript: (trace?.transcript ?? '').trim().slice(-6000),
+      stderr: '',
+    }
+  }
+
   let stdout = ''
   let stderr = ''
   let timedOut = false
@@ -764,6 +1117,61 @@ async function runOne(armName, task) {
   }
 }
 
+/**
+ * Untracked files the repository had before the round.
+ *
+ * The agent arm runs the repository's own agent, which writes wherever it
+ * decides to - a note-taking PowerShell script under python/winpilot_home was
+ * enough to break the working tree's "only the user's changes" invariant. The
+ * harness contract is that a comparison run leaves the machine as it found it,
+ * so the round records the untracked set up front and removes only what
+ * appeared while it ran. `-z` is what makes the paths usable: the default
+ * porcelain output C-quotes and octal-escapes non-ASCII names.
+ */
+function untrackedSnapshot() {
+  const result = spawnSync('git', ['status', '--porcelain', '-z'], {
+    cwd: REPO, encoding: 'utf8', timeout: 60_000,
+  })
+  const files = new Set()
+  for (const entry of text(result.stdout).split('\0')) {
+    if (entry.startsWith('?? ')) files.add(entry.slice(3))
+  }
+  return files
+}
+
+/** Remove the untracked files this round created, and say what it could not. */
+function removeNewUntracked(before) {
+  const appeared = [...untrackedSnapshot()].filter((entry) => !before.has(entry))
+  for (const entry of appeared) {
+    const target = path.resolve(REPO, entry)
+    // Only ever inside the runtime's own working directory.
+    //
+    // A round is not the only writer in this repository: an editor, another
+    // agent, or the person running it can create a file while the run is in
+    // flight, and "untracked and new" cannot tell those apart from the agent's
+    // own scratch scripts. Restricting deletion to where the runtime's shell
+    // actually lands keeps the automatic cleanup honest - everything else is
+    // reported and left for a human. (An earlier version deleted this round's
+    // own compare.mjs, which is exactly that failure.)
+    if (!target.startsWith(`${RUNTIME_CWD}${path.sep}`)) {
+      console.log(`the run created a file outside the runtime's directory - inspect by hand: ${entry}`)
+      continue
+    }
+    let stat = null
+    try { stat = statSync(target) } catch { continue }
+    if (!stat.isFile()) {
+      console.log(`the run created a directory - inspect by hand: ${entry}`)
+      continue
+    }
+    try {
+      rmSync(target, { force: true })
+      console.log(`the run created a file - removed: ${entry}`)
+    } catch (error) {
+      console.log(`the run created ${entry} and it could not be removed: ${error.message}`)
+    }
+  }
+}
+
 async function main() {
   const argv = process.argv.slice(2)
   const only = argv.includes('--task') ? argv[argv.indexOf('--task') + 1] : null
@@ -775,6 +1183,9 @@ async function main() {
   }
   const tasks = only ? all.filter((task) => task.id === only) : all
   const arms = armArg ? [armArg] : Object.keys(ARMS)
+  // Only the agent arm drives software that writes into the working tree on its
+  // own initiative; the DSH arms are bounded by their own profiles.
+  const watched = arms.includes('agent') ? untrackedSnapshot() : null
 
   mkdirSync(WORK, { recursive: true })
   const results = []
@@ -782,7 +1193,7 @@ async function main() {
     for (const arm of arms) {
       // Every attempt starts from nothing: an artifact left by the previous arm
       // must never be able to pass the next one's oracle.
-      for (const leftover of ['t1.txt', 't3.txt', 't4.txt', 't5.txt', 't6.txt', 't8.txt']) {
+      for (const leftover of ['t1.txt', 't3.txt', 't4.txt', 't5.txt', 't6.txt', 't8.txt', 't10.txt', 't11.json']) {
         rmSync(path.join(WORK, leftover), { force: true })
       }
       spawnSync('powershell', ['-NoProfile', '-Command', 'Set-Clipboard -Value ""'], { timeout: 15_000 })
@@ -797,6 +1208,13 @@ async function main() {
   writeFileSync(report, JSON.stringify(results, null, 2), 'utf8')
   // A comparison run must not leave the machine changed for the next one.
   killByName(['notepad', 'CalculatorApp', 'Calculator', 'chrome', 'msedge'])
+  // The agent arm owns one runtime for the round; leaving it up would hold the
+  // port against the next run and against the `web` profile's sidecar.
+  if (agentRuntime) {
+    await agentRuntime.sidecar.stop()
+    agentRuntime = null
+  }
+  if (watched) removeNewUntracked(watched)
   console.log('\n=== summary ===')
   for (const arm of arms) {
     const rows = results.filter((row) => row.arm === arm)

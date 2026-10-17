@@ -175,6 +175,197 @@ A 臂两轮几乎一致（106 → 102），C 臂波动较大（190 → 230）。
 2. `terminate_app` 上 **cua 更省**（5 对 6 步）。原本也预期 cua 缺一等 `kill_app` 会吃亏——没有。
 3. 合起来：**cua 的真实能力比交接文档描述的更强**。我之前那句"能力面是互补的"方向对，但当时仍低估了它。
 
+## 第五轮：第三条臂 —— 原自研 agent 直连 runtime（2026-10-17）
+
+前四轮的两条臂**跑在同一个 agent loop 里**（都是 `dsh-base` + `dsh-headless`，
+见两个 profile 的 `package.json`），所以 12/12 对 11/12 量的是**工具层**，
+**从来没有量过本仓库自己的 agent**。
+
+这一轮补上了第三条臂：`--arm agent` 不走 DSH，直接
+`POST /api/v2/goals/runs` + 轮询 `/api/v2/runs/{id}`，oracle 原样复用。
+
+| 臂 | 通过 | 模型步数 | tokens | 墙钟 |
+|---|---|---|---|---|
+| lingdong | **12/12** | 178 | 6,739,075 | 745s |
+| cua | **12/12** | 273 | 14,119,687 | 1193s |
+| **agent（原自研）** | **10/12** | **220** | **3,726,867** | 1228s |
+
+**原 agent 用比两条 DSH 臂都少的 tokens 拿到 10/12，步数夹在两者之间。**
+逐任务它**大多数更省**（`read_target_text` 3 对 7、`read_target_pixels` 3 对 7、
+`menu_path` 4 对 7、`browser_confirm` 5 对 9、`notepad_save` 8 对 20），
+因为固定前缀 9k 对 27.6k / 51.4k。**它的问题是重尾**：
+`calculator_clipboard` 89 步被取消、`terminate_app` 61 步 / 423s 勉强成功。
+
+### 第二轮与两轮合并（稳定性）
+
+第二轮（agent 臂单独重跑，`report-1792202996686.json`）：
+
+| | 通过 | 步数 | tokens |
+|---|---|---|---|
+| agent 第 1 轮 | 10/12 | 220 | 3,726,867 |
+| agent 第 2 轮 | **10/12** | **151** | **3,427,569** |
+
+**两轮 20/24，逐任务判定完全一致 —— 没有一个任务在轮次之间翻转。**
+
+| 任务 | 第 1 轮 | 第 2 轮 |
+|---|---|---|
+| `shell_control` | PASS 4 | PASS 5 |
+| `notepad_save` | PASS 8 | PASS 8 |
+| `calculator_clipboard` | **FAIL 89** | **FAIL 38** |
+| `read_target_text` | PASS 3 | PASS 3 |
+| `read_target_pixels` | PASS 3 | PASS 3 |
+| `fill_form` | PASS 10 | PASS 9 |
+| `browser_confirm` | PASS 5 | PASS 11 |
+| `window_frame` | **FAIL 5** | **FAIL 7** |
+| `menu_path` | PASS 4 | PASS 5 |
+| `terminate_app` | PASS 61 | PASS 44 |
+| `browser_session` | PASS 20 | PASS 11 |
+| `browser_drag` | PASS 8 | PASS 7 |
+
+读多轮用 `node packages/dsh-plugin-lingdong/e2e/compare.mjs`。
+
+### `window_frame` 不是模型失败：是 `run_shell` 子进程的 DPI 缺陷（已用对照实验证明）
+
+两轮都得到**逐像素相同**的错答案：求 `200,150 640x480`，得 `250,188 800x600`。
+四个数字**各自恰好 ×1.25**（`200×1.25=250`、`150×1.25=187.5≈188`、`640×1.25=800`、`480×1.25=600`），
+而这台机器的显示缩放正是 125%。
+
+`e2e/probe-shell-dpi.mjs` 用**同一个窗口、同一次 `MoveWindow`、唯一的差别是 DPI 声明**做对照：
+
+```
+dpi-UNAWARE shell -> {"x":250,"y":188,"width":800,"height":600}  SCALED x1.25
+dpi-AWARE   shell -> {"x":200,"y":150,"width":640,"height":480}  EXACT
+```
+
+**结论：agent 的请求是对的，是它借道的那条 shell 把坐标放大了。**
+`action/shell.py` 里没有任何 `SetProcessDpiAwarenessContext`，
+于是 DPI 不感知的 PowerShell 子进程交给 `MoveWindow` 的坐标被 Windows 虚拟化了。
+这正是 `AGENTS.md` 坑位 #1 描述的那一类，只是这次受害者不是 oracle，是 agent 自己的动作。
+
+所以 `window_frame` 应当从"模型能力问题"改判为"机械层缺陷"。
+按根 `AGENTS.md` 的判据（"先假设模型是对的，是机器说了谎"），**这条属于必须先修的基础**。
+
+### 失败面如实记录
+
+- `calculator_clipboard`：89 步仍在循环，422s 被 harness 取消。首轮更大的一轮里
+  同一条 trace 是 **106 次逐字相同的 `input_sequence`**、**111 条回执全是 `applied`**、
+  `target_hwnd=0`。机械层每次都说"已投递"，模型手上没有任何"你已经原样重复 N 次"的事实。
+- `window_frame`：5 步得到 **250,188 800x600**（自己写 `movewin.ps1` 调 `MoveWindow`），
+  然后报 `mission_verified`。求的是 `200,150 640x480`。**这是一条"假成功"**。
+
+### 必须作废的一轮
+
+同一臂**第一次**跑出 `3/12`，那个数字是**错的、已作废**：harness 420s 超时后没有取消 run，
+agent 继续在跑，而下一个任务已经提交 —— 后面的任务是在上一条目标还在操作的桌面上判定的。
+trace 时间戳为证：`read_target_text` 07:52 开始、08:52 落盘；`menu_path` 08:44 开始、09:22 落盘。
+修复（超时即 `cancel` + 等 `/api/status` 空闲）后重跑，同一任务从"超时失败"变成 **3 步通过**。
+**不要引用 3/12。**
+
+### 结论边界
+
+- 原 agent 用 `mimo-v2.6-flash`，两条 DSH 臂用 `deepseek-flash`：**这是整栈对比，不是纯 agent 对比。**
+- 原 agent 只有 1 轮；`calculator_clipboard` 与 `terminate_app` 的高方差说明单轮不够。
+- `window_frame` 本轮 **cua 也通过了** —— 第 4 轮那条"cua 唯一失败项、四次全败"**没有复现**。
+  进一步说明那条差异不是稳定的能力差。
+- agent 臂会**往工作树里写 .ps1**（本轮留下 `movewin.ps1`、`enum_notepad.ps1`），
+  harness 已加"只删除本轮新出现的未跟踪文件"的清理。
+
+## 第六轮：补两个跨应用任务，原 agent 在这一类上直接崩
+
+原有 12 个任务全是**单应用、目标完全给定、单结果**，量不出文档自己承认的缺口
+（"真实软件缺口仍在多应用长程任务"，`history:1408-1409`）。本轮补两个：
+
+| 任务 | 为什么这样设计 | oracle |
+|---|---|---|
+| `cross_app_pipeline` | 答案必须在 **Calculator** 里产生、被带出应用、落进 **Notepad** 再存盘 | 文件字节 == 本次随机算式的积（**随机操作数**，不能靠记住 731 通过） |
+| `cross_window_token` | 值在 **LD Target** 里，要打进 **LD Form** 并提交 → 必须跨一次焦点切换 | 表单自报的 `name` == 本次铸的 token（goal 里**不含**这个值） |
+
+两个任务先在插件臂上验证成立，再拿另两条臂打（每条臂每个任务 1 次，探针级）：
+
+| 任务 | lingdong | cua | agent |
+|---|---|---|---|
+| `cross_window_token` | **PASS 28 步 / 84s** | **PASS 34 步 / 101s** | **FAIL 86 步 / 423s / 2.31M tokens** |
+| `cross_app_pipeline` | **PASS 22 步 / 67s** | **PASS 51 步 / 117s** | **FAIL 88 步 / 425s / 1.14M tokens** |
+
+**两条 DSH 臂都通过，原 agent 两个都超时、都跑了 86–88 步。** 这不是"慢一点"，是**卡住** ——
+它的步数是两条 DSH 臂的 2–4 倍，而完成的活是零。
+
+### 这条数据把诊断收窄了
+
+把三批数据并起来看，原 agent 的失败是**同一个形状**：
+
+| 任务 | 要不要把一个值带过边界 | 结果 |
+|---|---|---|
+| `notepad_save` / `fill_form` / `read_target_*` | 不需要 | 3–10 步通过 |
+| `calculator_clipboard` | 要把结果读回来 | 两轮都 FAIL，38 / 89 步 |
+| `cross_window_token` | 要把 token 带到另一个窗口 | FAIL 86 步 |
+| `cross_app_pipeline` | 要把积带出计算器 | FAIL 88 步 |
+
+**凡是"值必须跨过一道边界"的任务，它都会循环到超时；凡是边界内自洽的任务，它比插件臂更快。**
+所以真正的描述不是"长程能力弱"，而是**"跨边界的状态传递缺失"** ——
+这正好落在第二节那几件机械事实上（重复不可见、回执不说打到了什么）。
+
+### 结论边界
+
+- 这两个任务**每个只跑了 1 次 / 1 条臂**，是探针级证据，不是率。
+- `cross_app_pipeline` 的跨应用要求是**软**的：模型自己心算也能得到正确积。
+  它仍然必须把值带进另一个应用并正确存盘，但"必须用 Calculator"没有被强制。
+- 两个任务的 agent 臂都是被 420s 上限取消的，不是自己放弃。
+  它们在取消前分别跑了 86 / 88 步。
+
+## 第七轮：修掉三条实测缺陷之后（2026-10-17，agent 臂，14 任务一轮）
+
+改了四处（详见 `AGENT-ROADMAP.md` 第五节）：
+
+1. `action/shell.py` 的 PowerShell 前导声明 DPI 感知
+2. `visual_actor.py` 的 shell 工具补一条工具事实（命令已在 PowerShell 内，嵌套会丢状态）
+3. `mission/contracts.py` + `runtime/contracts.py` + `mission_runtime.py`：
+   `same_action_attempts`（同一动作本任务内已尝试几次，累计而非连续）
+4. `window_frame` 的 oracle 改成接受 `GetWindowRect` 与 DWM 外框两种约定
+
+结果：**agent 10/14，240 步，3,448,700 tokens，1868s**。
+
+### 和修之前的 12 任务轮对比
+
+| 任务 | 修前（两轮） | 修后 |
+|---|---|---|
+| `shell_control` | PASS 4 / 5 | PASS 5 |
+| `notepad_save` | PASS 8 / 8 | PASS 7 |
+| `calculator_clipboard` | **FAIL 89 / 38** | **FAIL 38** |
+| `read_target_text` | PASS 3 / 3 | PASS 4 |
+| `read_target_pixels` | PASS 3 / 3 | PASS 3 |
+| `fill_form` | PASS 10 / 9 | **FAIL 8**（表单没提交） |
+| `browser_confirm` | PASS 5 / 11 | PASS 7 |
+| `window_frame` | **FAIL 5 / 7** | **PASS 4** |
+| `menu_path` | PASS 4 / 5 | PASS 5 |
+| `terminate_app` | PASS 61 / 44 | **PASS 3** |
+| `browser_session` | PASS 20 / 11 | PASS 13 |
+| `browser_drag` | PASS 8 / 7 | PASS 6 |
+| `cross_app_pipeline` | FAIL（探针 88 步） | **FAIL 61** |
+| `cross_window_token` | FAIL（探针 86 步） | **FAIL 76** |
+
+### 结论：完成率没有变好
+
+- **旧 12 任务上：修后 9/12，修前 10/12。** `window_frame` 拿回来了，`fill_form` 掉了，
+  净值为零甚至略负。**不能宣称"完成率提升了"。**
+- 两个跨边界任务仍然两轮都失败，`calculator` 仍然失败。
+
+### 但有三条是真实的
+
+1. **`window_frame` 从"两轮都错、错得一模一样"变成 PASS。** 那条 ×1.25 是机器说谎，
+   已用对照实验钉死并修掉。
+2. **`terminate_app` 从 61 / 44 步降到 3 步。** 同一个任务，同样通过，成本降一个数量级。
+3. **`calculator` 出现过一次 8 步通过**（单独跑时模型改用 `type_text` 输入算式），
+   但同一天全量轮里又回到 38 步失败。**一条机械事实能改变策略选择，不能保证每次都改。**
+
+### 结论边界
+
+- 这是修复后**第一轮**，且 `fill_form` 此前两轮都通过 → 它很可能是方差，不是回归。
+  要判定必须再跑两轮（`compare.mjs` 已备好）。
+- 14 个任务里有 2 个（跨应用）此前只有探针级 1 次数据。
+- 修 DPI 的代价是 **+199 ms / 次 shell 调用**，已实测；本轮 `terminate_app` 反而快了，
+  说明该代价被行为改善盖过，但**没有逐任务隔离过**。
+
 ## 原始记录
 
 `output/e2e/report-<ts>.json`：每任务 step 数 / tokens / 耗时 / oracle 判定 / agent 事件流 / stderr。`output/` 已 gitignore。
